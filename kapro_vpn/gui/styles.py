@@ -1,182 +1,278 @@
-"""Dark theme stylesheet for the app."""
+"""Application-wide dark theme with amber accent (AmneziaVPN-inspired)."""
 
-DARK_QSS = """
-* {
+# Palette — keep these in sync with QSS below if you change them.
+BG = "#0e0e10"
+SURFACE = "#18181b"
+SURFACE_HI = "#27272a"
+BORDER = "#2a2a2d"
+TEXT = "#fafafa"
+TEXT_MUTED = "#a1a1aa"
+TEXT_DIM = "#71717a"
+ACCENT = "#f59e0b"           # amber-500
+ACCENT_HI = "#fbbf24"        # amber-400
+ACCENT_DIM = "#78350f"       # amber-900
+DANGER = "#ef4444"
+
+DARK_QSS = f"""
+* {{
     font-family: "Segoe UI", "Inter", sans-serif;
     font-size: 10pt;
-    color: #e4e4e7;
-}
+    color: {TEXT};
+}}
 
-QMainWindow, QDialog {
-    background-color: #18181b;
-}
+QMainWindow, QDialog, QWidget#page {{
+    background-color: {BG};
+}}
 
-QLabel {
-    color: #e4e4e7;
-}
+/* --- generic text helpers --- */
 
-QLabel#statusBadge, QLabel#statusBadgeOn, QLabel#statusBadgeOff {
-    padding: 4px 12px;
-    border-radius: 10px;
-    font-weight: 600;
-    font-size: 9pt;
-}
+QLabel#h1   {{ font-size: 18pt; font-weight: 600; }}
+QLabel#h2   {{ font-size: 13pt; font-weight: 600; }}
+QLabel#muted {{ color: {TEXT_MUTED}; font-size: 9pt; }}
+QLabel#dim  {{ color: {TEXT_DIM};  font-size: 9pt; }}
 
-QLabel#statusBadgeOn {
-    background-color: #14532d;
-    color: #86efac;
-}
+/* --- buttons --- */
 
-QLabel#statusBadgeOff {
-    background-color: #3f3f46;
-    color: #a1a1aa;
-}
-
-QLabel#sectionTitle {
-    font-size: 11pt;
-    font-weight: 600;
-    color: #f4f4f5;
-    padding-top: 4px;
-}
-
-QLabel#muted {
-    color: #71717a;
-    font-size: 9pt;
-}
-
-QPushButton {
-    background-color: #27272a;
-    color: #f4f4f5;
-    border: 1px solid #3f3f46;
-    border-radius: 6px;
-    padding: 6px 14px;
+QPushButton {{
+    background-color: {SURFACE_HI};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 8px 16px;
     font-weight: 500;
-}
+}}
 
-QPushButton:hover {
-    background-color: #3f3f46;
-    border-color: #52525b;
-}
+QPushButton:hover {{
+    background-color: #3a3a3d;
+}}
 
-QPushButton:pressed {
+QPushButton:pressed {{
     background-color: #18181b;
-}
+}}
 
-QPushButton:disabled {
-    color: #52525b;
-    background-color: #1f1f23;
-    border-color: #27272a;
-}
+QPushButton:disabled {{
+    color: {TEXT_DIM};
+    background-color: {SURFACE};
+    border-color: {BORDER};
+}}
 
-QPushButton#primary {
-    background-color: #16a34a;
-    color: white;
+QPushButton#primary {{
+    background-color: {ACCENT};
+    color: #1a1209;
     border: none;
-}
+}}
 
-QPushButton#primary:hover {
-    background-color: #15803d;
-}
+QPushButton#primary:hover {{
+    background-color: {ACCENT_HI};
+}}
 
-QPushButton#primary:pressed {
-    background-color: #166534;
-}
+QPushButton#danger {{
+    background-color: transparent;
+    color: {DANGER};
+    border: 1px solid {DANGER};
+}}
 
-QPushButton#danger {
-    background-color: #dc2626;
-    color: white;
+QPushButton#danger:hover {{
+    background-color: rgba(239, 68, 68, 0.1);
+}}
+
+/* --- circular connect button --- */
+
+QPushButton#circleBtn {{
+    background-color: transparent;
+    border: 3px solid {BORDER};
+    border-radius: 115px;        /* must equal width/2 = height/2 */
+    min-width: 230px; max-width: 230px;
+    min-height: 230px; max-height: 230px;
+    color: {TEXT_MUTED};
+    font-size: 16pt;
+    font-weight: 600;
+    letter-spacing: 2px;
+}}
+
+QPushButton#circleBtn:hover {{
+    border-color: {TEXT_MUTED};
+    color: {TEXT};
+}}
+
+QPushButton#circleBtn[state="connecting"] {{
+    border-color: {ACCENT_DIM};
+    color: {ACCENT};
+}}
+
+QPushButton#circleBtn[state="connected"] {{
+    border-color: {ACCENT};
+    color: {ACCENT};
+}}
+
+/* --- icon buttons (nav bar, card chevron) --- */
+
+QPushButton#iconBtn {{
+    background-color: transparent;
     border: none;
-}
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 16pt;
+    color: {TEXT_MUTED};
+    min-width: 48px;
+}}
 
-QPushButton#danger:hover {
-    background-color: #b91c1c;
-}
+QPushButton#iconBtn:hover {{
+    background-color: {SURFACE_HI};
+    color: {TEXT};
+}}
 
-QListWidget, QTextEdit, QPlainTextEdit, QLineEdit {
-    background-color: #0a0a0a;
-    border: 1px solid #27272a;
-    border-radius: 6px;
+QPushButton#iconBtn[active="true"] {{
+    color: {ACCENT};
+}}
+
+/* --- active config card on home --- */
+
+QFrame#configCard {{
+    background-color: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+}}
+
+QFrame#configCard:hover {{
+    border-color: {ACCENT_DIM};
+}}
+
+QFrame#configCard QLabel#cardTitle {{
+    font-size: 13pt;
+    font-weight: 600;
+}}
+
+QFrame#configCard QLabel#cardSub {{
+    color: {TEXT_DIM};
+    font-size: 9pt;
+}}
+
+QFrame#configCard QLabel#cardBadge {{
+    background-color: {SURFACE_HI};
+    color: {TEXT_MUTED};
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 9pt;
+    font-weight: 500;
+}}
+
+/* --- list widget (configs page) --- */
+
+QListWidget {{
+    background-color: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
     padding: 4px;
-    selection-background-color: #16a34a;
-    selection-color: white;
-}
+    outline: 0;
+}}
 
-QListWidget::item {
-    padding: 8px;
-    border-bottom: 1px solid #1f1f23;
-}
+QListWidget::item {{
+    padding: 12px;
+    border-radius: 6px;
+    margin: 2px;
+}}
 
-QListWidget::item:selected {
-    background-color: #1c2a1f;
-    color: #86efac;
-}
+QListWidget::item:selected {{
+    background-color: {ACCENT_DIM};
+    color: {ACCENT_HI};
+}}
 
-QListWidget::item:hover {
-    background-color: #1f1f23;
-}
+QListWidget::item:hover:!selected {{
+    background-color: {SURFACE_HI};
+}}
 
-QTextEdit, QPlainTextEdit {
+/* --- inputs --- */
+
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox {{
+    background-color: {SURFACE};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 8px 12px;
+    selection-background-color: {ACCENT};
+    selection-color: #1a1209;
+}}
+
+QPlainTextEdit, QTextEdit {{
     font-family: "Cascadia Mono", "Consolas", monospace;
     font-size: 9pt;
-}
+}}
 
-QLineEdit {
-    padding: 6px 10px;
-}
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus {{
+    border-color: {ACCENT};
+}}
 
-QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
-    border-color: #16a34a;
-}
+/* --- checkbox --- */
 
-QGroupBox {
-    border: 1px solid #27272a;
-    border-radius: 6px;
-    margin-top: 12px;
-    padding-top: 14px;
-}
+QCheckBox {{
+    spacing: 8px;
+}}
 
-QGroupBox::title {
-    color: #a1a1aa;
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    padding: 0 8px;
-}
+QCheckBox::indicator {{
+    width: 18px; height: 18px;
+    border-radius: 4px;
+    border: 1px solid {BORDER};
+    background-color: {SURFACE};
+}}
 
-QMenuBar {
-    background-color: #18181b;
-    border-bottom: 1px solid #27272a;
-}
+QCheckBox::indicator:checked {{
+    background-color: {ACCENT};
+    border-color: {ACCENT};
+}}
 
-QMenuBar::item:selected {
-    background-color: #27272a;
-}
+/* --- menus --- */
 
-QMenu {
-    background-color: #27272a;
-    border: 1px solid #3f3f46;
-}
+QMenuBar {{
+    background-color: {BG};
+    border-bottom: 1px solid {BORDER};
+}}
 
-QMenu::item:selected {
-    background-color: #16a34a;
-}
+QMenuBar::item:selected {{
+    background-color: {SURFACE_HI};
+}}
 
-QScrollBar:vertical {
-    background: #18181b;
-    width: 10px;
+QMenu {{
+    background-color: {SURFACE_HI};
+    border: 1px solid {BORDER};
+    padding: 4px;
+}}
+
+QMenu::item {{
+    padding: 6px 16px;
+    border-radius: 4px;
+}}
+
+QMenu::item:selected {{
+    background-color: {ACCENT_DIM};
+    color: {ACCENT};
+}}
+
+/* --- scrollbars --- */
+
+QScrollBar:vertical {{
+    background: transparent;
+    width: 8px;
     border: none;
-}
+}}
 
-QScrollBar::handle:vertical {
-    background: #3f3f46;
-    border-radius: 5px;
-    min-height: 20px;
-}
+QScrollBar::handle:vertical {{
+    background: {BORDER};
+    border-radius: 4px;
+    min-height: 24px;
+}}
 
-QScrollBar::handle:vertical:hover {
-    background: #52525b;
-}
+QScrollBar::handle:vertical:hover {{
+    background: {TEXT_DIM};
+}}
 
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0;
-}
+}}
+
+/* --- separator --- */
+
+QFrame[frameShape="4"] {{      /* HLine */
+    color: {BORDER};
+    max-height: 1px;
+}}
 """

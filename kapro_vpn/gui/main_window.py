@@ -1,33 +1,258 @@
-"""Main application window."""
+"""Main application window — compact, mobile-app-style single-screen layout."""
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QFileDialog,
+    QCheckBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QSplitter,
+    QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from ..core import storage
+from .. import __version__
+from ..core import singbox_installer, storage
 from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
 from ..core.parser import ProxyConfig
 from .config_dialog import AddConfigDialog
+from .configs_picker import ConfigsPickerDialog
 from .installer_dialog import ensure_singbox_installed
 from .sites_dialog import SitesDialog
+from .widgets import CircleConnectButton, ConfigCard, NavBar, StatusLabel
 
+
+# ----- Pages ---------------------------------------------------------------
+
+class HomePage(QWidget):
+    """Connect circle + active config card."""
+
+    connect_clicked = Signal()
+    card_clicked = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("page")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 16, 24, 16)
+        layout.setSpacing(0)
+
+        # Title
+        title = QLabel("KaproVPN")
+        title.setObjectName("h1")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+
+        layout.addStretch(1)
+
+        # Connect button — centered with surrounding stretchers
+        self.circle = CircleConnectButton()
+        self.circle.clicked.connect(self.connect_clicked)
+        circle_row = QHBoxLayout()
+        circle_row.addStretch(1)
+        circle_row.addWidget(self.circle)
+        circle_row.addStretch(1)
+        layout.addLayout(circle_row)
+        layout.addSpacing(20)
+
+        self.status_label = StatusLabel()
+        layout.addWidget(self.status_label)
+
+        layout.addStretch(1)
+
+        # Info row about split routing
+        self._info_label = QLabel()
+        self._info_label.setAlignment(Qt.AlignCenter)
+        self._info_label.setTextFormat(Qt.RichText)
+        self.refresh_sites_count()
+        layout.addWidget(self._info_label)
+        layout.addSpacing(12)
+
+        # Active config card
+        self.config_card = ConfigCard()
+        self.config_card.clicked.connect(self.card_clicked)
+        layout.addWidget(self.config_card)
+
+    def set_state(self, state: str, detail: str = "") -> None:
+        self.circle.set_state(state)
+        self.status_label.set_state(state, detail)
+
+    def set_config(self, cfg: Optional[ProxyConfig]) -> None:
+        self.config_card.set_config(cfg)
+
+    def refresh_sites_count(self) -> None:
+        sites_count = len(storage.load_sites())
+        self._info_label.setText(
+            f"<span style='color:#a1a1aa'>Российские сайты — </span>"
+            f"<span style='color:#fafafa'>{sites_count}</span> "
+            f"<span style='color:#a1a1aa'>доменов идут напрямую</span>"
+        )
+
+
+class SettingsPage(QWidget):
+    """Listen port, auto-proxy toggle, sites editor link, log viewer, about."""
+
+    sites_clicked = Signal()
+    logs_clicked = Signal()
+    settings_changed = Signal()
+
+    def __init__(self, manager: ConnectionManager, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("page")
+        self._manager = manager
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 20, 24, 16)
+        outer.setSpacing(14)
+
+        title = QLabel("Настройки")
+        title.setObjectName("h1")
+        outer.addWidget(title)
+
+        # --- Port ---
+        port_block = QVBoxLayout()
+        port_block.setSpacing(4)
+        port_label = QLabel("Порт локального прокси")
+        port_block.addWidget(port_label)
+        self.port_spin = QSpinBox()
+        self.port_spin.setRange(1024, 65535)
+        self.port_spin.setValue(int(manager.settings.get("listen_port", 2080)))
+        self.port_spin.valueChanged.connect(self._on_port_changed)
+        port_block.addWidget(self.port_spin)
+        port_hint = QLabel("Браузер должен ходить на 127.0.0.1:<этот порт>")
+        port_hint.setObjectName("dim")
+        port_block.addWidget(port_hint)
+        outer.addLayout(port_block)
+
+        # --- Auto system proxy ---
+        self.auto_proxy_check = QCheckBox(
+            "Автоматически ставить системный прокси Windows"
+        )
+        self.auto_proxy_check.setChecked(
+            bool(manager.settings.get("auto_set_system_proxy", True))
+        )
+        self.auto_proxy_check.toggled.connect(self._on_auto_proxy_changed)
+        outer.addWidget(self.auto_proxy_check)
+
+        # Separator
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        outer.addWidget(sep)
+
+        # --- Sites editor link ---
+        sites_row, self._sites_count_label = self._make_link_row(
+            "Российские сайты (всегда напрямую)",
+            f"{len(storage.load_sites())} доменов",
+            self.sites_clicked.emit,
+        )
+        outer.addLayout(sites_row)
+
+        # --- Logs viewer link ---
+        logs_row, _ = self._make_link_row(
+            "Логи sing-box",
+            "посмотреть последние строки",
+            self.logs_clicked.emit,
+        )
+        outer.addLayout(logs_row)
+
+        outer.addStretch(1)
+
+        # --- About ---
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        outer.addWidget(sep2)
+
+        sb_version = singbox_installer.get_installed_version() or "не установлен"
+        about = QLabel(
+            f"<div style='color:#fafafa; font-weight:600'>KaproVPN v{__version__}</div>"
+            f"<div style='color:#71717a; font-size:9pt'>sing-box: {sb_version}</div>"
+            f"<div style='color:#71717a; font-size:9pt'>GPL v3 · "
+            f"<a href='https://github.com/fafnirov/KaproVPN' style='color:#f59e0b'>"
+            f"github.com/fafnirov/KaproVPN</a></div>"
+        )
+        about.setOpenExternalLinks(True)
+        about.setTextFormat(Qt.RichText)
+        outer.addWidget(about)
+
+    def _make_link_row(self, title: str, hint: str, on_click) -> tuple[QHBoxLayout, QLabel]:
+        """Title + hint on the left, action button on the right. Returns (layout, hint_label)."""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        text_block = QVBoxLayout()
+        text_block.setSpacing(2)
+        text_block.addWidget(QLabel(title))
+        hint_lbl = QLabel(hint)
+        hint_lbl.setObjectName("dim")
+        text_block.addWidget(hint_lbl)
+        row.addLayout(text_block, stretch=1)
+        btn = QPushButton("Открыть")
+        btn.clicked.connect(on_click)
+        row.addWidget(btn)
+        return row, hint_lbl
+
+    def refresh_sites_count(self) -> None:
+        if self._sites_count_label is not None:
+            self._sites_count_label.setText(f"{len(storage.load_sites())} доменов")
+
+    def _on_port_changed(self, value: int) -> None:
+        self._manager.update_settings(listen_port=int(value))
+        self.settings_changed.emit()
+
+    def _on_auto_proxy_changed(self, checked: bool) -> None:
+        self._manager.update_settings(auto_set_system_proxy=checked)
+        self.settings_changed.emit()
+
+
+class LogsPage(QWidget):
+    """Read-only viewer for sing-box logs."""
+
+    back_clicked = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("page")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        back_btn = QPushButton("← Назад")
+        back_btn.clicked.connect(self.back_clicked)
+        header.addWidget(back_btn)
+        header.addStretch(1)
+        clear_btn = QPushButton("Очистить")
+        clear_btn.clicked.connect(self._on_clear)
+        header.addWidget(clear_btn)
+        layout.addLayout(header)
+
+        title = QLabel("Логи sing-box")
+        title.setObjectName("h2")
+        layout.addWidget(title)
+
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(5000)
+        layout.addWidget(self.log_view, stretch=1)
+
+    def append(self, line: str) -> None:
+        self.log_view.appendPlainText(line)
+
+    def _on_clear(self) -> None:
+        self.log_view.clear()
+
+
+# ----- Main window ---------------------------------------------------------
 
 class MainWindow(QMainWindow):
     log_received = Signal(str)
@@ -35,284 +260,182 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("KaproVPN")
-        self.resize(820, 620)
+        self.setFixedSize(420, 740)
 
         self.manager = ConnectionManager(on_log=self.log_received.emit)
         self.configs: list[ProxyConfig] = storage.load_configs()
+        self._active_config: Optional[ProxyConfig] = self._restore_last_config()
+        self._connected_at: float = 0.0
 
-        self._build_ui()
-        self._build_menu()
-        self._refresh_config_list()
-        self._refresh_status()
-
-        self.log_received.connect(self._append_log_line)
-
-        # Health-check timer: sing-box might crash; reflect that in UI.
-        self._poll = QTimer(self)
-        self._poll.timeout.connect(self._refresh_status)
-        self._poll.start(2000)
-
-    # --- UI construction --------------------------------------------------
-
-    def _build_ui(self) -> None:
+        # --- Layout: stacked pages + nav bar ---
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(12)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Status header
-        status_row = QHBoxLayout()
-        self.status_badge = QLabel("● Отключено")
-        self.status_badge.setObjectName("statusBadge")
-        self.status_badge.setProperty("class", "off")
-        status_row.addWidget(self.status_badge)
+        self.stack = QStackedWidget()
+        self.home_page = HomePage()
+        self.settings_page = SettingsPage(self.manager)
+        self.logs_page = LogsPage()
+        self.stack.addWidget(self.home_page)     # index 0
+        self.stack.addWidget(self.settings_page) # index 1
+        self.stack.addWidget(self.logs_page)     # index 2
+        root.addWidget(self.stack, stretch=1)
 
-        self.status_detail = QLabel("")
-        self.status_detail.setObjectName("muted")
-        status_row.addWidget(self.status_detail)
-        status_row.addStretch(1)
-        root.addLayout(status_row)
+        nav_sep = QFrame()
+        nav_sep.setFrameShape(QFrame.HLine)
+        root.addWidget(nav_sep)
 
-        # Splitter: configs+actions on top, logs below
-        splitter = QSplitter(Qt.Vertical)
+        self.nav = NavBar()
+        root.addWidget(self.nav)
 
-        top = QWidget()
-        top_layout = QVBoxLayout(top)
-        top_layout.setContentsMargins(0, 0, 0, 0)
+        self._wire_signals()
+        self._refresh_home()
+        self.nav.set_active("home")
 
-        title = QLabel("Конфиги")
-        title.setObjectName("sectionTitle")
-        top_layout.addWidget(title)
+        # Periodic status refresh — detects subprocess crashes and updates timer
+        self._poll = QTimer(self)
+        self._poll.timeout.connect(self._refresh_home)
+        self._poll.start(1000)
 
-        self.config_list = QListWidget()
-        self.config_list.itemDoubleClicked.connect(self._on_connect)
-        top_layout.addWidget(self.config_list, stretch=1)
+    # --- wiring -----------------------------------------------------------
 
-        config_buttons = QHBoxLayout()
-        add_btn = QPushButton("+ Добавить")
-        add_btn.clicked.connect(self._on_add_config)
-        remove_btn = QPushButton("Удалить")
-        remove_btn.clicked.connect(self._on_remove_config)
-        config_buttons.addWidget(add_btn)
-        config_buttons.addWidget(remove_btn)
-        config_buttons.addStretch(1)
+    def _wire_signals(self) -> None:
+        self.home_page.connect_clicked.connect(self._on_connect_click)
+        self.home_page.card_clicked.connect(self._on_open_picker)
+        self.settings_page.sites_clicked.connect(self._on_edit_sites)
+        self.settings_page.logs_clicked.connect(lambda: self.stack.setCurrentIndex(2))
+        self.logs_page.back_clicked.connect(lambda: self._goto("settings"))
+        self.nav.home_clicked.connect(lambda: self._goto("home"))
+        self.nav.settings_clicked.connect(lambda: self._goto("settings"))
+        self.nav.add_clicked.connect(self._on_add_config)
+        self.log_received.connect(self.logs_page.append)
 
-        sites_btn = QPushButton("Российские сайты...")
-        sites_btn.clicked.connect(self._on_edit_sites)
-        config_buttons.addWidget(sites_btn)
-        top_layout.addLayout(config_buttons)
+    def _goto(self, name: str) -> None:
+        if name == "home":
+            self.stack.setCurrentIndex(0)
+            self.nav.set_active("home")
+        elif name == "settings":
+            self.stack.setCurrentIndex(1)
+            self.nav.set_active("settings")
 
-        actions_row = QHBoxLayout()
-        self.connect_btn = QPushButton("Подключить")
-        self.connect_btn.setObjectName("primary")
-        self.connect_btn.clicked.connect(self._on_connect)
+    # --- state helpers ----------------------------------------------------
 
-        self.disconnect_btn = QPushButton("Отключить")
-        self.disconnect_btn.setObjectName("danger")
-        self.disconnect_btn.clicked.connect(self._on_disconnect)
-        self.disconnect_btn.setEnabled(False)
+    def _restore_last_config(self) -> Optional[ProxyConfig]:
+        last = self.manager.settings.get("last_config_name", "")
+        if not last:
+            return self.configs[0] if self.configs else None
+        for c in self.configs:
+            if c.name == last:
+                return c
+        return self.configs[0] if self.configs else None
 
-        actions_row.addWidget(self.connect_btn)
-        actions_row.addWidget(self.disconnect_btn)
-        actions_row.addStretch(1)
-        top_layout.addLayout(actions_row)
+    def _refresh_home(self) -> None:
+        # Detect external crash
+        if self.manager._active is not None and not self.manager.process.is_running():
+            self.logs_page.append(
+                f"[!] sing-box завершился неожиданно "
+                f"(код {self.manager.process.returncode()}). Отключаюсь."
+            )
+            self.manager.disconnect()
+            self._connected_at = 0.0
 
-        splitter.addWidget(top)
-
-        # Log panel
-        bottom = QWidget()
-        bottom_layout = QVBoxLayout(bottom)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        log_title = QLabel("Логи sing-box")
-        log_title.setObjectName("sectionTitle")
-        bottom_layout.addWidget(log_title)
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(2000)
-        bottom_layout.addWidget(self.log_view, stretch=1)
-        splitter.addWidget(bottom)
-
-        splitter.setSizes([380, 180])
-        root.addWidget(splitter, stretch=1)
-
-    def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("Файл")
-
-        import_action = QAction("Импорт из файла...", self)
-        import_action.triggered.connect(self._on_import_file)
-        file_menu.addAction(import_action)
-
-        file_menu.addSeparator()
-        exit_action = QAction("Выход", self)
-        exit_action.triggered.connect(self.close)
-        file_menu.addAction(exit_action)
-
-        help_menu = self.menuBar().addMenu("Помощь")
-        about_action = QAction("О программе", self)
-        about_action.triggered.connect(self._on_about)
-        help_menu.addAction(about_action)
-
-    # --- list helpers -----------------------------------------------------
-
-    def _refresh_config_list(self) -> None:
-        self.config_list.clear()
-        for cfg in self.configs:
-            srv = cfg.outbound.get("server", "?")
-            port = cfg.outbound.get("server_port", "?")
-            item = QListWidgetItem(f"{cfg.name}   ·   {cfg.protocol}   ·   {srv}:{port}")
-            item.setData(Qt.UserRole, cfg)
-            self.config_list.addItem(item)
-
-        # Restore last selection if any
-        last_name = self.manager.settings.get("last_config_name", "")
-        if last_name:
-            for i in range(self.config_list.count()):
-                if self.configs[i].name == last_name:
-                    self.config_list.setCurrentRow(i)
-                    break
-        if self.config_list.currentRow() < 0 and self.configs:
-            self.config_list.setCurrentRow(0)
-
-    def _selected_config(self) -> Optional[ProxyConfig]:
-        row = self.config_list.currentRow()
-        if row < 0 or row >= len(self.configs):
-            return None
-        return self.configs[row]
-
-    def _refresh_status(self) -> None:
-        active = self.manager.active_config()
-        if self.manager.is_connected() and active:
-            self.status_badge.setText(f"● Подключено: {active.name}")
-            self.status_badge.setObjectName("statusBadgeOn")
-            host = self.manager.settings.get("listen_host", "127.0.0.1")
-            port = self.manager.settings.get("listen_port", 2080)
-            self.status_detail.setText(f"127.0.0.1:{port} · HTTP/SOCKS5")
-            self.connect_btn.setEnabled(False)
-            self.disconnect_btn.setEnabled(True)
+        if self.manager.is_connected():
+            elapsed = int(time.time() - self._connected_at) if self._connected_at else 0
+            mm, ss = divmod(elapsed, 60)
+            hh, mm = divmod(mm, 60)
+            timer = f"{hh:d}:{mm:02d}:{ss:02d}" if hh else f"{mm:02d}:{ss:02d}"
+            self.home_page.set_state("connected", timer)
         else:
-            # Detect crash: marked active but process died
-            if self.manager._active is not None and not self.manager.process.is_running():
-                self._append_log_line(
-                    "[!] sing-box завершился неожиданно "
-                    f"(код {self.manager.process.returncode()}). Отключаюсь."
-                )
-                self.manager.disconnect()
-            self.status_badge.setText("● Отключено")
-            self.status_badge.setObjectName("statusBadgeOff")
-            self.status_detail.setText("")
-            self.connect_btn.setEnabled(bool(self.configs))
-            self.disconnect_btn.setEnabled(False)
+            self.home_page.set_state("idle")
 
-        # Re-apply stylesheet so the objectName change takes effect
-        self.status_badge.style().unpolish(self.status_badge)
-        self.status_badge.style().polish(self.status_badge)
+        self.home_page.set_config(self._active_config)
 
     # --- actions ----------------------------------------------------------
 
-    def _on_add_config(self) -> None:
-        dlg = AddConfigDialog(self)
-        if dlg.exec() == AddConfigDialog.Accepted:
-            cfg = dlg.result_config()
-            if cfg is None:
-                return
-            # Replace if name exists
-            for i, existing in enumerate(self.configs):
-                if existing.name == cfg.name:
-                    self.configs[i] = cfg
-                    break
-            else:
-                self.configs.append(cfg)
-            storage.save_configs(self.configs)
-            self._refresh_config_list()
+    def _on_connect_click(self) -> None:
+        if self.manager.is_connected():
+            self._do_disconnect()
+            return
+        if self._active_config is None:
+            QMessageBox.information(
+                self, "Нет конфига",
+                "Сначала добавь конфиг — нажми «+» в нижней панели или тапни карточку.",
+            )
+            return
+        self._do_connect()
 
-    def _on_remove_config(self) -> None:
-        cfg = self._selected_config()
-        if cfg is None:
-            return
-        confirm = QMessageBox.question(
-            self, "Удалить", f"Удалить конфиг «{cfg.name}»?"
-        )
-        if confirm != QMessageBox.Yes:
-            return
-        self.configs = [c for c in self.configs if c.name != cfg.name]
-        storage.save_configs(self.configs)
-        self._refresh_config_list()
-
-    def _on_import_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Импорт", "", "Текст (*.txt);;Все файлы (*.*)"
-        )
-        if not path:
-            return
-        try:
-            text = open(path, encoding="utf-8").read()
-        except OSError as e:
-            QMessageBox.critical(self, "Ошибка чтения", str(e))
-            return
-        from ..core.parser import parse, ParseError
-        added = 0
-        errors: list[str] = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            try:
-                cfg = parse(line)
-            except ParseError as e:
-                errors.append(f"{line[:40]}... — {e}")
-                continue
-            self.configs.append(cfg)
-            added += 1
-        storage.save_configs(self.configs)
-        self._refresh_config_list()
-        msg = f"Импортировано: {added}"
-        if errors:
-            msg += "\n\nОшибки:\n" + "\n".join(errors[:10])
-        QMessageBox.information(self, "Импорт", msg)
-
-    def _on_connect(self) -> None:
-        cfg = self._selected_config()
-        if cfg is None:
-            QMessageBox.information(self, "Конфиг", "Выбери конфиг из списка.")
-            return
+    def _do_connect(self) -> None:
         if not ensure_singbox_installed(self):
             return
+        self.home_page.set_state("connecting")
         sites = storage.load_sites()
         try:
-            self.manager.connect(cfg, sites)
+            self.manager.connect(self._active_config, sites)
         except VPNConnectionError as e:
             QMessageBox.critical(self, "Не удалось подключиться", str(e))
+            self.home_page.set_state("idle")
             return
-        self.manager.update_settings(last_config_name=cfg.name)
-        self._append_log_line(f"[*] Подключено к «{cfg.name}»")
-        self._refresh_status()
+        self.manager.update_settings(last_config_name=self._active_config.name)
+        self._connected_at = time.time()
+        self.logs_page.append(f"[*] Подключено к «{self._active_config.name}»")
+        self._refresh_home()
 
-    def _on_disconnect(self) -> None:
+    def _do_disconnect(self) -> None:
         self.manager.disconnect()
-        self._append_log_line("[*] Отключено, системный прокси восстановлен")
-        self._refresh_status()
+        self._connected_at = 0.0
+        self.logs_page.append("[*] Отключено, системный прокси восстановлен")
+        self._refresh_home()
+
+    def _on_open_picker(self) -> None:
+        current_name = self._active_config.name if self._active_config else ""
+        dlg = ConfigsPickerDialog(self.configs, current_name, self)
+        result = dlg.exec()
+        # Always reload — picker may have mutated saved list via add/remove
+        self.configs = storage.load_configs()
+        if result == ConfigsPickerDialog.Accepted:
+            chosen = dlg.selected_config()
+            if chosen is not None:
+                self._active_config = chosen
+                self.manager.update_settings(last_config_name=chosen.name)
+        else:
+            # User cancelled but may have added/removed — re-sync selection.
+            names = {c.name for c in self.configs}
+            if self._active_config and self._active_config.name not in names:
+                self._active_config = self.configs[0] if self.configs else None
+        self._refresh_home()
+
+    def _on_add_config(self) -> None:
+        dlg = AddConfigDialog(self)
+        if dlg.exec() != AddConfigDialog.Accepted:
+            return
+        new_cfg = dlg.result_config()
+        if new_cfg is None:
+            return
+        for i, c in enumerate(self.configs):
+            if c.name == new_cfg.name:
+                self.configs[i] = new_cfg
+                break
+        else:
+            self.configs.append(new_cfg)
+        storage.save_configs(self.configs)
+        self._active_config = new_cfg
+        self.manager.update_settings(last_config_name=new_cfg.name)
+        self._goto("home")
+        self._refresh_home()
 
     def _on_edit_sites(self) -> None:
         dlg = SitesDialog(self)
-        if dlg.exec() == SitesDialog.Accepted and self.manager.is_connected():
+        if dlg.exec() != SitesDialog.Accepted:
+            return
+        self.home_page.refresh_sites_count()
+        self.settings_page.refresh_sites_count()
+        if self.manager.is_connected():
             QMessageBox.information(
                 self, "Список обновлён",
-                "Список применится при следующем подключении. "
-                "Переподключись, чтобы изменения вступили в силу.",
+                "Изменения применятся при следующем подключении.",
             )
-
-    def _on_about(self) -> None:
-        QMessageBox.about(
-            self, "О программе",
-            "KaproVPN\n\n"
-            "Клиент на базе sing-box со встроенным split-routing'ом: "
-            "российские сайты идут через ваш реальный IP, остальное — через прокси.\n\n"
-            "Поддержка: trojan, vless, vmess, shadowsocks, hysteria2.",
-        )
-
-    def _append_log_line(self, line: str) -> None:
-        self.log_view.appendPlainText(line)
 
     # --- shutdown ---------------------------------------------------------
 
