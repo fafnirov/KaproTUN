@@ -3,14 +3,14 @@
 [English](README.md) · [Русский](README.ru.md)
 
 Десктопный proxy-клиент (Windows) со встроенным **split-routing'ом
-российских сайтов**. Построен поверх [sing-box](https://github.com/SagerNet/sing-box).
+российских сайтов**. Построен поверх [Xray-core](https://github.com/XTLS/Xray-core).
 
 ## Что делает
 
-GUI для proxy/VPN-соединений (Trojan, VLESS, VMess, Shadowsocks, Hysteria2)
-с одной важной фичей: домены из настраиваемого списка — российские банки,
-госуслуги, маркетплейсы и т.п. — идут **в обход прокси**, через ваш реальный
-IP. Всё остальное маршрутизируется через прокси-сервер.
+GUI для proxy/VPN-соединений (Trojan, VLESS с REALITY и XHTTP, VMess,
+Shadowsocks) с одной важной фичей: домены из настраиваемого списка —
+российские банки, госуслуги, маркетплейсы и т.п. — идут **в обход прокси**,
+через ваш реальный IP. Всё остальное маршрутизируется через прокси-сервер.
 
 ## Зачем
 
@@ -23,20 +23,21 @@ IP. Всё остальное маршрутизируется через про
 ## Возможности
 
 - Парсит share-URL в стандартных форматах:
-  `trojan://`, `vless://` (включая REALITY), `vmess://`, `ss://`, `hysteria2://` (`hy2://`)
-- Автоматически скачивает `sing-box.exe` при первом запуске (~15 МБ)
+  `trojan://`, `vless://` (включая **REALITY** и **XHTTP** транспорт),
+  `vmess://`, `ss://`
+- Автоматически скачивает `xray.exe` при первом запуске (~20 МБ)
 - Редактируемый список «всегда напрямую» доменов (108 записей по умолчанию —
   банки, госуслуги, маркетплейсы, медиа…)
 - Ставит системный HTTP-прокси Windows при подключении и восстанавливает
   его при отключении / закрытии приложения
-- GUI на PySide6 с тёмной темой
-- Окно с живыми логами sing-box для отладки
+- GUI на PySide6 с тёмной темой, одно-экранный AmneziaVPN-подобный layout
+- Окно с живыми логами Xray-core для отладки
 
 ## Требования
 
 - Windows 10 / 11
 - Python 3.10 или новее
-- ~20 МБ свободного места (для бинарника sing-box)
+- ~25 МБ свободного места (для бинарника Xray-core + geo-данные)
 
 ## Установка и запуск
 
@@ -47,20 +48,20 @@ pip install -r requirements.txt
 python run.py
 ```
 
-При первом запуске приложение скачает последний релиз sing-box в
-`%LOCALAPPDATA%\KaproVPN\singbox\`.
+При первом запуске приложение скачает последний релиз Xray-core в
+`%LOCALAPPDATA%\KaproVPN\xray\`.
 
 ## Как это работает
 
-1. Вы вставляете share-URL (например, `trojan://…`).
-2. Приложение разбирает его в outbound sing-box.
-3. Генерируется JSON-конфиг sing-box с правилами маршрутизации:
-   - домены из вашего «direct»-списка → outbound `direct` (ваш реальный IP)
-   - всё остальное → outbound `proxy` (разобранный URL)
-4. `sing-box.exe` запускается как подпроцесс и слушает на `127.0.0.1:2080`
-   (mixed inbound: HTTP + SOCKS5).
-5. Системный прокси Windows указывается на этот порт.
-6. Любое приложение, которое уважает системный прокси (браузеры, Office,
+1. Вы вставляете share-URL (например, `vless://…`).
+2. Приложение разбирает его и генерирует JSON-конфиг Xray-core с
+   правилами маршрутизации:
+   - домены из «direct»-списка → outbound `freedom` (ваш реальный IP)
+   - всё остальное → proxy-outbound (разобранный URL)
+3. `xray.exe` запускается как подпроцесс и слушает на `127.0.0.1:2080`
+   (HTTP) и `:2081` (SOCKS5).
+4. Системный прокси Windows указывается на порт 2080.
+5. Любое приложение, которое уважает системный прокси (браузеры, Office,
    большинство десктопных приложений) теперь следует правилам маршрутизации.
 
 ## Ограничения
@@ -69,6 +70,8 @@ python run.py
   прокси (некоторые игры, P2P-клиенты), не туннелируются. TUN-режим — в roadmap.
 - Пока только Windows (код регистра в `core/system_proxy.py` специфичен для
   Windows; остальное кроссплатформенно).
+- Hysteria2 пока не поддерживается — Xray-core не умеет этот протокол. В
+  планах — добавить sing-box как второй движок специально для hy2.
 - Импорт subscription-URL пока не реализован (планируется).
 
 ## Структура проекта
@@ -76,23 +79,25 @@ python run.py
 ```
 kapro_vpn/
 ├── core/
-│   ├── parser.py            # парсеры share-URL
-│   ├── singbox_config.py    # генератор JSON sing-box
-│   ├── singbox_installer.py # загрузка sing-box с GitHub releases
-│   ├── singbox_process.py   # управление подпроцессом
-│   ├── system_proxy.py      # реестр прокси Windows
-│   ├── storage.py           # JSON persistence (конфиги / сайты / настройки)
-│   ├── controller.py        # оркестрация connect/disconnect
-│   └── paths.py             # пути файловой системы
+│   ├── parser.py          # парсеры share-URL (vless / vmess / trojan / ss / hy2)
+│   ├── xray_config.py     # генератор JSON Xray-core со split-routing
+│   ├── xray_installer.py  # загрузка Xray-core с GitHub releases
+│   ├── xray_process.py    # управление подпроцессом
+│   ├── system_proxy.py    # реестр прокси Windows
+│   ├── storage.py         # JSON persistence (конфиги / сайты / настройки)
+│   ├── controller.py      # оркестрация connect/disconnect
+│   └── paths.py           # пути файловой системы
 ├── gui/
-│   ├── main_window.py
+│   ├── main_window.py     # одно-оконное приложение с Home / Settings / Logs
+│   ├── widgets.py         # CircleConnectButton, ConfigCard, NavBar
 │   ├── config_dialog.py
+│   ├── configs_picker.py
 │   ├── sites_dialog.py
 │   ├── installer_dialog.py
-│   └── styles.py            # QSS тёмной темы
+│   └── styles.py          # QSS тёмной темы с янтарным акцентом
 ├── data/
-│   └── default_sites.json   # встроенный дефолтный список direct-роутинга
-└── main.py                  # точка входа QApplication
+│   └── default_sites.json # встроенный дефолтный список direct-роутинга
+└── main.py                # точка входа QApplication
 ```
 
 Пользовательские данные (сохранённые конфиги, отредактированный список сайтов,
@@ -102,6 +107,7 @@ kapro_vpn/
 
 PR'ы приветствуются. Направления, где помощь особенно полезна:
 
+- Поддержка Hysteria2 через второй движок (sing-box)
 - TUN-режим (чтобы туннелировались игры и любые приложения, а не только те,
   что знают про HTTP-прокси)
 - Порт на Linux / macOS

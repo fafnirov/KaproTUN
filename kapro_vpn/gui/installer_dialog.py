@@ -1,10 +1,10 @@
-"""Modal dialog that downloads sing-box.exe with a progress bar."""
+"""Modal dialog that downloads xray.exe with a progress bar."""
 from __future__ import annotations
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
-from ..core import singbox_installer
+from ..core import xray_installer
 
 
 class _DownloadThread(QThread):
@@ -14,7 +14,7 @@ class _DownloadThread(QThread):
 
     def run(self) -> None:
         try:
-            singbox_installer.download_and_install(
+            xray_installer.download_and_install(
                 progress=lambda d, t: self.progress.emit(d, t)
             )
             self.finished_ok.emit()
@@ -22,12 +22,12 @@ class _DownloadThread(QThread):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
-def ensure_singbox_installed(parent) -> bool:
-    """Download sing-box if missing. Returns True on success (or already present)."""
-    if singbox_installer.is_installed():
+def ensure_xray_installed(parent) -> bool:
+    """Download Xray-core if missing. Returns True on success (or already present)."""
+    if xray_installer.is_installed():
         return True
 
-    dlg = QProgressDialog("Загрузка sing-box...", None, 0, 100, parent)
+    dlg = QProgressDialog("Загрузка Xray-core...", None, 0, 100, parent)
     dlg.setWindowTitle("Первый запуск")
     dlg.setCancelButton(None)
     dlg.setMinimumDuration(0)
@@ -41,9 +41,9 @@ def ensure_singbox_installed(parent) -> bool:
     def on_progress(done: int, total: int) -> None:
         if total > 0:
             dlg.setValue(int(done * 100 / total))
-            dlg.setLabelText(f"Загрузка sing-box... {done // 1024} / {total // 1024} КБ")
+            dlg.setLabelText(f"Загрузка Xray-core... {done // 1024} / {total // 1024} КБ")
         else:
-            dlg.setLabelText(f"Загрузка sing-box... {done // 1024} КБ")
+            dlg.setLabelText(f"Загрузка Xray-core... {done // 1024} КБ")
 
     def on_done() -> None:
         dlg.setValue(100)
@@ -63,11 +63,11 @@ def ensure_singbox_installed(parent) -> bool:
     if error_holder:
         QMessageBox.critical(
             parent,
-            "Не удалось скачать sing-box",
+            "Не удалось скачать Xray-core",
             f"{error_holder[0]}\n\n"
-            f"Проверь интернет, или скачай sing-box.exe вручную с\n"
-            f"https://github.com/SagerNet/sing-box/releases\n"
-            f"и положи в:\n{singbox_installer.paths.singbox_dir()}",
+            f"Проверь интернет, или скачай Xray-core вручную с\n"
+            f"https://github.com/XTLS/Xray-core/releases\n"
+            f"и распакуй в:\n{xray_installer.paths.xray_dir()}",
         )
         return False
-    return singbox_installer.is_installed()
+    return xray_installer.is_installed()

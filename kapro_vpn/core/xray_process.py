@@ -1,4 +1,4 @@
-"""Run sing-box.exe as a managed subprocess."""
+"""Run xray.exe as a managed subprocess."""
 from __future__ import annotations
 
 import subprocess
@@ -13,11 +13,11 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 LogSink = Callable[[str], None]
 
 
-class SingboxProcess:
-    """Wraps a sing-box.exe subprocess.
+class XrayProcess:
+    """Wraps an xray.exe subprocess.
 
-    `on_log` (optional) is invoked from a background thread for every line of
-    sing-box's stderr — caller is responsible for marshalling to the UI thread.
+    `on_log` (optional) is invoked from a background reader thread for every
+    line of xray's combined stdout+stderr — caller marshals to UI thread.
     """
 
     def __init__(self, on_log: Optional[LogSink] = None, log_buffer: int = 500):
@@ -31,10 +31,10 @@ class SingboxProcess:
 
     def start(self, config_path: str) -> None:
         if self.is_running():
-            raise RuntimeError("sing-box is already running")
-        exe = paths.singbox_exe()
+            raise RuntimeError("xray is already running")
+        exe = paths.xray_exe()
         if not exe.is_file():
-            raise FileNotFoundError(f"sing-box.exe not found at {exe}")
+            raise FileNotFoundError(f"xray.exe not found at {exe}")
 
         self._proc = subprocess.Popen(
             [str(exe), "run", "-c", config_path],
@@ -44,7 +44,7 @@ class SingboxProcess:
             encoding="utf-8",
             errors="replace",
             creationflags=CREATE_NO_WINDOW,
-            cwd=str(paths.singbox_dir()),
+            cwd=str(paths.xray_dir()),  # cwd matters: xray loads geoip.dat/geosite.dat from here
         )
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
@@ -76,15 +76,16 @@ class SingboxProcess:
 
     @staticmethod
     def check_config(config_path: str) -> tuple[bool, str]:
-        """Run `sing-box check -c <path>`. Returns (ok, message)."""
-        exe = paths.singbox_exe()
+        """Run `xray run -test -c <path>`. Returns (ok, message)."""
+        exe = paths.xray_exe()
         if not exe.is_file():
-            return False, f"sing-box.exe not found at {exe}"
+            return False, f"xray.exe not found at {exe}"
         try:
             result = subprocess.run(
-                [str(exe), "check", "-c", config_path],
+                [str(exe), "run", "-test", "-c", config_path],
                 capture_output=True, text=True, timeout=10,
                 creationflags=CREATE_NO_WINDOW,
+                cwd=str(paths.xray_dir()),
             )
             if result.returncode == 0:
                 return True, "OK"

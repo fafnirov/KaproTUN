@@ -39,9 +39,11 @@ Thumbs.db
 htmlcov/
 .tox/
 
-# Bundled sing-box binary (downloaded at runtime, not part of source)
-singbox/sing-box.exe
-kapro_vpn/data/sing-box.exe
+# Bundled Xray-core binary (downloaded at runtime, not part of source)
+xray/xray.exe
+xray/geoip.dat
+xray/geosite.dat
+kapro_vpn/data/xray.exe
 
 # Local secrets / generated configs
 *.local.json

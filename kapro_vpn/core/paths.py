@@ -11,14 +11,14 @@ def app_data_dir() -> Path:
     return path
 
 
-def singbox_dir() -> Path:
-    path = app_data_dir() / "singbox"
+def xray_dir() -> Path:
+    path = app_data_dir() / "xray"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def singbox_exe() -> Path:
-    return singbox_dir() / "sing-box.exe"
+def xray_exe() -> Path:
+    return xray_dir() / "xray.exe"
 
 
 def configs_file() -> Path:
@@ -34,12 +34,17 @@ def settings_file() -> Path:
 
 
 def runtime_config_file() -> Path:
-    """Generated sing-box JSON config written before each launch."""
-    return app_data_dir() / "singbox-runtime.json"
+    """Generated xray JSON config written before each launch."""
+    return app_data_dir() / "xray-runtime.json"
 
 
 def log_file() -> Path:
-    return app_data_dir() / "singbox.log"
+    return app_data_dir() / "xray.log"
+
+
+def access_log_file() -> Path:
+    """xray writes per-request lines here."""
+    return app_data_dir() / "xray-access.log"
 
 
 def bundled_default_sites() -> Path:

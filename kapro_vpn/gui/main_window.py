@@ -22,13 +22,13 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
-from ..core import singbox_installer, storage
+from ..core import storage, xray_installer
 from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
 from ..core.parser import ProxyConfig
 from .config_dialog import AddConfigDialog
 from .configs_picker import ConfigsPickerDialog
-from .installer_dialog import ensure_singbox_installed
+from .installer_dialog import ensure_xray_installed
 from .sites_dialog import SitesDialog
 from .widgets import CircleConnectButton, ConfigCard, NavBar, StatusLabel
 
@@ -160,7 +160,7 @@ class SettingsPage(QWidget):
 
         # --- Logs viewer link ---
         logs_row, _ = self._make_link_row(
-            "Логи sing-box",
+            "Логи Xray-core",
             "посмотреть последние строки",
             self.logs_clicked.emit,
         )
@@ -173,10 +173,10 @@ class SettingsPage(QWidget):
         sep2.setFrameShape(QFrame.HLine)
         outer.addWidget(sep2)
 
-        sb_version = singbox_installer.get_installed_version() or "не установлен"
+        engine_version = xray_installer.get_installed_version() or "не установлен"
         about = QLabel(
             f"<div style='color:#fafafa; font-weight:600'>KaproVPN v{__version__}</div>"
-            f"<div style='color:#71717a; font-size:9pt'>sing-box: {sb_version}</div>"
+            f"<div style='color:#71717a; font-size:9pt'>Xray-core: {engine_version}</div>"
             f"<div style='color:#71717a; font-size:9pt'>GPL v3 · "
             f"<a href='https://github.com/fafnirov/KaproVPN' style='color:#f59e0b'>"
             f"github.com/fafnirov/KaproVPN</a></div>"
@@ -215,7 +215,7 @@ class SettingsPage(QWidget):
 
 
 class LogsPage(QWidget):
-    """Read-only viewer for sing-box logs."""
+    """Read-only viewer for Xray-core logs."""
 
     back_clicked = Signal()
 
@@ -236,7 +236,7 @@ class LogsPage(QWidget):
         header.addWidget(clear_btn)
         layout.addLayout(header)
 
-        title = QLabel("Логи sing-box")
+        title = QLabel("Логи Xray-core")
         title.setObjectName("h2")
         layout.addWidget(title)
 
@@ -335,7 +335,7 @@ class MainWindow(QMainWindow):
         # Detect external crash
         if self.manager._active is not None and not self.manager.process.is_running():
             self.logs_page.append(
-                f"[!] sing-box завершился неожиданно "
+                f"[!] Xray-core завершился неожиданно "
                 f"(код {self.manager.process.returncode()}). Отключаюсь."
             )
             self.manager.disconnect()
@@ -367,7 +367,7 @@ class MainWindow(QMainWindow):
         self._do_connect()
 
     def _do_connect(self) -> None:
-        if not ensure_singbox_installed(self):
+        if not ensure_xray_installed(self):
             return
         self.home_page.set_state("connecting")
         sites = storage.load_sites()
