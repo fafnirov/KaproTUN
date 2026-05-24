@@ -35,7 +35,22 @@ jobs:
             # wrap it in a .dmg via hdiutil. The .dmg is a single double-
             # clickable file users drag into /Applications.
             build_cmd: |
+              set -euo pipefail
+              # PyInstaller's BUNDLE() rejects .png — needs proper .icns.
+              # Use macOS-native sips + iconutil to generate one from our
+              # PNG (Apple's required iconset has square sizes 16..512).
+              mkdir -p icon.iconset
+              for SZ in 16 32 128 256 512; do
+                sips -z $SZ $SZ kapro_vpn/data/icon.png \
+                  --out icon.iconset/icon_${SZ}x${SZ}.png > /dev/null
+                DBL=$((SZ * 2))
+                sips -z $DBL $DBL kapro_vpn/data/icon.png \
+                  --out icon.iconset/icon_${SZ}x${SZ}@2x.png > /dev/null
+              done
+              iconutil -c icns icon.iconset -o kapro_vpn/data/icon.icns
+              ls -lh kapro_vpn/data/icon.icns
               python -m PyInstaller KaproVPN.spec --noconfirm --log-level WARN
+              ls -la dist/
               # Package .app into a .dmg
               mkdir -p dist/dmg_root
               cp -R dist/KaproVPN.app dist/dmg_root/

@@ -15,20 +15,24 @@ first launch into the per-OS app data directory. Keeps the bundle
 slim (~50 MB instead of ~90 MB) and lets us pick up upstream Xray
 fixes without re-shipping.
 """
+import os
 import sys
 
 _is_windows = sys.platform == "win32"
 _is_macos   = sys.platform == "darwin"
 
-# Pick the right brand icon for each OS. PyInstaller accepts .ico on
-# Windows, .icns on macOS, and ignores the icon parameter on Linux
-# (we ship icon.png separately for desktop-entry use).
+# Pick the right brand icon for each OS. PyInstaller is strict on macOS
+# BUNDLE() — it rejects .png and demands .icns. CI generates icon.icns
+# from icon.png via sips+iconutil before invoking PyInstaller; if it's
+# missing (local dev build without that step), fall back to None so the
+# build still completes, just without a Dock icon.
 if _is_windows:
     _icon = 'kapro_vpn/data/icon.ico'
 elif _is_macos:
-    # PyInstaller falls back to a PNG if .icns isn't present — slightly
-    # blurry but legal. Swap in icon.icns later when we generate one.
-    _icon = 'kapro_vpn/data/icon.png'
+    if os.path.exists('kapro_vpn/data/icon.icns'):
+        _icon = 'kapro_vpn/data/icon.icns'
+    else:
+        _icon = None  # build proceeds, app gets generic Python icon
 else:
     _icon = None
 
