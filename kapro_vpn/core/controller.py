@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import atexit
 import socket
+import time
 from typing import Callable, Optional
 
-from . import admin, network_routes, storage, system_proxy, tun2socks_process, xray_config
+from . import admin, geoip_ru, network_routes, storage, system_proxy, tun2socks_process, xray_config
 from .parser import ProxyConfig
 from .tun2socks_process import Tun2socksProcess
 from .xray_process import XrayProcess
@@ -263,7 +264,21 @@ class ConnectionManager:
                     + (f" (не резолвнулось: {failed})" if failed else "")
                 )
                 added = session.add_bypass_routes(all_ips, real.gateway, real.index)
-                self._log(f"[*] Добавлено {added} bypass-роутов (direct-сайты идут мимо TUN)")
+                self._log(f"[*] Добавлено {added} bypass-роутов для direct-доменов")
+
+            # geoip:ru — bypass the entire Russian IP space so any RU-hosted
+            # resource (CDN sub-domains we didn't pre-resolve, third-party
+            # widgets, statics, even minor sites) skips the tunnel.
+            # Cached list lives in %LOCALAPPDATA%\KaproVPN\geoip-ru.txt;
+            # main_window's connect path triggers download if missing.
+            ru_cidrs = geoip_ru.load_cidrs()
+            if ru_cidrs:
+                self._log(f"[*] Добавляю {len(ru_cidrs)} CIDR'ов из geoip:ru…")
+                t0 = time.time()
+                added = session.add_bypass_cidrs(ru_cidrs, real.gateway, real.index)
+                self._log(f"[*] Добавлено {added} CIDR'ов за {time.time()-t0:.1f}с — российский IP-космос идёт мимо TUN")
+            else:
+                self._log("[!] geoip:ru не закеширован — российские сайты с динамическими IP могут не работать")
         except Exception:
             session.restore()
             self.tun_process.stop()

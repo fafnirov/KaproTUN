@@ -4,7 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
-from ..core import tun2socks_installer, xray_installer
+from ..core import geoip_ru, tun2socks_installer, xray_installer
 
 
 class _DownloadThread(QThread):
@@ -88,3 +88,18 @@ def ensure_tun2socks_installed(parent) -> bool:
         f"- https://www.wintun.net/\n"
         f"и положи tun2socks.exe и wintun.dll в:\n{tun2socks_installer.paths.tun_dir()}",
     ) and tun2socks_installer.is_installed()
+
+
+def ensure_geoip_ru_cached(parent) -> bool:
+    """Download Russian IP CIDR list if missing. For TUN-mode split routing.
+
+    Soft requirement — if the download fails, TUN mode still works for
+    domains we pre-resolved, just without comprehensive RU coverage.
+    """
+    if geoip_ru.is_cached():
+        return True
+    return _run_download(
+        parent, "geoip:ru CIDR list", geoip_ru.download,
+        f"Скачай вручную:\n{geoip_ru.GEOIP_RU_URL}\n"
+        f"и сохрани как:\n{geoip_ru.cache_file()}",
+    ) and geoip_ru.is_cached()

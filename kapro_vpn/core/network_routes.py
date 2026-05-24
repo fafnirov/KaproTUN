@@ -1,29 +1,112 @@
 """Windows route + DNS manipulation for TUN-mode setup.
 
-Wraps the legacy `route` / `netsh` commands and the modern `Get-NetAdapter`
-PowerShell cmdlet. All operations need admin privileges.
+All operations need admin privileges.
+
+For route add/delete the module talks straight to `CreateIpForwardEntry` /
+`DeleteIpForwardEntry` in iphlpapi.dll via ctypes. Each call is ~100 µs;
+the older `route add` shell route was ~10 ms per call. With ~9 k bypass
+routes for the full geoip:ru list, that's the difference between 1 second
+and 90 seconds at connect time.
 
 Session pattern: callers build up a list of routes/DNS changes through
 RouteSession, then `restore()` undoes them all at disconnect (or atexit if
 the app crashes).
-
-Bypass-route batch: split-tunneling in TUN mode requires bypass routes for
-every "direct" domain so the kernel sends those packets out the real
-interface before they ever reach the TUN. There can be hundreds of these,
-and 500 `subprocess.run` calls take ~30 s; we batch them through a single
-PowerShell invocation instead.
 """
 from __future__ import annotations
 
 import concurrent.futures
+import ctypes
+import ctypes.wintypes as wt
 import json
 import socket
+import struct
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+# --- Win32 native route API (iphlpapi.dll) --------------------------------
+
+class _MIB_IPFORWARDROW(ctypes.Structure):
+    _fields_ = [
+        ("dwForwardDest",      wt.DWORD),
+        ("dwForwardMask",      wt.DWORD),
+        ("dwForwardPolicy",    wt.DWORD),
+        ("dwForwardNextHop",   wt.DWORD),
+        ("dwForwardIfIndex",   wt.DWORD),
+        ("dwForwardType",      wt.DWORD),
+        ("dwForwardProto",     wt.DWORD),
+        ("dwForwardAge",       wt.DWORD),
+        ("dwForwardNextHopAS", wt.DWORD),
+        ("dwForwardMetric1",   wt.DWORD),
+        ("dwForwardMetric2",   wt.DWORD),
+        ("dwForwardMetric3",   wt.DWORD),
+        ("dwForwardMetric4",   wt.DWORD),
+        ("dwForwardMetric5",   wt.DWORD),
+    ]
+
+
+_MIB_IPROUTE_TYPE_INDIRECT = 4
+_MIB_IPPROTO_NETMGMT = 3
+_NO_ERROR = 0
+
+if sys.platform == "win32":
+    _iphlpapi = ctypes.windll.iphlpapi
+    _CreateIpForwardEntry = _iphlpapi.CreateIpForwardEntry
+    _CreateIpForwardEntry.argtypes = [ctypes.POINTER(_MIB_IPFORWARDROW)]
+    _CreateIpForwardEntry.restype = wt.DWORD
+    _DeleteIpForwardEntry = _iphlpapi.DeleteIpForwardEntry
+    _DeleteIpForwardEntry.argtypes = [ctypes.POINTER(_MIB_IPFORWARDROW)]
+    _DeleteIpForwardEntry.restype = wt.DWORD
+else:
+    _CreateIpForwardEntry = None
+    _DeleteIpForwardEntry = None
+
+
+def _ip_to_dword_network_order(ip: str) -> int:
+    """Pack a dotted IP into a 32-bit value in network byte order."""
+    return struct.unpack("=I", socket.inet_aton(ip))[0]
+
+
+def _build_row(dest: str, mask: str, gateway: str, if_index: int,
+               metric: int = 1) -> _MIB_IPFORWARDROW:
+    row = _MIB_IPFORWARDROW()
+    row.dwForwardDest = _ip_to_dword_network_order(dest)
+    row.dwForwardMask = _ip_to_dword_network_order(mask)
+    row.dwForwardPolicy = 0
+    row.dwForwardNextHop = _ip_to_dword_network_order(gateway)
+    row.dwForwardIfIndex = if_index
+    row.dwForwardType = _MIB_IPROUTE_TYPE_INDIRECT
+    row.dwForwardProto = _MIB_IPPROTO_NETMGMT
+    row.dwForwardAge = 0
+    row.dwForwardNextHopAS = 0
+    row.dwForwardMetric1 = metric
+    row.dwForwardMetric2 = 0xFFFFFFFF
+    row.dwForwardMetric3 = 0xFFFFFFFF
+    row.dwForwardMetric4 = 0xFFFFFFFF
+    row.dwForwardMetric5 = 0xFFFFFFFF
+    return row
+
+
+def _create_route_native(dest: str, mask: str, gateway: str, if_index: int,
+                         metric: int = 1) -> int:
+    """Returns 0 (NO_ERROR) on success, or a Win32 error code."""
+    if _CreateIpForwardEntry is None:
+        return 1
+    row = _build_row(dest, mask, gateway, if_index, metric)
+    return int(_CreateIpForwardEntry(ctypes.byref(row)))
+
+
+def _delete_route_native(dest: str, mask: str, gateway: str, if_index: int,
+                         metric: int = 1) -> int:
+    if _DeleteIpForwardEntry is None:
+        return 1
+    row = _build_row(dest, mask, gateway, if_index, metric)
+    return int(_DeleteIpForwardEntry(ctypes.byref(row)))
 
 
 # --- low-level shell wrappers ---------------------------------------------
@@ -162,6 +245,8 @@ class _RouteEntry:
     dest: str
     mask: str
     gateway: str
+    if_index: int = 0
+    metric: int = 1
 
 
 @dataclass
@@ -172,20 +257,17 @@ class RouteSession:
 
     def add_route(self, dest: str, mask: str, gateway: str, if_index: int,
                   metric: int = 1) -> bool:
-        ok = add_route(dest, mask, gateway, if_index, metric)
-        if ok:
-            self.routes.append(_RouteEntry(dest, mask, gateway))
-        return ok
+        """Add a single route via the native Win32 API."""
+        rc = _create_route_native(dest, mask, gateway, if_index, metric)
+        if rc == _NO_ERROR:
+            self.routes.append(_RouteEntry(dest, mask, gateway, if_index, metric))
+            return True
+        return False
 
     def add_bypass_routes(self, ips: list[str], gateway: str, if_index: int,
                           metric: int = 1) -> int:
-        """Add many host-routes (/32) in a single PowerShell call.
-
-        Used to keep direct-list domain IPs from looping through the TUN —
-        the kernel sends them straight out the real interface instead.
-        Returns the number of routes added.
-        """
-        ips = sorted({ip for ip in ips if ip})  # dedupe
+        """Add /32 host-routes for a list of IPs. Returns count succeeded."""
+        ips = sorted({ip for ip in ips if ip})
         if not ips:
             return 0
         entries = [(ip, "255.255.255.255") for ip in ips]
@@ -193,37 +275,32 @@ class RouteSession:
 
     def add_bypass_cidrs(self, entries: list[tuple[str, str]],
                          gateway: str, if_index: int, metric: int = 1) -> int:
-        """Add many (dest, mask) bypass routes in a single PowerShell call.
+        """Add many (dest, mask) routes via native API.
 
-        Use for both /32 host routes (mask 255.255.255.255) and aggregate
-        CIDR blocks like Yandex's /18 or VK's /20.
+        ~100 µs per call → 8000+ routes finish in under a second, where
+        shelling out to `route add` would take >70 s.
         """
         if not entries:
             return 0
-        lines = [
-            f"route add {dest} mask {mask} {gateway} "
-            f"if {if_index} metric {metric} | Out-Null"
-            for dest, mask in entries
-        ]
-        _ps("\n".join(lines), timeout=120.0)
+        added = 0
         for dest, mask in entries:
-            self.routes.append(_RouteEntry(dest, mask, gateway))
-        return len(entries)
+            rc = _create_route_native(dest, mask, gateway, if_index, metric)
+            if rc == _NO_ERROR:
+                self.routes.append(_RouteEntry(dest, mask, gateway, if_index, metric))
+                added += 1
+            # Silently skip already-exists / invalid — they're not failures
+            # we can do anything useful about per-route.
+        return added
 
     def set_dns(self, iface_name: str, servers: list[str]) -> None:
         set_dns(iface_name, servers)
         self.dns_changed.append(_DnsEntry(iface_name))
 
     def restore(self) -> None:
-        # Batch-delete via PowerShell — `subprocess.run` per route is ~30 ms
-        # of pure overhead, which adds up to >10 s for a few hundred routes.
-        if self.routes:
-            lines = [
-                f"route delete {r.dest} mask {r.mask} | Out-Null"
-                for r in reversed(self.routes)
-            ]
+        # Reverse order so more-specific routes go away before any catchalls.
+        for r in reversed(self.routes):
             try:
-                _ps("\n".join(lines), timeout=120.0)
+                _delete_route_native(r.dest, r.mask, r.gateway, r.if_index, r.metric)
             except Exception:
                 pass
         self.routes.clear()

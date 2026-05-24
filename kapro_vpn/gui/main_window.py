@@ -31,7 +31,7 @@ from ..core.controller import ConnectionManager
 from ..core.parser import ProxyConfig
 from .config_dialog import AddConfigDialog
 from .configs_picker import ConfigsPickerDialog
-from .installer_dialog import ensure_tun2socks_installed, ensure_xray_installed
+from .installer_dialog import ensure_geoip_ru_cached, ensure_tun2socks_installed, ensure_xray_installed
 from .sites_dialog import SitesDialog
 from .widgets import CircleConnectButton, ConfigCard, NavBar, StatusLabel
 
@@ -449,10 +449,13 @@ class MainWindow(QMainWindow):
     def _do_connect(self) -> None:
         if not ensure_xray_installed(self):
             return
-        # In TUN mode we additionally need tun2socks + wintun.dll
+        # In TUN mode we additionally need tun2socks + wintun.dll + geoip:ru list
         if self.manager.current_mode() == MODE_TUN:
             if not ensure_tun2socks_installed(self):
                 return
+            # Soft-required — TUN works without it but RU split-routing is
+            # less comprehensive. Don't gate connection on it.
+            ensure_geoip_ru_cached(self)
         self.home_page.set_state("connecting")
         sites = storage.load_sites()
         try:
