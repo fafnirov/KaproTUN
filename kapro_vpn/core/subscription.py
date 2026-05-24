@@ -31,7 +31,15 @@ from typing import Optional
 
 import requests
 
+from .. import __version__
 from .parser import ParseError, ProxyConfig, parse
+
+# Self-identifying User-Agent so subscription providers have one obvious
+# string to whitelist or block. Format follows the de-facto convention
+# (`Name/Version (Platform; +URL)`) used by v2rayN, NekoBox, Streisand
+# etc., so server-side allowlists that pattern-match "<Name>/" work out
+# of the box.
+USER_AGENT = f"KaproVPN/{__version__} (Windows; +https://github.com/fafnirov/KaproVPN)"
 
 SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://",
                      "hysteria2://", "hy2://")
@@ -91,9 +99,7 @@ def _fetch(url: str, timeout: tuple[float, float],
         # so a single http://127.0.0.1:port URL handles http+https requests.
         proxies = {"http": proxy_url, "https": proxy_url}
     response = requests.get(url, timeout=timeout, proxies=proxies, headers={
-        # Some providers gate access on a recognizable client UA — Clash is
-        # the de-facto standard the subscription-token endpoints sniff for.
-        "User-Agent": "ClashforWindows/0.20.39",
+        "User-Agent": USER_AGENT,
     })
     response.raise_for_status()
     return response.text
