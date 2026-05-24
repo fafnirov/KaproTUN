@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -296,6 +296,38 @@ class SettingsPage(QWidget):
             )
 
 
+class _ConnectWorker(QThread):
+    """Runs ConnectionManager.connect() off the GUI thread.
+
+    The connect path spends ~1-5 seconds in synchronous I/O (start xray
+    subprocess, start tun2socks, wait for the TUN device to appear, add
+    several thousand bypass routes). If we ran that on the main thread,
+    the Qt event loop would freeze and the "ПОДКЛЮЧЕНИЕ…" pulse on the
+    connect button would render zero frames — the user only sees the
+    final "ПОДКЛЮЧЕНО" snap. Pushing it onto a QThread keeps the loop
+    free to animate.
+    """
+
+    finished_ok = Signal()
+    failed = Signal(str)
+
+    def __init__(self, manager: ConnectionManager, config: ProxyConfig,
+                 sites: list[str], parent=None):
+        super().__init__(parent)
+        self._manager = manager
+        self._config = config
+        self._sites = sites
+
+    def run(self) -> None:
+        try:
+            self._manager.connect(self._config, self._sites)
+            self.finished_ok.emit()
+        except VPNConnectionError as e:
+            self.failed.emit(str(e))
+        except Exception as e:
+            self.failed.emit(f"Неожиданная ошибка: {type(e).__name__}: {e}")
+
+
 class LogsPage(QWidget):
     """Read-only viewer for Xray-core logs."""
 
@@ -351,6 +383,8 @@ class MainWindow(QMainWindow):
         self._active_config: Optional[ProxyConfig] = self._restore_last_config()
         self._connected_at: float = 0.0
         self._really_quitting = False
+        self._connecting = False  # True while _ConnectWorker is running
+        self._connect_worker: Optional[_ConnectWorker] = None
 
         # --- App-shell layout (everything inside the rounded dark frame) ---
         shell = QWidget()
@@ -433,6 +467,13 @@ class MainWindow(QMainWindow):
         return self.configs[0] if self.configs else None
 
     def _refresh_home(self) -> None:
+        # Don't fight the connect worker for the button state — the
+        # "connecting" pulse keeps animating until the worker finishes
+        # and we get the success/failure signal.
+        if self._connecting:
+            self.tray.set_state("connecting", self._active_config.name if self._active_config else "")
+            return
+
         # Detect external crash
         if self.manager._active is not None and not self.manager.process.is_running():
             self.logs_page.append(
@@ -461,6 +502,11 @@ class MainWindow(QMainWindow):
     # --- actions ----------------------------------------------------------
 
     def _on_connect_click(self) -> None:
+        # Ignore clicks while a connect/disconnect is already in flight —
+        # otherwise the user can double-tap and we end up with a race
+        # between two workers fighting for the same routes/sockets.
+        if self._connecting:
+            return
         if self.manager.is_connected():
             self._do_disconnect()
             return
@@ -482,19 +528,40 @@ class MainWindow(QMainWindow):
             # Soft-required — TUN works without it but RU split-routing is
             # less comprehensive. Don't gate connection on it.
             ensure_geoip_ru_cached(self)
+
+        # Kick off the worker BEFORE flipping UI state — that way the
+        # set_state call starts its burst + pulse animation on a Qt event
+        # loop that's about to be free, not one we're about to block.
+        self._connecting = True
         self.home_page.set_state("connecting")
+        self.tray.set_state(
+            "connecting",
+            self._active_config.name if self._active_config else "",
+        )
+
         sites = storage.load_sites()
-        try:
-            self.manager.connect(self._active_config, sites)
-        except VPNConnectionError as e:
-            QMessageBox.critical(self, "Не удалось подключиться", str(e))
-            self.home_page.set_state("idle")
-            return
+        self._connect_worker = _ConnectWorker(
+            self.manager, self._active_config, sites, parent=self,
+        )
+        self._connect_worker.finished_ok.connect(self._on_connect_success)
+        self._connect_worker.failed.connect(self._on_connect_failed)
+        self._connect_worker.start()
+
+    def _on_connect_success(self) -> None:
+        self._connecting = False
         self.manager.update_settings(last_config_name=self._active_config.name)
         self._connected_at = time.time()
         mode_tag = "TUN" if self.manager.current_mode() == MODE_TUN else "HTTP"
-        self.logs_page.append(f"[*] Подключено к «{self._active_config.name}» ({mode_tag})")
+        self.logs_page.append(
+            f"[*] Подключено к «{self._active_config.name}» ({mode_tag})"
+        )
         self._refresh_home()
+
+    def _on_connect_failed(self, msg: str) -> None:
+        self._connecting = False
+        self.home_page.set_state("idle")
+        self._refresh_home()
+        QMessageBox.critical(self, "Не удалось подключиться", msg)
 
     def _do_disconnect(self) -> None:
         self.manager.disconnect()
