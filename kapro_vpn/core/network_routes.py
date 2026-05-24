@@ -188,16 +188,27 @@ class RouteSession:
         ips = sorted({ip for ip in ips if ip})  # dedupe
         if not ips:
             return 0
+        entries = [(ip, "255.255.255.255") for ip in ips]
+        return self.add_bypass_cidrs(entries, gateway, if_index, metric)
+
+    def add_bypass_cidrs(self, entries: list[tuple[str, str]],
+                         gateway: str, if_index: int, metric: int = 1) -> int:
+        """Add many (dest, mask) bypass routes in a single PowerShell call.
+
+        Use for both /32 host routes (mask 255.255.255.255) and aggregate
+        CIDR blocks like Yandex's /18 or VK's /20.
+        """
+        if not entries:
+            return 0
         lines = [
-            f"route add {ip} mask 255.255.255.255 {gateway} "
+            f"route add {dest} mask {mask} {gateway} "
             f"if {if_index} metric {metric} | Out-Null"
-            for ip in ips
+            for dest, mask in entries
         ]
-        script = "\n".join(lines)
-        _ps(script, timeout=120.0)
-        for ip in ips:
-            self.routes.append(_RouteEntry(ip, "255.255.255.255", gateway))
-        return len(ips)
+        _ps("\n".join(lines), timeout=120.0)
+        for dest, mask in entries:
+            self.routes.append(_RouteEntry(dest, mask, gateway))
+        return len(entries)
 
     def set_dns(self, iface_name: str, servers: list[str]) -> None:
         set_dns(iface_name, servers)

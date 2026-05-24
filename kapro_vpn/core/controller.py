@@ -24,7 +24,47 @@ MODE_TUN = "tun"           # System-wide TUN tunnel. Needs admin. Works for all 
 TUN_LOCAL_ADDR = "10.255.0.2"
 TUN_GATEWAY = "10.255.0.1"
 TUN_MASK = "255.255.255.0"
-TUN_DNS = ["1.1.1.1", "8.8.8.8"]
+# Yandex DNS first (Russian, fast for ru-sites, supports DoH), Cloudflare fallback.
+# These are also explicitly bypassed below so the queries themselves don't loop
+# through the tunnel.
+TUN_DNS = ["77.88.8.8", "1.1.1.1"]
+
+# Bypass these IPs unconditionally — DNS resolvers, plus the big Russian
+# service-provider blocks. Without this, anything that tries to resolve a
+# domain via DoH (Yandex Browser does this by default) gets routed through
+# our VLESS server, the DoH endpoint sees a Hostkey IP, may rate-limit or
+# refuse, and the browser reports ERR_NAME_NOT_RESOLVED.
+#
+# Each entry: (dest_or_network, mask). For a /32 host-route use 255.255.255.255.
+_ALWAYS_BYPASS: list[tuple[str, str]] = [
+    # --- Public DNS resolvers ---
+    ("77.88.8.8",  "255.255.255.255"),  # Yandex Public DNS (basic)
+    ("77.88.8.1",  "255.255.255.255"),  # Yandex Public DNS (basic, secondary)
+    ("77.88.8.88", "255.255.255.255"),  # Yandex Safe DNS
+    ("77.88.8.7",  "255.255.255.255"),  # Yandex Family DNS
+    ("1.1.1.1",    "255.255.255.255"),  # Cloudflare
+    ("1.0.0.1",    "255.255.255.255"),  # Cloudflare secondary
+    ("8.8.8.8",    "255.255.255.255"),  # Google
+    ("8.8.4.4",    "255.255.255.255"),  # Google secondary
+
+    # --- Yandex service blocks (AS13238) — covers DoH, search, maps, mail,
+    # disk, music, taxi, eda, yastatic, etc.
+    ("5.45.192.0",     "255.255.248.0"),  # /21
+    ("5.255.192.0",    "255.255.240.0"),  # /20
+    ("77.88.0.0",      "255.255.192.0"),  # /18  (DNS lives in here)
+    ("87.250.224.0",   "255.255.224.0"),  # /19
+    ("93.158.128.0",   "255.255.128.0"),  # /17
+    ("178.154.128.0",  "255.255.128.0"),  # /17
+    ("213.180.192.0",  "255.255.224.0"),  # /19
+
+    # --- VK / Mail.ru group (AS47541, AS47764) ---
+    ("87.240.128.0",   "255.255.192.0"),  # /18
+    ("93.186.224.0",   "255.255.240.0"),  # /20
+    ("95.213.192.0",   "255.255.248.0"),  # /21
+
+    # --- yastatic.net / yandexcloud (Yandex CDN, different AS) ---
+    ("213.180.193.0",  "255.255.255.0"),  # /24
+]
 
 
 class ConnectionManager:
@@ -182,6 +222,14 @@ class ConnectionManager:
                 raise ConnectionError(
                     f"Не удалось добавить host-route для VPN-сервера ({server_ip})."
                 )
+
+            # Bypass DNS resolvers + big Russian service blocks (Yandex/VK
+            # ranges) so DoH and CDN traffic doesn't loop through the tunnel.
+            added_always = session.add_bypass_cidrs(
+                _ALWAYS_BYPASS, real.gateway, real.index,
+            )
+            self._log(f"[*] Добавлено {added_always} always-bypass роутов "
+                      f"(DNS-серверы + Yandex/VK CIDR'ы)")
 
             # Default route through TUN. Two /1 routes beat the existing
             # 0.0.0.0/0 even with a worse metric, so we use those instead of
