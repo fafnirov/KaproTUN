@@ -133,9 +133,31 @@ def _ps(script: str, timeout: float = 10.0) -> tuple[int, str, str]:
 
 @dataclass
 class InterfaceInfo:
-    name: str       # User-facing alias, e.g. "Беспроводная сеть" or "tun0"
-    index: int      # ifIndex
-    gateway: str = ""  # IPv4 gateway, empty for TUN
+    name: str               # User-facing alias, e.g. "Беспроводная сеть" or "tun0"
+    index: int              # ifIndex
+    gateway: str = ""       # IPv4 gateway, empty for TUN
+    interface_metric: int = 25  # base metric of the adapter itself
+
+
+def _get_interface_metric_v4(if_index: int) -> int:
+    """Read the IPv4 interface metric for a given adapter index.
+
+    Important for CreateIpForwardEntry — m1 in MIB_IPFORWARDROW is the
+    *stored* metric, not the route metric, and Windows rejects (rc=160,
+    ERROR_BAD_ARGUMENTS) any value lower than the interface's own metric.
+    """
+    rc, out, _ = _ps(
+        f"Get-NetIPInterface -InterfaceIndex {if_index} -AddressFamily IPv4 "
+        f"-ErrorAction SilentlyContinue "
+        f"| Select-Object -ExpandProperty InterfaceMetric"
+    )
+    out = out.strip()
+    if not out:
+        return 25  # WiFi default — safe ceiling for most systems
+    try:
+        return int(out.splitlines()[0])
+    except (ValueError, IndexError):
+        return 25
 
 
 def get_default_route_v4() -> Optional[InterfaceInfo]:
@@ -152,10 +174,12 @@ def get_default_route_v4() -> Optional[InterfaceInfo]:
         data = json.loads(out)
     except json.JSONDecodeError:
         return None
+    idx = int(data.get("InterfaceIndex", 0))
     return InterfaceInfo(
         name=str(data.get("InterfaceAlias", "")),
-        index=int(data.get("InterfaceIndex", 0)),
+        index=idx,
         gateway=str(data.get("NextHop", "")),
+        interface_metric=_get_interface_metric_v4(idx),
     )
 
 

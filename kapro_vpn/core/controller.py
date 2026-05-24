@@ -217,9 +217,15 @@ class ConnectionManager:
         try:
             network_routes.configure_tun_interface(tun, TUN_LOCAL_ADDR, TUN_MASK)
 
+            # CreateIpForwardEntry needs m1 >= interface_metric (it's the
+            # STORED metric, not the route increment). Bumping by +1 keeps
+            # us above the adapter's base and still less than anything
+            # competing on the same /n.
+            bypass_metric = real.interface_metric + 1
+
             # Pin server IP through the real gateway (loop prevention).
             if not session.add_route(server_ip, "255.255.255.255",
-                                     real.gateway, real.index, metric=1):
+                                     real.gateway, real.index, metric=bypass_metric):
                 raise ConnectionError(
                     f"Не удалось добавить host-route для VPN-сервера ({server_ip})."
                 )
@@ -227,17 +233,19 @@ class ConnectionManager:
             # Bypass DNS resolvers + big Russian service blocks (Yandex/VK
             # ranges) so DoH and CDN traffic doesn't loop through the tunnel.
             added_always = session.add_bypass_cidrs(
-                _ALWAYS_BYPASS, real.gateway, real.index,
+                _ALWAYS_BYPASS, real.gateway, real.index, metric=bypass_metric,
             )
             self._log(f"[*] Добавлено {added_always} always-bypass роутов "
                       f"(DNS-серверы + Yandex/VK CIDR'ы)")
 
             # Default route through TUN. Two /1 routes beat the existing
-            # 0.0.0.0/0 even with a worse metric, so we use those instead of
-            # touching the system default.
-            if not session.add_route("0.0.0.0", "128.0.0.0", TUN_GATEWAY, tun.index, metric=1):
+            # 0.0.0.0/0 by being more specific, so we use those instead of
+            # touching the system default. Metric must be >= TUN interface's
+            # own metric for the same reason as above.
+            tun_metric = network_routes._get_interface_metric_v4(tun.index) + 1
+            if not session.add_route("0.0.0.0", "128.0.0.0", TUN_GATEWAY, tun.index, metric=tun_metric):
                 raise ConnectionError("Не удалось добавить маршрут 0.0.0.0/1 через TUN.")
-            if not session.add_route("128.0.0.0", "128.0.0.0", TUN_GATEWAY, tun.index, metric=1):
+            if not session.add_route("128.0.0.0", "128.0.0.0", TUN_GATEWAY, tun.index, metric=tun_metric):
                 raise ConnectionError("Не удалось добавить маршрут 128.0.0.0/1 через TUN.")
 
             # DNS via TUN so resolution doesn't leak to ISP.
@@ -263,7 +271,7 @@ class ConnectionManager:
                     f"{len(set(all_ips))} уникальных IP"
                     + (f" (не резолвнулось: {failed})" if failed else "")
                 )
-                added = session.add_bypass_routes(all_ips, real.gateway, real.index)
+                added = session.add_bypass_routes(all_ips, real.gateway, real.index, metric=bypass_metric)
                 self._log(f"[*] Добавлено {added} bypass-роутов для direct-доменов")
 
             # geoip:ru — bypass the entire Russian IP space so any RU-hosted
@@ -275,7 +283,7 @@ class ConnectionManager:
             if ru_cidrs:
                 self._log(f"[*] Добавляю {len(ru_cidrs)} CIDR'ов из geoip:ru…")
                 t0 = time.time()
-                added = session.add_bypass_cidrs(ru_cidrs, real.gateway, real.index)
+                added = session.add_bypass_cidrs(ru_cidrs, real.gateway, real.index, metric=bypass_metric)
                 self._log(f"[*] Добавлено {added} CIDR'ов за {time.time()-t0:.1f}с — российский IP-космос идёт мимо TUN")
             else:
                 self._log("[!] geoip:ru не закеширован — российские сайты с динамическими IP могут не работать")
