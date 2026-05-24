@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QSplashScreen
 from .core import autostart
 from .gui import icons
 from .gui.main_window import MainWindow
+from .gui.singleton import SingleInstanceGuard
 from .gui.styles import DARK_QSS
 
 
@@ -31,6 +32,15 @@ def main() -> int:
     # QApplication.quit() explicitly.
     app.setQuitOnLastWindowClosed(False)
 
+    # Single-instance check — bail early if another KaproVPN is already
+    # running (and tell it to show its window). Without this, double-
+    # clicking the shortcut while the app is in the tray would spawn a
+    # second xray fighting for port 2080.
+    guard = SingleInstanceGuard()
+    if not guard.acquire():
+        # Already running — we've asked the primary to show itself.
+        return 0
+
     splash = None
     if not start_minimized:
         splash = QSplashScreen(icons.splash_pixmap(320), Qt.WindowStaysOnTopHint)
@@ -39,6 +49,10 @@ def main() -> int:
         app.processEvents()
 
     window = MainWindow()
+    # Re-route "show" pings from any future second-launch attempts to
+    # the same code path the tray icon uses.
+    guard.setParent(window)  # keep the guard alive for the window's lifetime
+    guard.show_requested.connect(window._on_show_window)
 
     def reveal() -> None:
         if not start_minimized:
