@@ -22,6 +22,7 @@ from ..core import storage
 from ..core.parser import ProxyConfig
 from . import flags
 from .config_dialog import AddConfigDialog
+from .subscription_dialog import SubscriptionDialog
 
 
 class _PingerThread(QThread):
@@ -109,11 +110,15 @@ class ConfigsPickerDialog(QDialog):
 
         add_btn = QPushButton("＋ Добавить")
         add_btn.clicked.connect(self._on_add)
+        sub_btn = QPushButton("📥 Подписка")
+        sub_btn.setToolTip("Импортировать сразу много конфигов из URL подписки")
+        sub_btn.clicked.connect(self._on_import_subscription)
         remove_btn = QPushButton("Удалить")
         remove_btn.setObjectName("danger")
         remove_btn.clicked.connect(self._on_remove)
 
         button_row.addWidget(add_btn)
+        button_row.addWidget(sub_btn)
         button_row.addWidget(remove_btn)
         button_row.addStretch(1)
         layout.addLayout(button_row)
@@ -209,6 +214,33 @@ class ConfigsPickerDialog(QDialog):
         storage.save_configs(self._configs)
         self._current_name = new_cfg.name
         self._refresh()
+
+    def _on_import_subscription(self) -> None:
+        dlg = SubscriptionDialog(self)
+        if dlg.exec() != SubscriptionDialog.Accepted:
+            return
+        imported = dlg.imported_configs()
+        if not imported:
+            return
+        # Merge — name conflicts overwrite existing entries
+        existing_by_name = {c.name: i for i, c in enumerate(self._configs)}
+        added = replaced = 0
+        for cfg in imported:
+            if cfg.name in existing_by_name:
+                self._configs[existing_by_name[cfg.name]] = cfg
+                replaced += 1
+            else:
+                self._configs.append(cfg)
+                existing_by_name[cfg.name] = len(self._configs) - 1
+                added += 1
+        storage.save_configs(self._configs)
+        self._refresh()
+        self._start_pings()
+        QMessageBox.information(
+            self,
+            "Импорт завершён",
+            f"Добавлено новых: {added}\nЗаменено существующих: {replaced}",
+        )
 
     def _on_remove(self) -> None:
         idx = self._selected_index()

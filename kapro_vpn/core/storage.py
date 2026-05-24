@@ -80,6 +80,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "listen_port": 2080,
     "last_config_name": "",
     "auto_set_system_proxy": True,
+    "mode": "http",  # "http" (browser-only) or "tun" (system-wide, needs admin)
+    "autoconnect_on_launch": False,
+    "subscription_url": "",  # last imported subscription, for one-click re-sync
 }
 
 

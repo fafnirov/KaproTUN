@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
-from ..core import admin, storage, tun2socks_installer, xray_installer, xray_stats
+from ..core import admin, autostart, storage, tun2socks_installer, xray_installer, xray_stats
 from ..core.controller import MODE_HTTP_PROXY, MODE_TUN
 from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
@@ -219,6 +219,31 @@ class SettingsPage(QWidget):
         self.auto_proxy_check.toggled.connect(self._on_auto_proxy_changed)
         outer.addWidget(self.auto_proxy_check)
 
+        # --- Auto-start with Windows ---
+        sep_startup = QFrame()
+        sep_startup.setFrameShape(QFrame.HLine)
+        outer.addWidget(sep_startup)
+
+        startup_label = QLabel("При запуске Windows")
+        startup_label.setObjectName("h2")
+        outer.addWidget(startup_label)
+
+        self.autostart_check = QCheckBox(
+            "Запускать KaproVPN вместе с Windows (свёрнуто в трей)"
+        )
+        self.autostart_check.setChecked(autostart.is_enabled())
+        self.autostart_check.toggled.connect(self._on_autostart_changed)
+        outer.addWidget(self.autostart_check)
+
+        self.autoconnect_check = QCheckBox(
+            "Сразу подключаться при старте"
+        )
+        self.autoconnect_check.setChecked(
+            bool(manager.settings.get("autoconnect_on_launch", False))
+        )
+        self.autoconnect_check.toggled.connect(self._on_autoconnect_changed)
+        outer.addWidget(self.autoconnect_check)
+
         # Separator
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
@@ -287,6 +312,18 @@ class SettingsPage(QWidget):
 
     def _on_auto_proxy_changed(self, checked: bool) -> None:
         self._manager.update_settings(auto_set_system_proxy=checked)
+        self.settings_changed.emit()
+
+    def _on_autostart_changed(self, checked: bool) -> None:
+        ok = autostart.enable(minimized=True) if checked else autostart.disable()
+        if not ok:
+            # Revert checkbox state if the registry write failed
+            self.autostart_check.blockSignals(True)
+            self.autostart_check.setChecked(not checked)
+            self.autostart_check.blockSignals(False)
+
+    def _on_autoconnect_changed(self, checked: bool) -> None:
+        self._manager.update_settings(autoconnect_on_launch=checked)
         self.settings_changed.emit()
 
     def _on_mode_changed(self, _checked: bool) -> None:
@@ -617,6 +654,14 @@ class MainWindow(QMainWindow):
         self.logs_page.append("[*] Отключено, системный прокси восстановлен")
         show_toast(self, "Отключено", kind="info")
         self._refresh_home()
+
+    def trigger_autoconnect(self) -> None:
+        """Called from main.py shortly after launch if autoconnect_on_launch is on."""
+        if self.manager.is_connected() or self._connecting:
+            return
+        if self._active_config is None:
+            return
+        self._do_connect()
 
     def _on_open_picker(self) -> None:
         current_name = self._active_config.name if self._active_config else ""
