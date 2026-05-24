@@ -29,10 +29,13 @@ from ..core.controller import MODE_HTTP_PROXY, MODE_TUN
 from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
 from ..core.parser import ProxyConfig
+from . import icons
 from .config_dialog import AddConfigDialog
 from .configs_picker import ConfigsPickerDialog
 from .installer_dialog import ensure_geoip_ru_cached, ensure_tun2socks_installed, ensure_xray_installed
 from .sites_dialog import SitesDialog
+from .titlebar import TitleBar
+from .tray import TrayManager
 from .widgets import CircleConnectButton, ConfigCard, NavBar, StatusLabel
 
 
@@ -339,19 +342,26 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("KaproVPN")
+        self.setWindowIcon(icons.app_icon())
         self.setFixedSize(420, 740)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowMinimizeButtonHint)
 
         self.manager = ConnectionManager(on_log=self.log_received.emit)
         self.configs: list[ProxyConfig] = storage.load_configs()
         self._active_config: Optional[ProxyConfig] = self._restore_last_config()
         self._connected_at: float = 0.0
+        self._really_quitting = False
 
-        # --- Layout: stacked pages + nav bar ---
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        # --- App-shell layout (everything inside the rounded dark frame) ---
+        shell = QWidget()
+        shell.setObjectName("appShell")
+        self.setCentralWidget(shell)
+        root = QVBoxLayout(shell)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
+
+        self.titlebar = TitleBar()
+        root.addWidget(self.titlebar)
 
         self.stack = QStackedWidget()
         self.home_page = HomePage()
@@ -368,6 +378,10 @@ class MainWindow(QMainWindow):
 
         self.nav = NavBar()
         root.addWidget(self.nav)
+
+        # System tray (gracefully no-op if user's DE doesn't expose one)
+        self.tray = TrayManager(self)
+        self.tray.show()
 
         self._wire_signals()
         self._refresh_home()
@@ -390,6 +404,14 @@ class MainWindow(QMainWindow):
         self.nav.settings_clicked.connect(lambda: self._goto("settings"))
         self.nav.add_clicked.connect(self._on_add_config)
         self.log_received.connect(self.logs_page.append)
+        # Title-bar window controls (frameless mode)
+        self.titlebar.minimize_clicked.connect(self.showMinimized)
+        self.titlebar.close_clicked.connect(self._on_close_to_tray)
+        # System tray
+        self.tray.toggle_clicked.connect(self._on_connect_click)
+        self.tray.show_window_clicked.connect(self._on_show_window)
+        self.tray.quit_clicked.connect(self._on_quit_for_real)
+        self.tray.config_selected.connect(self._on_tray_config_picked)
 
     def _goto(self, name: str) -> None:
         if name == "home":
@@ -420,6 +442,7 @@ class MainWindow(QMainWindow):
             self.manager.disconnect()
             self._connected_at = 0.0
 
+        active_name = self._active_config.name if self._active_config else ""
         if self.manager.is_connected():
             elapsed = int(time.time() - self._connected_at) if self._connected_at else 0
             mm, ss = divmod(elapsed, 60)
@@ -427,10 +450,13 @@ class MainWindow(QMainWindow):
             timer = f"{hh:d}:{mm:02d}:{ss:02d}" if hh else f"{mm:02d}:{ss:02d}"
             mode_tag = "TUN" if self.manager.current_mode() == MODE_TUN else "HTTP"
             self.home_page.set_state("connected", f"{timer} · {mode_tag}")
+            self.tray.set_state("connected", active_name)
         else:
             self.home_page.set_state("idle")
+            self.tray.set_state("idle", active_name)
 
         self.home_page.set_config(self._active_config)
+        self.tray.set_configs(self.configs, active_name)
 
     # --- actions ----------------------------------------------------------
 
@@ -525,9 +551,57 @@ class MainWindow(QMainWindow):
                 "Изменения применятся при следующем подключении.",
             )
 
+    # --- tray + window lifecycle ------------------------------------------
+
+    def _on_show_window(self) -> None:
+        """Bring the main window back from minimized / tray-hidden."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_close_to_tray(self) -> None:
+        """X button: hide to tray. Real quit is via tray menu → Выход."""
+        if self.tray.is_available():
+            self.hide()
+            # Show a hint once so the user knows the app is still running
+            if not getattr(self, "_close_hint_shown", False):
+                self.tray.show_message(
+                    "KaproVPN свёрнут в трей",
+                    "Программа работает в фоне. Чтобы полностью выйти — "
+                    "правый клик по иконке в трее → Выход.",
+                )
+                self._close_hint_shown = True
+        else:
+            # No tray support — fall back to real quit so user isn't stranded.
+            self._on_quit_for_real()
+
+    def _on_quit_for_real(self) -> None:
+        """Disconnect, tear down tray, terminate the QApplication event loop."""
+        self._really_quitting = True
+        if self.manager.is_connected():
+            self.manager.disconnect()
+        self.tray.hide()
+        from PySide6.QtWidgets import QApplication
+        QApplication.quit()
+
+    def _on_tray_config_picked(self, cfg: ProxyConfig) -> None:
+        """User picked a config from the tray submenu — switch + reconnect."""
+        self._active_config = cfg
+        self.manager.update_settings(last_config_name=cfg.name)
+        if self.manager.is_connected():
+            self._do_disconnect()
+            self._do_connect()
+        self._refresh_home()
+
     # --- shutdown ---------------------------------------------------------
 
     def closeEvent(self, event) -> None:
-        if self.manager.is_connected():
-            self.manager.disconnect()
-        event.accept()
+        if self._really_quitting:
+            if self.manager.is_connected():
+                self.manager.disconnect()
+            event.accept()
+        else:
+            # Frameless mode doesn't show an X button, but Alt+F4 still
+            # triggers closeEvent — route it through the tray-hide path.
+            event.ignore()
+            self._on_close_to_tray()

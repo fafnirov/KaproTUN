@@ -3,7 +3,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import (
+    Property,
+    QEasingCurve,
+    QPropertyAnimation,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QColor, QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
@@ -21,10 +27,15 @@ from . import styles
 
 
 class CircleConnectButton(QPushButton):
-    """Large circular toggle button. Three visual states: idle, connecting, connected.
+    """Large circular toggle button with three animated states.
 
-    The amber glow when connected uses a drop-shadow effect that is enabled/disabled
-    rather than added/removed to keep size hints stable.
+    - idle:       static gray ring, no glow
+    - connecting: ring pulses (drop-shadow blur cycles 40 → 90 → 40, looping)
+    - connected:  static amber ring with full glow at 80
+
+    The pulse uses QPropertyAnimation on a real Qt property (_glow_radius)
+    rather than a python attribute, so the easing curve is honored and the
+    repaint is driven by Qt's event loop, not a manual QTimer.
     """
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -34,30 +45,47 @@ class CircleConnectButton(QPushButton):
         self.setFocusPolicy(Qt.NoFocus)
 
         self._glow = QGraphicsDropShadowEffect(self)
-        self._glow.setBlurRadius(80)
+        self._glow.setBlurRadius(0)
         self._glow.setOffset(0, 0)
         self._glow.setColor(QColor(styles.ACCENT))
         self.setGraphicsEffect(self._glow)
-        self._glow.setEnabled(False)
+
+        self._pulse = QPropertyAnimation(self, b"glow_radius", self)
+        self._pulse.setDuration(1400)
+        self._pulse.setStartValue(30.0)
+        self._pulse.setKeyValueAt(0.5, 90.0)
+        self._pulse.setEndValue(30.0)
+        self._pulse.setEasingCurve(QEasingCurve.InOutSine)
+        self._pulse.setLoopCount(-1)  # infinite loop
 
         self._state = "idle"
+
+    # Animatable Qt property for QPropertyAnimation
+    def _get_glow_radius(self) -> float:
+        return float(self._glow.blurRadius())
+
+    def _set_glow_radius(self, value: float) -> None:
+        self._glow.setBlurRadius(value)
+
+    glow_radius = Property(float, _get_glow_radius, _set_glow_radius)
 
     def set_state(self, state: str) -> None:
         """state ∈ {'idle', 'connecting', 'connected'}"""
         if state == self._state:
             return
         self._state = state
+        self._pulse.stop()
         if state == "connected":
             self.setText("ПОДКЛЮЧЕНО")
-            self._glow.setEnabled(True)
+            self._glow.setBlurRadius(80)
             self.setProperty("state", "connected")
         elif state == "connecting":
             self.setText("ПОДКЛЮЧЕНИЕ…")
-            self._glow.setEnabled(False)
+            self._pulse.start()
             self.setProperty("state", "connecting")
         else:
             self.setText("ВКЛЮЧИТЬ")
-            self._glow.setEnabled(False)
+            self._glow.setBlurRadius(0)
             self.setProperty("state", "idle")
         # Force QSS re-evaluation for the property selector
         self.style().unpolish(self)

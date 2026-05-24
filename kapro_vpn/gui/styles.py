@@ -20,8 +20,65 @@ DARK_QSS = f"""
     color: {TEXT};
 }}
 
-QMainWindow, QDialog, QWidget#page {{
+QMainWindow, QDialog {{
     background-color: {BG};
+}}
+
+QWidget#page {{
+    background-color: {BG};
+}}
+
+QWidget#appShell {{
+    background-color: {BG};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+}}
+
+/* --- custom title bar --- */
+
+QFrame#titleBar {{
+    background-color: {SURFACE};
+    border: none;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+    border-bottom: 1px solid {BORDER};
+}}
+
+QLabel#titleBarText {{
+    color: {TEXT};
+    font-weight: 600;
+    font-size: 9pt;
+}}
+
+QPushButton#titleBarBtn {{
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    color: {TEXT_MUTED};
+    font-size: 11pt;
+    font-weight: 400;
+    padding: 0;
+}}
+
+QPushButton#titleBarBtn:hover {{
+    background-color: {SURFACE_HI};
+    color: {TEXT};
+}}
+
+QPushButton#titleBarCloseBtn {{
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    border-top-right-radius: 10px;
+    color: {TEXT_MUTED};
+    font-size: 11pt;
+    font-weight: 400;
+    padding: 0;
+}}
+
+QPushButton#titleBarCloseBtn:hover {{
+    background-color: {DANGER};
+    color: white;
 }}
 
 /* --- generic text helpers --- */
