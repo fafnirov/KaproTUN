@@ -129,6 +129,28 @@ def _probe_local_proxy(host: str, port: int, timeout: float = 0.5) -> bool:
         return False
 
 
+def result_from_body(body: str, via_proxy: bool = False) -> SubscriptionResult:
+    """Take a raw subscription response and turn it into a SubscriptionResult.
+
+    Shared between the URL-fetch flow and the manual-paste fallback in the
+    UI, so a body the user copied from their browser parses identically
+    to one we downloaded ourselves.
+    """
+    share_urls = parse_subscription_body(body)
+    configs: list[ProxyConfig] = []
+    errors: list[str] = []
+    for share_url in share_urls:
+        try:
+            configs.append(parse(share_url))
+        except ParseError as e:
+            short = share_url[:60] + ("…" if len(share_url) > 60 else "")
+            errors.append(f"{short} — {e}")
+    return SubscriptionResult(
+        configs=configs, errors=errors, raw_lines=len(share_urls),
+        via_proxy=via_proxy,
+    )
+
+
 def import_subscription(
     url: str,
     timeout: tuple[float, float] = (10, 20),
@@ -142,20 +164,7 @@ def import_subscription(
     Raises requests.RequestException on network failure.
     """
     body = _fetch(url, timeout, proxy_url=proxy_url)
-
-    share_urls = parse_subscription_body(body)
-    configs: list[ProxyConfig] = []
-    errors: list[str] = []
-    for share_url in share_urls:
-        try:
-            configs.append(parse(share_url))
-        except ParseError as e:
-            short = share_url[:60] + ("…" if len(share_url) > 60 else "")
-            errors.append(f"{short} — {e}")
-    return SubscriptionResult(
-        configs=configs, errors=errors, raw_lines=len(share_urls),
-        via_proxy=bool(proxy_url),
-    )
+    return result_from_body(body, via_proxy=bool(proxy_url))
 
 
 def import_with_dpi_fallback(
