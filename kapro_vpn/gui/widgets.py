@@ -29,14 +29,25 @@ from . import styles
 class CircleConnectButton(QPushButton):
     """Large circular toggle button with three animated states.
 
-    - idle:       static gray ring, no glow
-    - connecting: ring pulses (drop-shadow blur cycles 40 → 90 → 40, looping)
-    - connected:  static amber ring with full glow at 80
+    Each state transition starts with a one-shot "burst": the glow radius
+    snaps up to 130 and eases back to the target — gives the user the
+    tactile feedback of a button being hit. After the burst settles, the
+    long-form animation for the new state takes over:
 
-    The pulse uses QPropertyAnimation on a real Qt property (_glow_radius)
-    rather than a python attribute, so the easing curve is honored and the
-    repaint is driven by Qt's event loop, not a manual QTimer.
+    - idle:       glow at 0 (no halo)
+    - connecting: looping pulse 30 → 90 → 30 every 1.4 s
+    - connected:  steady amber halo at 80
+
+    Glow is driven by a Qt-Property (glow_radius) so a single
+    QPropertyAnimation can drive easing curves the user can see, and the
+    burst/pulse chain via QPropertyAnimation.finished hand-off.
     """
+
+    BURST_PEAK = 130.0
+    BURST_DURATION_MS = 400
+    PULSE_LOW = 30.0
+    PULSE_HIGH = 90.0
+    CONNECTED_GLOW = 80.0
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__("ВКЛЮЧИТЬ", parent)
@@ -50,17 +61,25 @@ class CircleConnectButton(QPushButton):
         self._glow.setColor(QColor(styles.ACCENT))
         self.setGraphicsEffect(self._glow)
 
+        # The looping pulse used while in "connecting"
         self._pulse = QPropertyAnimation(self, b"glow_radius", self)
         self._pulse.setDuration(1400)
-        self._pulse.setStartValue(30.0)
-        self._pulse.setKeyValueAt(0.5, 90.0)
-        self._pulse.setEndValue(30.0)
+        self._pulse.setStartValue(self.PULSE_LOW)
+        self._pulse.setKeyValueAt(0.5, self.PULSE_HIGH)
+        self._pulse.setEndValue(self.PULSE_LOW)
         self._pulse.setEasingCurve(QEasingCurve.InOutSine)
-        self._pulse.setLoopCount(-1)  # infinite loop
+        self._pulse.setLoopCount(-1)
+
+        # One-shot burst played on every state change
+        self._burst = QPropertyAnimation(self, b"glow_radius", self)
+        self._burst.setDuration(self.BURST_DURATION_MS)
+        self._burst.setEasingCurve(QEasingCurve.OutQuad)
+        self._burst_chain_target = None  # callable to invoke when burst finishes
 
         self._state = "idle"
 
-    # Animatable Qt property for QPropertyAnimation
+    # --- animatable Qt property ------------------------------------------
+
     def _get_glow_radius(self) -> float:
         return float(self._glow.blurRadius())
 
@@ -69,27 +88,56 @@ class CircleConnectButton(QPushButton):
 
     glow_radius = Property(float, _get_glow_radius, _set_glow_radius)
 
+    # --- state machine ---------------------------------------------------
+
     def set_state(self, state: str) -> None:
         """state ∈ {'idle', 'connecting', 'connected'}"""
         if state == self._state:
             return
         self._state = state
-        self._pulse.stop()
+
         if state == "connected":
             self.setText("ПОДКЛЮЧЕНО")
-            self._glow.setBlurRadius(80)
             self.setProperty("state", "connected")
+            self._start_burst(settle_to=self.CONNECTED_GLOW, then=None)
         elif state == "connecting":
             self.setText("ПОДКЛЮЧЕНИЕ…")
-            self._pulse.start()
             self.setProperty("state", "connecting")
+            self._start_burst(settle_to=self.PULSE_LOW, then=self._pulse.start)
         else:
             self.setText("ВКЛЮЧИТЬ")
-            self._glow.setBlurRadius(0)
             self.setProperty("state", "idle")
-        # Force QSS re-evaluation for the property selector
+            self._start_burst(settle_to=0.0, then=None)
+
+        # Re-polish so QSS property selectors update (border colors, etc.)
         self.style().unpolish(self)
         self.style().polish(self)
+
+    def _start_burst(self, settle_to: float, then) -> None:
+        """Quick attention-grabbing pulse, then optionally chain another anim.
+
+        `then` is a zero-arg callable invoked when the burst's finished
+        signal fires — used to start the looping pulse after the burst
+        settles, so the two animations don't fight over glow_radius.
+        """
+        self._pulse.stop()
+        self._burst.stop()
+        # Connect-once: hold a single chain handler in a slot so we can
+        # disconnect cleanly without RuntimeWarnings about "no connection".
+        if not hasattr(self, "_burst_chain_connected"):
+            self._burst.finished.connect(self._on_burst_finished)
+            self._burst_chain_connected = True
+        self._burst_chain_target = then
+
+        self._burst.setStartValue(self._glow.blurRadius())
+        self._burst.setKeyValueAt(0.3, self.BURST_PEAK)
+        self._burst.setEndValue(settle_to)
+        self._burst.start()
+
+    def _on_burst_finished(self) -> None:
+        target, self._burst_chain_target = self._burst_chain_target, None
+        if target is not None:
+            target()
 
 
 class ConfigCard(QFrame):

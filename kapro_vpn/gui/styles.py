@@ -152,6 +152,13 @@ QPushButton#circleBtn:hover {{
     color: {TEXT};
 }}
 
+/* Mouse-down feedback: brighter ring, thicker border — instant tactile cue
+   before the burst animation kicks in. */
+QPushButton#circleBtn:pressed {{
+    border: 4px solid {ACCENT_HI};
+    color: {ACCENT_HI};
+}}
+
 QPushButton#circleBtn[state="connecting"] {{
     border-color: {ACCENT_DIM};
     color: {ACCENT};
@@ -160,6 +167,12 @@ QPushButton#circleBtn[state="connecting"] {{
 QPushButton#circleBtn[state="connected"] {{
     border-color: {ACCENT};
     color: {ACCENT};
+}}
+
+QPushButton#circleBtn[state="connecting"]:pressed,
+QPushButton#circleBtn[state="connected"]:pressed {{
+    border: 4px solid {ACCENT_HI};
+    color: {ACCENT_HI};
 }}
 
 /* --- icon buttons (nav bar, card chevron) --- */
