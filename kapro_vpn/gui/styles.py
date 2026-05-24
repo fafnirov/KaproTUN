@@ -263,6 +263,23 @@ QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox {{
     selection-color: #1a1209;
 }}
 
+/* QSpinBox needs explicit sizing — otherwise the up/down arrow buttons
+   compress the text field to a hairline on some Windows themes. */
+QSpinBox {{
+    min-height: 22px;
+    padding: 4px 8px;
+}}
+
+QSpinBox::up-button, QSpinBox::down-button {{
+    background-color: {SURFACE_HI};
+    border: none;
+    width: 18px;
+}}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+    background-color: #3a3a3d;
+}}
+
 QPlainTextEdit, QTextEdit {{
     font-family: "Cascadia Mono", "Consolas", monospace;
     font-size: 9pt;

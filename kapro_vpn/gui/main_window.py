@@ -138,6 +138,7 @@ class SettingsPage(QWidget):
 
     sites_clicked = Signal()
     logs_clicked = Signal()
+    subscription_clicked = Signal()
     settings_changed = Signal()
 
     def __init__(self, manager: ConnectionManager, parent: Optional[QWidget] = None):
@@ -159,12 +160,8 @@ class SettingsPage(QWidget):
         outer.addWidget(mode_label)
 
         self.mode_group = QButtonGroup(self)
-        self.radio_http = QRadioButton(
-            "HTTP-прокси — только браузер (без прав администратора)"
-        )
-        self.radio_tun = QRadioButton(
-            "TUN — все приложения, включая Telegram (нужны права администратора)"
-        )
+        self.radio_http = QRadioButton("HTTP-прокси (только браузер)")
+        self.radio_tun = QRadioButton("TUN (все приложения, нужен админ)")
         self.mode_group.addButton(self.radio_http)
         self.mode_group.addButton(self.radio_tun)
         current_mode = manager.settings.get("mode", MODE_HTTP_PROXY)
@@ -175,7 +172,17 @@ class SettingsPage(QWidget):
         self.radio_http.toggled.connect(self._on_mode_changed)
         self.radio_tun.toggled.connect(self._on_mode_changed)
         outer.addWidget(self.radio_http)
+        http_hint = QLabel("Работает с Chrome/Edge/Firefox. ТГ и игры не туннелируются.")
+        http_hint.setObjectName("dim")
+        http_hint.setWordWrap(True)
+        http_hint.setContentsMargins(28, 0, 0, 4)
+        outer.addWidget(http_hint)
         outer.addWidget(self.radio_tun)
+        tun_hint = QLabel("Туннелирует все программы системно: ТГ, Steam, игры.")
+        tun_hint.setObjectName("dim")
+        tun_hint.setWordWrap(True)
+        tun_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(tun_hint)
 
         # Admin status / relaunch button shown only when relevant
         self._admin_row = QHBoxLayout()
@@ -211,13 +218,17 @@ class SettingsPage(QWidget):
 
         # --- Auto system proxy ---
         self.auto_proxy_check = QCheckBox(
-            "Автоматически ставить системный прокси Windows (только HTTP-режим)"
+            "Автоматически ставить системный прокси Windows"
         )
         self.auto_proxy_check.setChecked(
             bool(manager.settings.get("auto_set_system_proxy", True))
         )
         self.auto_proxy_check.toggled.connect(self._on_auto_proxy_changed)
         outer.addWidget(self.auto_proxy_check)
+        proxy_hint = QLabel("Только для HTTP-режима. В TUN не нужно.")
+        proxy_hint.setObjectName("dim")
+        proxy_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(proxy_hint)
 
         # --- Auto-start with Windows ---
         sep_startup = QFrame()
@@ -228,16 +239,16 @@ class SettingsPage(QWidget):
         startup_label.setObjectName("h2")
         outer.addWidget(startup_label)
 
-        self.autostart_check = QCheckBox(
-            "Запускать KaproVPN вместе с Windows (свёрнуто в трей)"
-        )
+        self.autostart_check = QCheckBox("Запускать вместе с Windows")
         self.autostart_check.setChecked(autostart.is_enabled())
         self.autostart_check.toggled.connect(self._on_autostart_changed)
         outer.addWidget(self.autostart_check)
+        autostart_hint = QLabel("Запустится свёрнутым в трей.")
+        autostart_hint.setObjectName("dim")
+        autostart_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(autostart_hint)
 
-        self.autoconnect_check = QCheckBox(
-            "Сразу подключаться при старте"
-        )
+        self.autoconnect_check = QCheckBox("Сразу подключаться при старте")
         self.autoconnect_check.setChecked(
             bool(manager.settings.get("autoconnect_on_launch", False))
         )
@@ -248,6 +259,14 @@ class SettingsPage(QWidget):
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
         outer.addWidget(sep)
+
+        # --- Subscription import link ---
+        sub_row, _ = self._make_link_row(
+            "Импорт по подписке",
+            "одна ссылка → много конфигов от провайдера",
+            self.subscription_clicked.emit,
+        )
+        outer.addLayout(sub_row)
 
         # --- Sites editor link ---
         sites_row, self._sites_count_label = self._make_link_row(
@@ -439,7 +458,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("KaproVPN")
         self.setWindowIcon(icons.app_icon())
-        self.setFixedSize(420, 740)
+        # 480 px gives Russian labels enough breathing room — at 420 the
+        # radio-button text and a few hints were getting clipped.
+        self.setFixedSize(480, 760)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowMinimizeButtonHint)
 
         self.manager = ConnectionManager(on_log=self.log_received.emit)
@@ -498,6 +519,7 @@ class MainWindow(QMainWindow):
         self.home_page.card_clicked.connect(self._on_open_picker)
         self.settings_page.sites_clicked.connect(self._on_edit_sites)
         self.settings_page.logs_clicked.connect(lambda: self.stack.setCurrentIndex(2))
+        self.settings_page.subscription_clicked.connect(self._on_import_subscription)
         self.logs_page.back_clicked.connect(lambda: self._goto("settings"))
         self.nav.home_clicked.connect(lambda: self._goto("home"))
         self.nav.settings_clicked.connect(lambda: self._goto("settings"))
@@ -700,6 +722,37 @@ class MainWindow(QMainWindow):
         self._goto("home")
         self._refresh_home()
         show_toast(self, f"Конфиг «{new_cfg.name}» добавлен", kind="success")
+
+    def _on_import_subscription(self) -> None:
+        from .subscription_dialog import SubscriptionDialog
+        dlg = SubscriptionDialog(self)
+        if dlg.exec() != SubscriptionDialog.Accepted:
+            return
+        imported = dlg.imported_configs()
+        if not imported:
+            return
+        existing_by_name = {c.name: i for i, c in enumerate(self.configs)}
+        added = replaced = 0
+        for cfg in imported:
+            if cfg.name in existing_by_name:
+                self.configs[existing_by_name[cfg.name]] = cfg
+                replaced += 1
+            else:
+                self.configs.append(cfg)
+                existing_by_name[cfg.name] = len(self.configs) - 1
+                added += 1
+        storage.save_configs(self.configs)
+        # If no active config yet, pick the first imported one
+        if self._active_config is None and self.configs:
+            self._active_config = self.configs[0]
+            self.manager.update_settings(last_config_name=self._active_config.name)
+        self._refresh_home()
+        show_toast(
+            self,
+            f"Импорт: +{added} новых, ↻{replaced} обновлено",
+            kind="success",
+            duration_ms=4000,
+        )
 
     def _on_edit_sites(self) -> None:
         dlg = SitesDialog(self)
