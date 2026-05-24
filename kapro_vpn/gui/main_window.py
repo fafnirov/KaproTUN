@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -146,7 +147,25 @@ class SettingsPage(QWidget):
         self.setObjectName("page")
         self._manager = manager
 
-        outer = QVBoxLayout(self)
+        # The settings list is taller than the fixed 760-px window can hold,
+        # so wrap it in a scroll area. Wrapper layout has zero margins; the
+        # `outer` layout (inside the scrolled content) keeps the actual
+        # padding so scrollbar appears flush with the right edge.
+        wrapper = QVBoxLayout(self)
+        wrapper.setContentsMargins(0, 0, 0, 0)
+        wrapper.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setObjectName("settingsScroll")
+        wrapper.addWidget(scroll)
+
+        content = QWidget()
+        content.setObjectName("page")
+        scroll.setWidget(content)
+        outer = QVBoxLayout(content)
         outer.setContentsMargins(24, 20, 24, 16)
         outer.setSpacing(14)
 
@@ -209,6 +228,7 @@ class SettingsPage(QWidget):
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1024, 65535)
         self.port_spin.setValue(int(manager.settings.get("listen_port", 2080)))
+        self.port_spin.setFixedWidth(110)  # don't stretch across the row
         self.port_spin.valueChanged.connect(self._on_port_changed)
         port_block.addWidget(self.port_spin)
         port_hint = QLabel("Браузер должен ходить на 127.0.0.1:<этот порт>")

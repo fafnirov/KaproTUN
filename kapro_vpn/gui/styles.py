@@ -334,6 +334,17 @@ QMenu::item:selected {{
     color: {ACCENT};
 }}
 
+/* --- scroll area inside Settings page --- */
+
+QScrollArea#settingsScroll {{
+    background: transparent;
+    border: none;
+}}
+
+QScrollArea#settingsScroll > QWidget > QWidget {{
+    background: {BG};
+}}
+
 /* --- scrollbars --- */
 
 QScrollBar:vertical {{
