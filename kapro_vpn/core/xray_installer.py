@@ -1,7 +1,25 @@
-"""Downloads and extracts the Xray-core Windows binary from GitHub releases."""
+"""Downloads and extracts the Xray-core binary from GitHub releases.
+
+Per-platform asset selection. Xray-core release names follow the
+pattern Xray-<os>-<arch>.zip — we map the current sys.platform +
+machine() to the right one:
+
+  Windows x64        → Xray-windows-64.zip
+  Windows ARM64      → Xray-windows-arm64-v8a.zip
+  macOS Intel        → Xray-macos-64.zip
+  macOS Apple Silicon→ Xray-macos-arm64-v8a.zip
+  Linux x64          → Xray-linux-64.zip
+  Linux ARM64        → Xray-linux-arm64-v8a.zip
+
+On Unix-likes we chmod 755 the extracted binary so it can actually run.
+"""
 from __future__ import annotations
 
 import io
+import os
+import platform
+import stat
+import sys
 import zipfile
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -11,11 +29,35 @@ import requests
 from . import paths
 
 GITHUB_LATEST = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
-PINNED_FALLBACK_URL = (
-    "https://github.com/XTLS/Xray-core/releases/download/"
-    "v26.3.27/Xray-windows-64.zip"
-)
-ASSET_MARKER = "windows-64"
+# Pinned fallback used if the live API is unreachable (rate-limit,
+# DNS blocked, etc.). Mirrors the asset matrix above.
+PINNED_VERSION = "v26.3.27"
+
+
+def _asset_marker() -> str:
+    """Return the lowercase substring that identifies our platform's asset
+    in a Xray-core release.
+
+    The naming convention is `Xray-<os>-<arch>` — we match on the
+    second-half so 'windows-64' vs 'windows-arm64-v8a' don't collide.
+    """
+    machine = platform.machine().lower()
+    is_arm64 = machine in ("arm64", "aarch64")
+    if sys.platform == "win32":
+        return "windows-arm64-v8a" if is_arm64 else "windows-64"
+    if sys.platform == "darwin":
+        return "macos-arm64-v8a" if is_arm64 else "macos-64"
+    # Treat everything else as Linux. Xray ships glibc builds; users on
+    # musl distros (Alpine) need to install xray manually for now.
+    return "linux-arm64-v8a" if is_arm64 else "linux-64"
+
+
+def _pinned_fallback_url() -> str:
+    return (
+        f"https://github.com/XTLS/Xray-core/releases/download/"
+        f"{PINNED_VERSION}/Xray-{_asset_marker()}.zip"
+    )
+
 
 ProgressCb = Optional[Callable[[int, int], None]]
 
@@ -48,6 +90,7 @@ def get_installed_version() -> Optional[str]:
 
 
 def fetch_latest_release() -> ReleaseInfo:
+    marker = _asset_marker()
     try:
         r = requests.get(GITHUB_LATEST, timeout=10)
         r.raise_for_status()
@@ -55,8 +98,9 @@ def fetch_latest_release() -> ReleaseInfo:
         version = data.get("tag_name", "unknown")
         for asset in data.get("assets", []):
             name = asset.get("name", "")
-            # Xray-core asset is "Xray-windows-64.zip" — case-insensitive contains check
-            if ASSET_MARKER in name.lower() and name.endswith(".zip"):
+            # Match on the platform marker AND .zip — Xray ships both
+            # .zip and .dgst variants; we want the archive.
+            if marker in name.lower() and name.endswith(".zip"):
                 return ReleaseInfo(
                     version=version,
                     url=asset["browser_download_url"],
@@ -65,14 +109,14 @@ def fetch_latest_release() -> ReleaseInfo:
     except Exception:
         pass
     return ReleaseInfo(
-        version="v26.3.27",
-        url=PINNED_FALLBACK_URL,
-        filename="Xray-windows-64.zip",
+        version=PINNED_VERSION,
+        url=_pinned_fallback_url(),
+        filename=f"Xray-{marker}.zip",
     )
 
 
 def download_and_install(progress: ProgressCb = None) -> None:
-    """Download latest Xray-core zip, extract xray.exe + geo data files.
+    """Download latest Xray-core zip, extract xray binary + geo data files.
 
     Per-chunk read timeout (20 s) + 3 retries — survives the case where a
     throttled CDN starts a download but stops sending bytes mid-stream.
@@ -97,23 +141,42 @@ def download_and_install(progress: ProgressCb = None) -> None:
             break
         except (requests.exceptions.RequestException, OSError) as e:
             if attempt == 2:
-                raise RuntimeError(f"Не удалось скачать Xray-core после 3 попыток: {e}") from e
+                raise RuntimeError(
+                    f"Не удалось скачать Xray-core после 3 попыток: {e}"
+                ) from e
     buf = io.BytesIO(raw)
 
     install_dir = paths.xray_dir()
+    # The binary name we ship as varies per OS, but inside the zip it's
+    # always "xray" (unix) or "xray.exe" (windows). Pull whichever shows
+    # up plus the geo data, and write it under the right name for our OS.
+    target_bin = paths.xray_exe()
+    extracted_bin = False
     with zipfile.ZipFile(buf) as zf:
-        # Xray zip contains xray.exe at root plus geoip.dat / geosite.dat
         for member in zf.namelist():
             base = member.rsplit("/", 1)[-1]
             if not base or base.endswith("/"):
                 continue
-            # Only extract files we care about — skip docs/readmes
-            if base.lower() in ("xray.exe", "geoip.dat", "geosite.dat"):
-                with zf.open(member) as src:
-                    (install_dir / base).write_bytes(src.read())
+            base_lower = base.lower()
+            if base_lower in ("xray", "xray.exe"):
+                data = zf.read(member)
+                target_bin.write_bytes(data)
+                extracted_bin = True
+            elif base_lower in ("geoip.dat", "geosite.dat"):
+                (install_dir / base).write_bytes(zf.read(member))
 
-    if not paths.xray_exe().is_file():
-        raise RuntimeError("xray.exe not found in the downloaded archive")
+    if not extracted_bin or not target_bin.is_file():
+        raise RuntimeError("xray binary not found in the downloaded archive")
+
+    # Unix-likes need the exec bit. Belt-and-braces: set it for owner+group+
+    # other so a sudo install for one user, then non-sudo run by another,
+    # doesn't break.
+    if sys.platform != "win32":
+        try:
+            st = target_bin.stat()
+            target_bin.chmod(st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        except OSError:
+            pass
 
 
 def ensure_installed(progress: ProgressCb = None) -> None:

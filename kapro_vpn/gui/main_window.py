@@ -1,6 +1,7 @@
 """Main application window — compact, mobile-app-style single-screen layout."""
 from __future__ import annotations
 
+import sys
 import time
 from typing import Optional
 
@@ -209,10 +210,22 @@ class SettingsPage(QWidget):
         self.mode_group.addButton(self.radio_http)
         self.mode_group.addButton(self.radio_tun)
         current_mode = manager.settings.get("mode", MODE_HTTP_PROXY)
+        # TUN is Windows-only in v1.0 — disable the radio + add an explanatory
+        # hint on mac/linux so the user doesn't wonder why the toggle is dead.
+        tun_supported = sys.platform == "win32"
+        if not tun_supported and current_mode == MODE_TUN:
+            current_mode = MODE_HTTP_PROXY  # auto-migrate stale Windows-only setting
+            manager.update_settings(mode=MODE_HTTP_PROXY)
         if current_mode == MODE_TUN:
             self.radio_tun.setChecked(True)
         else:
             self.radio_http.setChecked(True)
+        if not tun_supported:
+            self.radio_tun.setEnabled(False)
+            self.radio_tun.setToolTip(
+                "TUN-режим пока работает только на Windows. "
+                "В roadmap'е для macOS/Linux."
+            )
         self.radio_http.toggled.connect(self._on_mode_changed)
         self.radio_tun.toggled.connect(self._on_mode_changed)
         outer.addWidget(self.radio_http)
@@ -222,7 +235,12 @@ class SettingsPage(QWidget):
         http_hint.setContentsMargins(28, 0, 0, 4)
         outer.addWidget(http_hint)
         outer.addWidget(self.radio_tun)
-        tun_hint = QLabel("Туннелирует все программы системно: ТГ, Steam, игры.")
+        tun_hint_text = (
+            "Туннелирует все программы системно: ТГ, Steam, игры."
+            if tun_supported else
+            "Туннелирует все программы системно. Сейчас доступно только в Windows-сборке."
+        )
+        tun_hint = QLabel(tun_hint_text)
         tun_hint.setObjectName("dim")
         tun_hint.setWordWrap(True)
         tun_hint.setContentsMargins(28, 0, 0, 0)
@@ -362,13 +380,20 @@ class SettingsPage(QWidget):
         outer.addWidget(sep2)
 
         engine_version = xray_installer.get_installed_version() or "не установлен"
-        tun_version = tun2socks_installer.get_installed_version() or "не установлен"
+        # tun2socks line only relevant on Windows (the only OS where TUN mode
+        # is currently available). Showing "не установлен" on mac/linux looks
+        # like a missing-dependency error to the user.
+        if sys.platform == "win32":
+            tun_version = tun2socks_installer.get_installed_version() or "не установлен"
+            tun_row = f"<div style='color:#71717a; font-size:9pt'>tun2socks: {tun_version}</div>"
+        else:
+            tun_row = ""
         # Xray's version string is long ("Xray 26.3.27 ... go1.26.1 windows/amd64")
         # — word-wrap so we don't clip the right edge of the panel.
         about = QLabel(
             f"<div style='color:#fafafa; font-weight:600'>KaproVPN v{__version__}</div>"
             f"<div style='color:#71717a; font-size:9pt'>Xray-core: {engine_version}</div>"
-            f"<div style='color:#71717a; font-size:9pt'>tun2socks: {tun_version}</div>"
+            f"{tun_row}"
             f"<div style='color:#71717a; font-size:9pt'>GPL v3 · "
             f"<a href='https://github.com/fafnirov/KaproVPN' style='color:#f59e0b'>"
             f"github.com/fafnirov/KaproVPN</a></div>"

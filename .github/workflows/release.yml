@@ -1,7 +1,8 @@
-name: Build & release KaproVPN.exe
+name: Build & release KaproVPN
 
-# Auto-builds whenever you push a vX.Y.Z tag, plus a manual button on
-# the Actions tab for ad-hoc builds you don't want to ship.
+# Auto-builds on every vX.Y.Z tag push for all three desktop OSes.
+# The matrix runs in parallel; each job produces its own artifact and
+# uploads to the same GitHub Release for the tag.
 on:
   push:
     tags:
@@ -9,12 +10,85 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # needed to upload assets to a Release
+  contents: write  # needed to upload release assets
 
 jobs:
   build:
-    name: Build Windows .exe
-    runs-on: windows-latest
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false  # one OS failing shouldn't block the others
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: KaproVPN-Windows-x64.exe
+            build_cmd: |
+              python -m PyInstaller KaproVPN.spec --noconfirm --log-level WARN
+              python -m PyInstaller KaproVPN-Setup.spec --noconfirm --log-level WARN
+            payload_path: |
+              dist/KaproVPN-Setup.exe
+              dist/KaproVPN.exe
+            shell: pwsh
+          - os: macos-latest
+            artifact_name: KaproVPN-macOS-arm64.dmg
+            # macos-latest is Apple Silicon (M-series). Build .app then
+            # wrap it in a .dmg via hdiutil. The .dmg is a single double-
+            # clickable file users drag into /Applications.
+            build_cmd: |
+              python -m PyInstaller KaproVPN.spec --noconfirm --log-level WARN
+              # Package .app into a .dmg
+              mkdir -p dist/dmg_root
+              cp -R dist/KaproVPN.app dist/dmg_root/
+              ln -s /Applications dist/dmg_root/Applications
+              hdiutil create -volname "KaproVPN" -srcfolder dist/dmg_root \
+                -ov -format UDZO dist/KaproVPN-macOS-arm64.dmg
+              rm -rf dist/dmg_root
+            payload_path: dist/KaproVPN-macOS-arm64.dmg
+            shell: bash
+          - os: ubuntu-latest
+            artifact_name: KaproVPN-Linux-x64.AppImage
+            # AppImage is the most distro-agnostic format. We package
+            # the PyInstaller output into AppDir layout then run
+            # appimagetool. The resulting .AppImage is one chmod +x
+            # away from running on any glibc-2.31+ distro.
+            build_cmd: |
+              python -m PyInstaller KaproVPN.spec --noconfirm --log-level WARN
+              # AppDir layout per AppImage spec
+              mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps \
+                       AppDir/usr/share/applications
+              cp dist/KaproVPN AppDir/usr/bin/kaprovpn
+              chmod +x AppDir/usr/bin/kaprovpn
+              cp kapro_vpn/data/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/kaprovpn.png
+              cp kapro_vpn/data/icon.png AppDir/kaprovpn.png  # root icon, AppImage requires it
+              cat > AppDir/kaprovpn.desktop <<'EOF'
+              [Desktop Entry]
+              Type=Application
+              Name=KaproVPN
+              Comment=VPN client with split routing for Russian sites
+              Exec=kaprovpn
+              Icon=kaprovpn
+              Categories=Network;
+              Terminal=false
+              EOF
+              cp AppDir/kaprovpn.desktop AppDir/usr/share/applications/
+              cat > AppDir/AppRun <<'EOF'
+              #!/bin/bash
+              HERE="$(dirname "$(readlink -f "${0}")")"
+              exec "${HERE}/usr/bin/kaprovpn" "$@"
+              EOF
+              chmod +x AppDir/AppRun
+              # Fetch appimagetool once per build
+              wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage \
+                -O appimagetool
+              chmod +x appimagetool
+              ./appimagetool --appimage-extract
+              ARCH=x86_64 ./squashfs-root/AppRun AppDir dist/KaproVPN-Linux-x64.AppImage
+            payload_path: dist/KaproVPN-Linux-x64.AppImage
+            shell: bash
+
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
 
     steps:
       - uses: actions/checkout@v4
@@ -25,67 +99,61 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      - name: Install Linux system deps (xcb, etc.)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          # Qt6 wants these at runtime — PySide6 wheel doesn't include
+          # the X11/wayland platform plugins' system dependencies.
+          sudo apt-get install -y libxcb-cursor0 libxcb-xinerama0 \
+            libxkbcommon-x11-0 libegl1 libgl1 libxkbcommon0 libdbus-1-3 \
+            wget fuse libfuse2
+
       - name: Install build dependencies
-        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-build.txt
 
-      - name: Build KaproVPN.exe (portable)
-        shell: pwsh
-        run: |
-          python -m PyInstaller KaproVPN.spec --noconfirm --log-level WARN
-
-      - name: Build KaproVPN-Setup.exe (installer, embeds the portable exe)
-        shell: pwsh
-        run: |
-          python -m PyInstaller KaproVPN-Setup.spec --noconfirm --log-level WARN
+      - name: Build payload
+        run: ${{ matrix.build_cmd }}
 
       - name: Show built artifacts
-        shell: pwsh
-        run: |
-          Get-ChildItem dist/ | Format-Table Name, Length
+        if: matrix.os == 'windows-latest'
+        run: Get-ChildItem dist/ | Format-Table Name, Length
+
+      - name: Show built artifacts (unix)
+        if: matrix.os != 'windows-latest'
+        run: ls -lh dist/
 
       - name: Upload artifact (for manual runs)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: KaproVPN-Setup-${{ github.sha }}
-          # Only ship the installer publicly. The portable KaproVPN.exe
-          # is still built (the installer embeds it), but isn't uploaded.
-          path: dist/KaproVPN-Setup.exe
+          name: ${{ matrix.artifact_name }}-${{ github.sha }}
+          path: ${{ matrix.payload_path }}
           if-no-files-found: error
 
       - name: Attach to GitHub Release (tag pushes)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          # Both files are uploaded: Setup.exe is what users download,
-          # KaproVPN.exe is the payload the installer fetches at install
-          # time. Listing it second in the assets keeps Setup.exe on top.
-          files: |
-            dist/KaproVPN-Setup.exe
-            dist/KaproVPN.exe
+          files: ${{ matrix.payload_path }}
           generate_release_notes: true
           body: |
             ## KaproVPN ${{ github.ref_name }}
 
-            ### ⬇ Скачать
+            ### ⬇ Скачать (выбери под свою систему)
 
-            **[`KaproVPN-Setup.exe`](../../releases/download/${{ github.ref_name }}/KaproVPN-Setup.exe)** — установщик (~45 МБ).
+            | OS | Файл | Что делать |
+            |----|------|-----------|
+            | Windows 10/11 (x64) | `KaproVPN-Setup.exe` | Запустить, пара кликов |
+            | macOS (Apple Silicon) | `KaproVPN-macOS-arm64.dmg` | Открыть DMG, перетащить в Applications |
+            | Linux (x64) | `KaproVPN-Linux-x64.AppImage` | `chmod +x` и запустить |
 
-            Скачал → запустил → пара кликов → программа в меню Пуск,
-            ярлык на рабочем столе, запись в Programs & Features.
-            Без прав администратора (ставится в `%LOCALAPPDATA%\Programs\KaproVPN\`).
+            **HTTP-прокси режим** работает на всех трёх. **TUN-режим**
+            (тоннелирует Telegram/Steam/игры) сейчас только в Windows-сборке —
+            macOS/Linux добавим следующим релизом.
 
-            > Установщик во время работы скачает основной `KaproVPN.exe` (~54 МБ)
-            > с этой же страницы релиза. Нужен интернет на момент установки.
-
-            Только Windows 10/11 (x64). Для TUN-режима (туннелировать ВСЕ
-            приложения — ТГ, Steam, игры) — запускай от админа после установки.
-
-            Auto-built by GitHub Actions from the `${{ github.ref_name }}` tag commit.
-
-            **Что нового** — см. ниже.
+            Auto-built by GitHub Actions from `${{ github.ref_name }}`.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

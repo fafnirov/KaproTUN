@@ -1,12 +1,46 @@
-"""Common filesystem paths for the application."""
+"""Common filesystem paths for the application.
+
+Per-platform conventions:
+  - Windows: %LOCALAPPDATA%\\KaproVPN
+  - macOS:   ~/Library/Application Support/KaproVPN
+  - Linux:   $XDG_DATA_HOME/KaproVPN  (defaults to ~/.local/share/KaproVPN)
+
+The xray binary is named differently on each OS (xray.exe vs plain xray),
+so xray_exe() handles that. TUN-related binaries (tun2socks, wintun.dll)
+only exist on Windows — the helper paths still return values on other
+platforms so callers can use them in equality checks, but they live in
+the same Windows-only TUN directory which will simply be empty/unused
+on macOS/Linux until we ship a TUN implementation for those.
+"""
 import os
+import sys
 from pathlib import Path
 
 
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def _is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
 def app_data_dir() -> Path:
-    """Per-user data directory, e.g. C:/Users/<user>/AppData/Local/KaproVPN."""
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    path = Path(base) / "KaproVPN"
+    """Per-user data directory, platform-appropriate.
+
+    Windows: %LOCALAPPDATA%\\KaproVPN  (e.g. C:/Users/<u>/AppData/Local/KaproVPN)
+    macOS:   ~/Library/Application Support/KaproVPN
+    Linux:   $XDG_DATA_HOME/KaproVPN  (defaults to ~/.local/share/KaproVPN)
+    """
+    if _is_windows():
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        path = Path(base) / "KaproVPN"
+    elif _is_macos():
+        path = Path.home() / "Library" / "Application Support" / "KaproVPN"
+    else:
+        # Linux/BSD — follow the XDG Base Directory spec
+        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+        path = Path(base) / "KaproVPN"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -18,21 +52,29 @@ def xray_dir() -> Path:
 
 
 def xray_exe() -> Path:
-    return xray_dir() / "xray.exe"
+    """Path to the xray binary — .exe suffix only on Windows."""
+    name = "xray.exe" if _is_windows() else "xray"
+    return xray_dir() / name
 
 
 def tun_dir() -> Path:
-    """Houses tun2socks.exe and wintun.dll (they must live in the same dir)."""
+    """Houses tun2socks + WinTUN driver. Currently used only on Windows;
+    kept here so callers can still reference the path on other OSes
+    (it'll just be empty until we add a non-Windows TUN implementation).
+    """
     path = app_data_dir() / "tun"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def tun2socks_exe() -> Path:
-    return tun_dir() / "tun2socks.exe"
+    name = "tun2socks.exe" if _is_windows() else "tun2socks"
+    return tun_dir() / name
 
 
 def wintun_dll() -> Path:
+    # Windows-only file; returning the path on other OSes is harmless,
+    # nobody should ever check is_file() on it from non-Windows code.
     return tun_dir() / "wintun.dll"
 
 

@@ -3,13 +3,26 @@ from __future__ import annotations
 
 import atexit
 import socket
+import sys
 import time
 from typing import Callable, Optional
 
-from . import admin, geoip_ru, network_routes, storage, system_proxy, tun2socks_process, xray_config
+from . import admin, geoip_ru, storage, system_proxy, xray_config
 from .parser import ProxyConfig
-from .tun2socks_process import Tun2socksProcess
 from .xray_process import XrayProcess
+
+# TUN-mode plumbing is Windows-only for now (WinTUN driver + Win32 route
+# APIs). Importing these on macOS/Linux works (they're guarded internally)
+# but using them doesn't, so the controller refuses TUN mode early on
+# non-Windows with a clear error. The HTTP-proxy mode is fully cross-
+# platform and is what most users want.
+if sys.platform == "win32":
+    from . import network_routes, tun2socks_process
+    from .tun2socks_process import Tun2socksProcess
+else:  # pragma: no cover — runtime guard
+    network_routes = None  # type: ignore[assignment]
+    tun2socks_process = None  # type: ignore[assignment]
+    Tun2socksProcess = None  # type: ignore[assignment,misc]
 
 
 class ConnectionError(Exception):
@@ -68,18 +81,40 @@ _ALWAYS_BYPASS: list[tuple[str, str]] = [
 ]
 
 
+class _NoopTunProcess:
+    """Stand-in for Tun2socksProcess on non-Windows platforms.
+
+    Keeps is_connected() / disconnect() etc. one-liners — they can call
+    `self.tun_process.is_running()` unconditionally instead of branching
+    on platform. All methods are no-ops; start() shouldn't ever be reached
+    because _connect_tun bails out first.
+    """
+    def is_running(self) -> bool: return False
+    def stop(self, *_: object, **__: object) -> None: pass
+    def start(self, *_: object, **__: object) -> None:
+        raise RuntimeError("TUN mode is Windows-only in this version of KaproVPN")
+    def recent_logs(self) -> list[str]: return []
+
+
 class ConnectionManager:
     """Single source of truth for the connect/disconnect lifecycle."""
 
     def __init__(self, on_log: Optional[Callable[[str], None]] = None):
         self._on_log = on_log
         self.process = XrayProcess(on_log=on_log)
-        self.tun_process = Tun2socksProcess(
-            on_log=(lambda l: on_log(f"[tun2socks] {l}")) if on_log else None,
-        )
+        # tun_process is only instantiated on Windows; the rest of the code
+        # has to gate access to it (is_connected, disconnect) since TUN is
+        # a no-op on mac/linux for v1.0. Using a tiny stub keeps those call
+        # sites simple instead of sprinkling `if self.tun_process is not None`.
+        if sys.platform == "win32":
+            self.tun_process = Tun2socksProcess(
+                on_log=(lambda l: on_log(f"[tun2socks] {l}")) if on_log else None,
+            )
+        else:
+            self.tun_process = _NoopTunProcess()
         self.settings = storage.load_settings()
         self._saved_proxy_state: Optional[dict] = None
-        self._route_session: Optional[network_routes.RouteSession] = None
+        self._route_session = None  # network_routes.RouteSession on Windows, None elsewhere
         self._active: Optional[ProxyConfig] = None
         # Belt-and-braces: if Python exits uncleanly with TUN routes active,
         # the user's network is broken until reboot. Best-effort cleanup here.
@@ -155,6 +190,13 @@ class ConnectionManager:
     # --- TUN mode (system-wide) -------------------------------------------
 
     def _connect_tun(self, config: ProxyConfig, direct_domains: list[str]) -> None:
+        if sys.platform != "win32":
+            raise ConnectionError(
+                "TUN-режим пока работает только на Windows.\n"
+                "На macOS / Linux используй HTTP-прокси-режим — он "
+                "поддерживается полностью (системный прокси + браузеры). "
+                "TUN для других ОС в roadmap'е."
+            )
         if not admin.is_admin():
             raise ConnectionError(
                 "TUN-режим требует прав администратора.\n"
