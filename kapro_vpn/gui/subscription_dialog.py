@@ -21,23 +21,33 @@ from PySide6.QtWidgets import (
 
 from ..core import storage
 from ..core.parser import ProxyConfig
-from ..core.subscription import SubscriptionResult, import_subscription
+from ..core.subscription import (
+    SubscriptionResult,
+    _looks_like_dpi_block,
+    import_with_dpi_fallback,
+)
 
 
 class _SubscriptionFetcher(QThread):
     succeeded = Signal(object)  # SubscriptionResult
-    failed = Signal(str)
+    failed = Signal(str, bool)  # (message, looks_like_dpi_block)
 
-    def __init__(self, url: str, parent=None):
+    def __init__(self, url: str, listen_port: int, parent=None):
         super().__init__(parent)
         self._url = url
+        self._listen_port = listen_port
 
     def run(self) -> None:
         try:
-            result = import_subscription(self._url)
+            # Direct first, automatic fallback through the local xray
+            # tunnel (127.0.0.1:listen_port) if it looks DPI-blocked
+            # AND xray happens to be running.
+            result = import_with_dpi_fallback(
+                self._url, local_proxy_port=self._listen_port,
+            )
             self.succeeded.emit(result)
         except Exception as e:
-            self.failed.emit(f"{type(e).__name__}: {e}")
+            self.failed.emit(f"{type(e).__name__}: {e}", _looks_like_dpi_block(e))
 
 
 class SubscriptionDialog(QDialog):
@@ -115,7 +125,8 @@ class SubscriptionDialog(QDialog):
         self.fetch_btn.setEnabled(False)
         self.save_btn.setEnabled(False)
         self.status_label.setText("Загрузка…")
-        self._fetcher = _SubscriptionFetcher(url, parent=self)
+        listen_port = int(storage.load_settings().get("listen_port", 2080))
+        self._fetcher = _SubscriptionFetcher(url, listen_port, parent=self)
         self._fetcher.succeeded.connect(self._on_fetched)
         self._fetcher.failed.connect(self._on_fetch_failed)
         self._fetcher.start()
@@ -128,6 +139,12 @@ class SubscriptionDialog(QDialog):
                 f"<span style='color:#16a34a; font-weight:600'>"
                 f"✓ Найдено {len(result.configs)} конфигов</span>"
             )
+            if result.via_proxy:
+                msg += (
+                    "<br><span style='color:#a1a1aa'>"
+                    "Скачано через активный туннель (сайт провайдера "
+                    "недоступен напрямую).</span>"
+                )
             if result.errors:
                 msg += (
                     f"<br><span style='color:#a1a1aa'>"
@@ -142,11 +159,24 @@ class SubscriptionDialog(QDialog):
                 "share-URL. Проверь что ссылка правильная.</span>"
             )
 
-    def _on_fetch_failed(self, msg: str) -> None:
+    def _on_fetch_failed(self, msg: str, looks_like_dpi: bool) -> None:
         self.fetch_btn.setEnabled(True)
+        hint = ""
+        if looks_like_dpi:
+            # Direct TLS rejected by DPI and we couldn't (or didn't) get
+            # through the local tunnel — explain what to do.
+            hint = (
+                "<br><br><span style='color:#fbbf24'>"
+                "Похоже, сайт провайдера блокируется на TLS-уровне "
+                "(типично для российских провайдеров). "
+                "Подключись к любому уже сохранённому серверу — "
+                "KaproVPN автоматически попробует ещё раз через туннель."
+                "</span>"
+            )
         self.status_label.setText(
             f"<span style='color:#ef4444'>✕ Не удалось загрузить:</span><br>"
             f"<span style='color:#a1a1aa; font-size:9pt'>{msg}</span>"
+            f"{hint}"
         )
 
     def _on_accept(self) -> None:
