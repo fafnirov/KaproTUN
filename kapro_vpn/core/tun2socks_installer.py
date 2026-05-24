@@ -1,11 +1,25 @@
-"""Downloads tun2socks (xjasonlyu/tun2socks) and the WinTUN driver DLL.
+"""Downloads tun2socks (xjasonlyu/tun2socks) per-OS binary.
 
-These two artefacts together let us tunnel all OS-level TCP/UDP traffic into
-xray's SOCKS5 inbound, achieving feature parity with AmneziaVPN's TUN mode.
+tun2socks creates the TUN device and forwards all OS-level TCP/UDP into
+xray's SOCKS5 inbound — the foundation of TUN mode on all three OSes.
+
+Per-OS assets in xjasonlyu/tun2socks releases:
+  Windows  → tun2socks-windows-amd64.zip   (.exe inside, needs WinTUN driver alongside)
+  macOS    → tun2socks-darwin-amd64.zip    Intel
+             tun2socks-darwin-arm64.zip    Apple Silicon
+  Linux    → tun2socks-linux-amd64.zip
+             tun2socks-linux-arm64.zip
+
+On Windows we additionally fetch WinTUN.dll from wintun.net — on
+macOS/Linux the kernel already provides the TUN device (utun / /dev/net/tun)
+so no extra driver is needed.
 """
 from __future__ import annotations
 
 import io
+import platform
+import stat
+import sys
 import zipfile
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -15,14 +29,34 @@ import requests
 from . import paths
 
 TUN2SOCKS_LATEST = "https://api.github.com/repos/xjasonlyu/tun2socks/releases/latest"
-TUN2SOCKS_FALLBACK = (
-    "https://github.com/xjasonlyu/tun2socks/releases/download/"
-    "v2.6.0/tun2socks-windows-amd64.zip"
-)
-TUN2SOCKS_ASSET_MARKER = "windows-amd64"
+TUN2SOCKS_PINNED_VERSION = "v2.6.0"
 
+# Windows-only: WinTUN driver from wintun.net
 WINTUN_URL = "https://www.wintun.net/builds/wintun-0.14.1.zip"
 WINTUN_DLL_IN_ZIP = "wintun/bin/amd64/wintun.dll"
+
+
+def _asset_marker() -> str:
+    """Return the OS-arch substring that identifies our tun2socks asset.
+
+    Maps Python's sys.platform + platform.machine() onto the names
+    xjasonlyu/tun2socks ships.
+    """
+    machine = platform.machine().lower()
+    is_arm64 = machine in ("arm64", "aarch64")
+    if sys.platform == "win32":
+        return "windows-arm64" if is_arm64 else "windows-amd64"
+    if sys.platform == "darwin":
+        return "darwin-arm64" if is_arm64 else "darwin-amd64"
+    return "linux-arm64" if is_arm64 else "linux-amd64"
+
+
+def _pinned_fallback_url() -> str:
+    return (
+        f"https://github.com/xjasonlyu/tun2socks/releases/download/"
+        f"{TUN2SOCKS_PINNED_VERSION}/tun2socks-{_asset_marker()}.zip"
+    )
+
 
 ProgressCb = Optional[Callable[[int, int], None]]
 
@@ -35,7 +69,14 @@ class ReleaseInfo:
 
 
 def is_installed() -> bool:
-    return paths.tun2socks_exe().is_file() and paths.wintun_dll().is_file()
+    """tun2socks present? On Windows we also need WinTUN; on Unix the
+    kernel provides the TUN device, so no driver check needed.
+    """
+    if not paths.tun2socks_exe().is_file():
+        return False
+    if sys.platform == "win32":
+        return paths.wintun_dll().is_file()
+    return True
 
 
 def get_installed_version() -> Optional[str]:
@@ -55,6 +96,7 @@ def get_installed_version() -> Optional[str]:
 
 
 def _fetch_tun2socks_release() -> ReleaseInfo:
+    marker = _asset_marker()
     try:
         r = requests.get(TUN2SOCKS_LATEST, timeout=10)
         r.raise_for_status()
@@ -62,7 +104,7 @@ def _fetch_tun2socks_release() -> ReleaseInfo:
         version = data.get("tag_name", "unknown")
         for asset in data.get("assets", []):
             name = asset.get("name", "")
-            if TUN2SOCKS_ASSET_MARKER in name and name.endswith(".zip"):
+            if marker in name and name.endswith(".zip"):
                 return ReleaseInfo(
                     version=version,
                     url=asset["browser_download_url"],
@@ -71,20 +113,15 @@ def _fetch_tun2socks_release() -> ReleaseInfo:
     except Exception:
         pass
     return ReleaseInfo(
-        version="v2.6.0",
-        url=TUN2SOCKS_FALLBACK,
-        filename="tun2socks-windows-amd64.zip",
+        version=TUN2SOCKS_PINNED_VERSION,
+        url=_pinned_fallback_url(),
+        filename=f"tun2socks-{marker}.zip",
     )
 
 
 def _download(url: str, progress: ProgressCb, total_offset: int = 0,
               attempts: int = 3) -> bytes:
-    """Download to memory with per-chunk read timeout and retries.
-
-    The tuple `timeout=(connect_s, read_s)` makes `requests` raise if any
-    single chunk read stalls for more than `read_s` seconds, which is the
-    failure mode we hit when GitHub's CDN goes silent under throttling.
-    """
+    """Download to memory with per-chunk read timeout + retries."""
     last_err: Optional[Exception] = None
     for attempt in range(attempts):
         try:
@@ -109,30 +146,43 @@ def _download(url: str, progress: ProgressCb, total_offset: int = 0,
 
 
 def _install_tun2socks(progress: ProgressCb) -> None:
+    """Pull the right tun2socks-<os>-<arch> binary out of its release zip.
+
+    The binary inside is suffixed identically to the zip (e.g. inside
+    tun2socks-darwin-arm64.zip you get a file literally named
+    "tun2socks-darwin-arm64"). We extract whichever member looks like
+    our tun2socks binary and write it under the right name for our OS
+    (paths.tun2socks_exe() handles the .exe suffix on Windows).
+    """
     release = _fetch_tun2socks_release()
     data = _download(release.url, progress)
+    target = paths.tun2socks_exe()
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        exe_member = next(
-            (n for n in zf.namelist() if n.endswith("tun2socks-windows-amd64.exe")
-             or n.endswith("tun2socks.exe")),
+        # Look for any non-directory member whose basename contains
+        # "tun2socks". Skip README/LICENSE/etc.
+        member = next(
+            (n for n in zf.namelist()
+             if not n.endswith("/")
+             and "tun2socks" in n.rsplit("/", 1)[-1].lower()
+             and not n.lower().endswith((".md", ".txt", ".license"))),
             None,
         )
-        if not exe_member:
-            # Some releases ship the bare binary without .exe extension
-            exe_member = next(
-                (n for n in zf.namelist() if "tun2socks" in n.lower() and not n.endswith("/")),
-                None,
-            )
-        if not exe_member:
+        if not member:
             raise RuntimeError("tun2socks binary not found in the archive")
-        with zf.open(exe_member) as src:
-            paths.tun2socks_exe().write_bytes(src.read())
+        target.write_bytes(zf.read(member))
+    # chmod +x on Unix — without it the user gets a cryptic EACCES later.
+    if sys.platform != "win32":
+        try:
+            st = target.stat()
+            target.chmod(st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        except OSError:
+            pass
 
 
 def _install_wintun(progress: ProgressCb) -> None:
+    """Windows-only: WinTUN driver DLL from wintun.net."""
     data = _download(WINTUN_URL, progress)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        # Find amd64 DLL — exact path is wintun/bin/amd64/wintun.dll
         dll_member = next(
             (n for n in zf.namelist()
              if n.endswith("wintun.dll") and "amd64" in n),
@@ -145,10 +195,10 @@ def _install_wintun(progress: ProgressCb) -> None:
 
 
 def download_and_install(progress: ProgressCb = None) -> None:
-    """Install both tun2socks and wintun.dll."""
+    """Install tun2socks (and WinTUN driver on Windows)."""
     if not paths.tun2socks_exe().is_file():
         _install_tun2socks(progress)
-    if not paths.wintun_dll().is_file():
+    if sys.platform == "win32" and not paths.wintun_dll().is_file():
         _install_wintun(progress)
 
 

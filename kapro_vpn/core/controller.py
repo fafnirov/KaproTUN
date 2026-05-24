@@ -11,18 +11,18 @@ from . import admin, geoip_ru, storage, system_proxy, xray_config
 from .parser import ProxyConfig
 from .xray_process import XrayProcess
 
-# TUN-mode plumbing is Windows-only for now (WinTUN driver + Win32 route
-# APIs). Importing these on macOS/Linux works (they're guarded internally)
-# but using them doesn't, so the controller refuses TUN mode early on
-# non-Windows with a clear error. The HTTP-proxy mode is fully cross-
-# platform and is what most users want.
+# TUN-mode plumbing: same public API on every OS, but the backend that
+# manipulates routes/DNS is platform-specific. The Windows backend uses
+# native Win32 ctypes calls; the Unix backend shells out to `ip` / `route`
+# / `ifconfig`. Both expose RouteSession + the few helpers controller
+# code below calls, so we can keep one code path with no per-OS branches
+# in the connect flow.
+from . import tun2socks_process
+from .tun2socks_process import Tun2socksProcess
 if sys.platform == "win32":
-    from . import network_routes, tun2socks_process
-    from .tun2socks_process import Tun2socksProcess
-else:  # pragma: no cover — runtime guard
-    network_routes = None  # type: ignore[assignment]
-    tun2socks_process = None  # type: ignore[assignment]
-    Tun2socksProcess = None  # type: ignore[assignment,misc]
+    from . import network_routes
+else:
+    from . import network_routes_unix as network_routes
 
 
 class ConnectionError(Exception):
@@ -81,40 +81,18 @@ _ALWAYS_BYPASS: list[tuple[str, str]] = [
 ]
 
 
-class _NoopTunProcess:
-    """Stand-in for Tun2socksProcess on non-Windows platforms.
-
-    Keeps is_connected() / disconnect() etc. one-liners — they can call
-    `self.tun_process.is_running()` unconditionally instead of branching
-    on platform. All methods are no-ops; start() shouldn't ever be reached
-    because _connect_tun bails out first.
-    """
-    def is_running(self) -> bool: return False
-    def stop(self, *_: object, **__: object) -> None: pass
-    def start(self, *_: object, **__: object) -> None:
-        raise RuntimeError("TUN mode is Windows-only in this version of KaproVPN")
-    def recent_logs(self) -> list[str]: return []
-
-
 class ConnectionManager:
     """Single source of truth for the connect/disconnect lifecycle."""
 
     def __init__(self, on_log: Optional[Callable[[str], None]] = None):
         self._on_log = on_log
         self.process = XrayProcess(on_log=on_log)
-        # tun_process is only instantiated on Windows; the rest of the code
-        # has to gate access to it (is_connected, disconnect) since TUN is
-        # a no-op on mac/linux for v1.0. Using a tiny stub keeps those call
-        # sites simple instead of sprinkling `if self.tun_process is not None`.
-        if sys.platform == "win32":
-            self.tun_process = Tun2socksProcess(
-                on_log=(lambda l: on_log(f"[tun2socks] {l}")) if on_log else None,
-            )
-        else:
-            self.tun_process = _NoopTunProcess()
+        self.tun_process = Tun2socksProcess(
+            on_log=(lambda l: on_log(f"[tun2socks] {l}")) if on_log else None,
+        )
         self.settings = storage.load_settings()
         self._saved_proxy_state: Optional[dict] = None
-        self._route_session = None  # network_routes.RouteSession on Windows, None elsewhere
+        self._route_session: Optional[network_routes.RouteSession] = None
         self._active: Optional[ProxyConfig] = None
         # Belt-and-braces: if Python exits uncleanly with TUN routes active,
         # the user's network is broken until reboot. Best-effort cleanup here.
@@ -190,20 +168,33 @@ class ConnectionManager:
     # --- TUN mode (system-wide) -------------------------------------------
 
     def _connect_tun(self, config: ProxyConfig, direct_domains: list[str]) -> None:
-        if sys.platform != "win32":
-            raise ConnectionError(
-                "TUN-режим пока работает только на Windows.\n"
-                "На macOS / Linux используй HTTP-прокси-режим — он "
-                "поддерживается полностью (системный прокси + браузеры). "
-                "TUN для других ОС в roadmap'е."
-            )
         if not admin.is_admin():
-            raise ConnectionError(
-                "TUN-режим требует прав администратора.\n"
-                "Перезапусти KaproVPN от имени администратора "
-                "(правый клик по ярлыку → «Запуск от имени администратора») "
-                "или переключи в Настройках режим на «HTTP-прокси»."
-            )
+            # Per-OS phrasing — the elevation path differs enough to be
+            # worth a tailored hint each time.
+            if sys.platform == "win32":
+                msg = (
+                    "TUN-режим требует прав администратора.\n"
+                    "Перезапусти KaproVPN от имени администратора "
+                    "(правый клик по ярлыку → «Запуск от имени администратора») "
+                    "или переключи в Настройках режим на «HTTP-прокси»."
+                )
+            elif sys.platform == "darwin":
+                msg = (
+                    "TUN-режиму нужен root для создания utun-интерфейса и "
+                    "настройки маршрутов.\n"
+                    "Закрой KaproVPN и запусти из терминала:\n"
+                    "    sudo /Applications/KaproVPN.app/Contents/MacOS/KaproVPN\n"
+                    "Или переключи режим на «HTTP-прокси» — он не требует прав."
+                )
+            else:
+                msg = (
+                    "TUN-режиму нужен root для управления маршрутами.\n"
+                    "Закрой KaproVPN и запусти через sudo / pkexec:\n"
+                    "    pkexec ./KaproVPN-Linux-x64.AppImage\n"
+                    "    (или sudo ./KaproVPN-Linux-x64.AppImage)\n"
+                    "Или переключи режим на «HTTP-прокси»."
+                )
+            raise ConnectionError(msg)
 
         # Step 1: snapshot the real default gateway BEFORE we mess with routes.
         real = network_routes.get_default_route_v4()
@@ -239,17 +230,35 @@ class ConnectionManager:
             self.process.stop()
             raise ConnectionError(f"Не удалось запустить tun2socks: {e}") from e
 
-        # Step 5: wait for the TUN interface to show up in Windows.
-        tun = network_routes.find_interface_by_name(
-            tun2socks_process.TUN_DEVICE_NAME, timeout=10.0,
-        )
+        # Step 5: wait for the TUN interface to appear. Per-OS quirk:
+        # macOS doesn't let us name our utun device (kernel picks utunN),
+        # so we wait for tun2socks to log the assigned name first, then
+        # look it up. On Windows + Linux we picked the name and just wait
+        # for the OS to register it.
+        if sys.platform == "darwin":
+            tun_name = self._wait_for_mac_tun_name(timeout=8.0)
+            if tun_name is None:
+                self.tun_process.stop()
+                self.process.stop()
+                raise ConnectionError(
+                    "tun2socks не сообщил имя utun-интерфейса за 8с. "
+                    "Запусти KaproVPN через sudo и попробуй снова."
+                )
+        else:
+            tun_name = tun2socks_process.TUN_DEVICE_NAME
+        tun = network_routes.find_interface_by_name(tun_name, timeout=10.0)
         if tun is None:
             self.tun_process.stop()
             self.process.stop()
+            if sys.platform == "win32":
+                raise ConnectionError(
+                    "TUN-интерфейс не появился за 10 секунд. "
+                    "Проверь, что wintun.dll лежит рядом с tun2socks.exe и что "
+                    "у процесса есть права администратора."
+                )
             raise ConnectionError(
-                "TUN-интерфейс не появился за 10 секунд. "
-                "Проверь, что wintun.dll лежит рядом с tun2socks.exe и что "
-                "у процесса есть права администратора."
+                f"TUN-интерфейс «{tun_name}» не появился за 10 секунд. "
+                f"Проверь, что у процесса есть root-привилегии."
             )
 
         # Step 6: assign an IP to the TUN, set its DNS, install routes.
@@ -337,6 +346,22 @@ class ConnectionManager:
 
         self._route_session = session
         self._active = config
+
+    def _wait_for_mac_tun_name(self, timeout: float = 8.0) -> Optional[str]:
+        """macOS-only: poll tun2socks for the kernel-assigned utunN name.
+
+        tun2socks doesn't accept a fixed name on Darwin — it asks the
+        kernel for the next free utun slot and announces the result in
+        its first INFO log line. We watch that line via the process'
+        captured logs.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            name = getattr(self.tun_process, "mac_device_name", lambda: None)()
+            if name:
+                return name
+            time.sleep(0.2)
+        return None
 
     # --- helpers ----------------------------------------------------------
 

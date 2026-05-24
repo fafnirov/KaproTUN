@@ -165,9 +165,9 @@ jobs:
             | macOS (Apple Silicon) | `KaproVPN-macOS-arm64.dmg` | Открыть DMG, перетащить в Applications |
             | Linux (x64) | `KaproVPN-Linux-x64.AppImage` | `chmod +x` и запустить |
 
-            **HTTP-прокси режим** работает на всех трёх. **TUN-режим**
-            (тоннелирует Telegram/Steam/игры) сейчас только в Windows-сборке —
-            macOS/Linux добавим следующим релизом.
+            **HTTP-прокси и TUN режимы работают на всех трёх ОС.**
+            TUN тоннелирует Telegram/Steam/игры системно (нужны
+            UAC на Windows, `sudo` на mac, `pkexec`/`sudo` на Linux).
 
             Auto-built by GitHub Actions from `${{ github.ref_name }}`.
         env:
