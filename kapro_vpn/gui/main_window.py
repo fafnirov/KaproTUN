@@ -25,7 +25,10 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
-from ..core import admin, autostart, storage, tun2socks_installer, xray_installer, xray_stats
+from ..core import (
+    admin, autostart, storage, tun2socks_installer,
+    updater, xray_installer, xray_stats,
+)
 from ..core.controller import MODE_HTTP_PROXY, MODE_TUN
 from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
@@ -140,6 +143,7 @@ class SettingsPage(QWidget):
     sites_clicked = Signal()
     logs_clicked = Signal()
     subscription_clicked = Signal()
+    check_updates_requested = Signal()
     settings_changed = Signal()
 
     def __init__(self, manager: ConnectionManager, parent: Optional[QWidget] = None):
@@ -275,6 +279,31 @@ class SettingsPage(QWidget):
         self.autoconnect_check.toggled.connect(self._on_autoconnect_changed)
         outer.addWidget(self.autoconnect_check)
 
+        # --- Kill-switch ---
+        sep_kill = QFrame()
+        sep_kill.setFrameShape(QFrame.HLine)
+        outer.addWidget(sep_kill)
+
+        kill_label = QLabel("Безопасность")
+        kill_label.setObjectName("h2")
+        outer.addWidget(kill_label)
+
+        self.kill_check = QCheckBox("Kill-switch — не пускать трафик мимо VPN")
+        self.kill_check.setChecked(
+            bool(manager.settings.get("kill_switch", False))
+        )
+        self.kill_check.toggled.connect(self._on_kill_switch_changed)
+        outer.addWidget(self.kill_check)
+        kill_hint = QLabel(
+            "Если xray упадёт или VPN отвалится — туннель останется поднят, "
+            "иностранный трафик будет блокироваться вместо утечки через "
+            "реальную сеть. Только для TUN-режима."
+        )
+        kill_hint.setObjectName("dim")
+        kill_hint.setWordWrap(True)
+        kill_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(kill_hint)
+
         # Separator
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
@@ -328,6 +357,18 @@ class SettingsPage(QWidget):
         about.setWordWrap(True)
         outer.addWidget(about)
 
+        # --- Updates row ---
+        upd_row = QHBoxLayout()
+        upd_row.setSpacing(8)
+        self.update_status_label = QLabel("")
+        self.update_status_label.setObjectName("dim")
+        self.update_status_label.setWordWrap(True)
+        upd_row.addWidget(self.update_status_label, stretch=1)
+        self.check_updates_btn = QPushButton("Проверить обновления")
+        self.check_updates_btn.clicked.connect(self._on_check_updates_clicked)
+        upd_row.addWidget(self.check_updates_btn)
+        outer.addLayout(upd_row)
+
     def _make_link_row(self, title: str, hint: str, on_click) -> tuple[QHBoxLayout, QLabel]:
         """Title + hint on the left, action button on the right. Returns (layout, hint_label)."""
         row = QHBoxLayout()
@@ -375,6 +416,25 @@ class SettingsPage(QWidget):
         self._manager.update_settings(autoconnect_on_launch=checked)
         self.settings_changed.emit()
 
+    def _on_kill_switch_changed(self, checked: bool) -> None:
+        self._manager.update_settings(kill_switch=checked)
+        self.settings_changed.emit()
+
+    def _on_check_updates_clicked(self) -> None:
+        """Forwarded to MainWindow which owns the worker thread."""
+        self.check_updates_requested.emit()
+
+    # --- update banner UI -------------------------------------------------
+
+    def set_update_status(self, text: str, accent: bool = False) -> None:
+        """Update the dim line next to the 'Проверить обновления' button."""
+        color = "#f59e0b" if accent else "#71717a"
+        weight = "600" if accent else "400"
+        self.update_status_label.setText(
+            f"<span style='color:{color}; font-weight:{weight}'>{text}</span>"
+        )
+        self.update_status_label.setTextFormat(Qt.RichText)
+
     def _on_mode_changed(self, _checked: bool) -> None:
         # Both radios fire toggled — only act when the new selection is "checked".
         mode = MODE_TUN if self.radio_tun.isChecked() else MODE_HTTP_PROXY
@@ -407,6 +467,19 @@ class SettingsPage(QWidget):
                 "Ты отменил запрос UAC или произошла ошибка. "
                 "Запусти KaproVPN вручную правым кликом → «Запуск от имени администратора».",
             )
+
+
+class _UpdateCheckWorker(QThread):
+    """Background poll of GitHub Releases. Emits if a newer version is out."""
+    update_available = Signal(object)  # updater.UpdateInfo
+    no_update = Signal()
+
+    def run(self) -> None:
+        info = updater.latest_release()
+        if info is not None and updater.is_newer(info.version):
+            self.update_available.emit(info)
+        else:
+            self.no_update.emit()
 
 
 class _ConnectWorker(QThread):
@@ -501,6 +574,8 @@ class MainWindow(QMainWindow):
         self._connecting = False  # True while _ConnectWorker is running
         self._connect_worker: Optional[_ConnectWorker] = None
         self._prev_traffic: Optional[xray_stats.TrafficStats] = None
+        self._update_worker: Optional[_UpdateCheckWorker] = None
+        self._crash_notified = False  # avoid spamming the same kill-switch toast
 
         # --- App-shell layout (everything inside the rounded dark frame) ---
         shell = QWidget()
@@ -542,6 +617,9 @@ class MainWindow(QMainWindow):
         self._poll.timeout.connect(self._refresh_home)
         self._poll.start(1000)
 
+        # Silent update check 2 s after launch — non-blocking, just a toast if newer
+        QTimer.singleShot(2000, self._start_update_check)
+
     # --- wiring -----------------------------------------------------------
 
     def _wire_signals(self) -> None:
@@ -550,6 +628,9 @@ class MainWindow(QMainWindow):
         self.settings_page.sites_clicked.connect(self._on_edit_sites)
         self.settings_page.logs_clicked.connect(lambda: self.stack.setCurrentIndex(2))
         self.settings_page.subscription_clicked.connect(self._on_import_subscription)
+        self.settings_page.check_updates_requested.connect(
+            lambda: self._start_update_check(interactive=True)
+        )
         self.logs_page.back_clicked.connect(lambda: self._goto("settings"))
         self.nav.home_clicked.connect(lambda: self._goto("home"))
         self.nav.settings_clicked.connect(lambda: self._goto("settings"))
@@ -593,12 +674,39 @@ class MainWindow(QMainWindow):
 
         # Detect external crash
         if self.manager._active is not None and not self.manager.process.is_running():
-            self.logs_page.append(
-                f"[!] Xray-core завершился неожиданно "
-                f"(код {self.manager.process.returncode()}). Отключаюсь."
-            )
-            self.manager.disconnect()
-            self._connected_at = 0.0
+            kill_switch = bool(self.manager.settings.get("kill_switch", False))
+            mode_is_tun = self.manager.current_mode() == MODE_TUN
+            rc = self.manager.process.returncode()
+
+            if kill_switch and mode_is_tun and self.manager.tun_process.is_running():
+                # Kill-switch holds: leave TUN up so foreign traffic gets
+                # dropped instead of leaking out via the real interface.
+                # The user manually reconnects when ready.
+                if not self._crash_notified:
+                    self.logs_page.append(
+                        f"[!] Xray-core упал (код {rc}). "
+                        f"Kill-switch активен — туннель удерживается, "
+                        f"иностранный трафик блокируется."
+                    )
+                    show_toast(
+                        self,
+                        "VPN упал. Kill-switch блокирует утечку. "
+                        "Нажми «ВКЛЮЧИТЬ» для переподключения.",
+                        kind="error",
+                        duration_ms=10000,
+                    )
+                    self._crash_notified = True
+            else:
+                self.logs_page.append(
+                    f"[!] Xray-core завершился неожиданно (код {rc}). Отключаюсь."
+                )
+                show_toast(self, "VPN упал — отключение", kind="error", duration_ms=5000)
+                self.manager.disconnect()
+                self._connected_at = 0.0
+                self._crash_notified = False
+        else:
+            # Reset crash-notified flag when state is healthy
+            self._crash_notified = False
 
         active_name = self._active_config.name if self._active_config else ""
         if self.manager.is_connected():
@@ -706,6 +814,55 @@ class MainWindow(QMainWindow):
         self.logs_page.append("[*] Отключено, системный прокси восстановлен")
         show_toast(self, "Отключено", kind="info")
         self._refresh_home()
+
+    # --- update checking --------------------------------------------------
+
+    def _start_update_check(self, interactive: bool = False) -> None:
+        if self._update_worker is not None and self._update_worker.isRunning():
+            return
+        if interactive:
+            self.settings_page.set_update_status("Проверяю…", accent=False)
+        self._update_worker = _UpdateCheckWorker(parent=self)
+        self._update_worker.update_available.connect(
+            lambda info: self._on_update_available(info, interactive)
+        )
+        self._update_worker.no_update.connect(
+            lambda: self._on_no_update(interactive)
+        )
+        self._update_worker.start()
+
+    def _on_update_available(self, info: "updater.UpdateInfo",
+                              interactive: bool) -> None:
+        msg = f"Доступна KaproVPN v{info.version}"
+        self.settings_page.set_update_status(
+            f"{msg} — клик откроет GitHub", accent=True,
+        )
+        show_toast(
+            self,
+            f"{msg}. Открыть GitHub?",
+            kind="info",
+            duration_ms=8000,
+        )
+        # Replace the button's behaviour: now it opens the release page
+        try:
+            self.settings_page.check_updates_btn.clicked.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        self.settings_page.check_updates_btn.setText("Открыть GitHub")
+        self.settings_page.check_updates_btn.clicked.connect(
+            lambda: self._open_release_url(info.url)
+        )
+
+    def _on_no_update(self, interactive: bool) -> None:
+        if interactive:
+            self.settings_page.set_update_status(
+                f"У тебя последняя версия (v{__version__})", accent=False,
+            )
+
+    def _open_release_url(self, url: str) -> None:
+        import webbrowser
+        if url:
+            webbrowser.open(url)
 
     def trigger_autoconnect(self) -> None:
         """Called from main.py shortly after launch if autoconnect_on_launch is on."""

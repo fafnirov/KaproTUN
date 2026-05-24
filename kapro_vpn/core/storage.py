@@ -83,6 +83,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "mode": "http",  # "http" (browser-only) or "tun" (system-wide, needs admin)
     "autoconnect_on_launch": False,
     "subscription_url": "",  # last imported subscription, for one-click re-sync
+    "kill_switch": False,    # leave TUN up if xray dies (no leak via real ISP)
 }
 
 
