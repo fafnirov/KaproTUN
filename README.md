@@ -1,9 +1,24 @@
 # KaproVPN
 
+[![Release](https://img.shields.io/github/v/release/fafnirov/KaproVPN?style=flat-square&color=f59e0b&label=latest)](https://github.com/fafnirov/KaproVPN/releases/latest)
+[![License](https://img.shields.io/github/license/fafnirov/KaproVPN?style=flat-square&color=blue)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)](https://www.python.org/)
+[![Build](https://img.shields.io/github/actions/workflow/status/fafnirov/KaproVPN/release.yml?style=flat-square&label=build)](https://github.com/fafnirov/KaproVPN/actions/workflows/release.yml)
+
 [English](README.md) · [Русский](README.ru.md)
 
 Desktop proxy client (Windows) with built-in **split routing for Russian sites**.
 Built on top of [Xray-core](https://github.com/XTLS/Xray-core).
+
+---
+
+### ⬇️ Download
+
+Grab the latest **[`KaproVPN.exe`](https://github.com/fafnirov/KaproVPN/releases/latest)** (~57 MB,
+Windows x64, no Python required) and run it. Right-click → "Run as administrator"
+for TUN mode (tunnels every app — Telegram, Steam, games — through the proxy).
+
+---
 
 ## What it does
 
@@ -38,11 +53,19 @@ see your real address.
 
 ## Requirements
 
-- Windows 10 / 11
-- Python 3.10 or newer
-- ~25 MB free disk space (for the Xray-core binary + geo data)
+- Windows 10 / 11 (x64)
+- ~80 MB total free disk space (~57 MB exe + ~25 MB for Xray + tun2socks + WinTUN)
+- Admin rights *only* if you want TUN mode (everything tunneled). HTTP-proxy
+  mode works without admin and tunnels just the browser.
 
 ## Install & run
+
+### Option 1 — Pre-built binary (recommended)
+
+Download **[`KaproVPN.exe`](https://github.com/fafnirov/KaproVPN/releases/latest)**,
+run it. Done.
+
+### Option 2 — From source (for development / contributing)
 
 ```bash
 git clone https://github.com/fafnirov/KaproVPN.git
@@ -51,8 +74,17 @@ pip install -r requirements.txt
 python run.py
 ```
 
+Or, to build your own .exe locally:
+
+```bash
+pip install -r requirements-build.txt
+pyinstaller KaproVPN.spec
+# → dist/KaproVPN.exe
+```
+
 On first launch the app downloads the latest Xray-core release into
-`%LOCALAPPDATA%\KaproVPN\xray\`.
+`%LOCALAPPDATA%\KaproVPN\xray\`. Same path for tun2socks + wintun.dll
+(if TUN mode is enabled).
 
 ## How it works
 

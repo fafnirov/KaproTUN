@@ -1,0 +1,69 @@
+name: Build & release KaproVPN.exe
+
+# Auto-builds whenever you push a vX.Y.Z tag, plus a manual button on
+# the Actions tab for ad-hoc builds you don't want to ship.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to upload assets to a Release
+
+jobs:
+  build:
+    name: Build Windows .exe
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: Build KaproVPN.exe
+        shell: pwsh
+        run: |
+          python -m PyInstaller KaproVPN.spec --noconfirm --log-level WARN
+
+      - name: Show built artifact
+        shell: pwsh
+        run: |
+          Get-ChildItem dist/ | Format-Table Name, Length
+
+      - name: Upload artifact (for manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: KaproVPN-${{ github.sha }}
+          path: dist/KaproVPN.exe
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release (tag pushes)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/KaproVPN.exe
+          generate_release_notes: true
+          body: |
+            ## KaproVPN ${{ github.ref_name }}
+
+            **Скачать**: `KaproVPN.exe` ниже — ~57 МБ, single-file, не требует установки Python.
+            Только для Windows 10/11 (x64).
+
+            Auto-built by GitHub Actions from the `${{ github.ref_name }}` tag commit.
+            Запусти от админа для TUN-режима (все приложения через VPN, не только браузер).
+
+            **Что нового** — см. ниже.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
