@@ -28,8 +28,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import pro.kaprovpn.android.R
 import pro.kaprovpn.android.core.AppRepository
 import pro.kaprovpn.android.core.DnsOption
 import pro.kaprovpn.android.vpn.XrayBridge
@@ -42,7 +45,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 
     Scaffold(
         modifier = modifier,
-        topBar = { TopAppBar(title = { Text("Настройки") }) },
+        topBar = { TopAppBar(title = { Text(stringResource(R.string.tab_settings)) }) },
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -53,10 +56,9 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             // -- DNS-сервер ----------------------------------------------
-            SectionHeader("DNS-сервер")
+            SectionHeader(stringResource(R.string.settings_dns_header))
             Text(
-                "Какой DNS использовать когда VPN активен. AdGuard добавит " +
-                    "блокировку ~10 000 рекламных доменов на уровне xray.",
+                stringResource(R.string.settings_dns_hint),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -72,11 +74,10 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
             // -- Поведение -----------------------------------------------
-            SectionHeader("Поведение")
+            SectionHeader(stringResource(R.string.settings_behavior_header))
             SettingsToggleRow(
-                title = "Автоподключение при запуске",
-                subtitle = "Подключаться к активному серверу как только " +
-                    "откроется приложение",
+                title = stringResource(R.string.settings_autoconnect_title),
+                subtitle = stringResource(R.string.settings_autoconnect_subtitle),
                 checked = settings.autoconnectOnLaunch,
                 onCheckedChange = { AppRepository.setAutoconnect(it) },
             )
@@ -84,14 +85,14 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
             // -- О приложении --------------------------------------------
-            SectionHeader("О приложении")
+            SectionHeader(stringResource(R.string.settings_about_header))
             Text(
-                text = "Xray-core: $coreVersion",
+                text = stringResource(R.string.settings_xray_version, coreVersion),
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                text = "KaproVPN Android (Phase 5)",
+                text = stringResource(R.string.settings_app_version),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -119,6 +120,7 @@ private fun DnsOptionRow(
     val container = if (selected)
         MaterialTheme.colorScheme.primaryContainer
     else MaterialTheme.colorScheme.surfaceVariant
+    val isRussian = LocalConfiguration.current.locales[0].language == "ru"
 
     Row(
         modifier = Modifier
@@ -135,9 +137,12 @@ private fun DnsOptionRow(
         )
         Spacer(Modifier.width(4.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(option.labelRu, style = MaterialTheme.typography.titleSmall)
             Text(
-                option.hintRu,
+                if (isRussian) option.labelRu else option.labelEn,
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                if (isRussian) option.hintRu else option.hintEn,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

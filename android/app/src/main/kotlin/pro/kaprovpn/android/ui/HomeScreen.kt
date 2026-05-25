@@ -1,8 +1,6 @@
 package pro.kaprovpn.android.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,11 +26,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import pro.kaprovpn.android.R
 import pro.kaprovpn.android.core.AppRepository
 import pro.kaprovpn.android.core.DnsOption
 import pro.kaprovpn.android.core.Storage
@@ -51,9 +51,6 @@ fun HomeScreen(
     val xrayState by XrayBridge.state.collectAsState()
     val configs by AppRepository.configs.collectAsState()
     val settings by AppRepository.settings.collectAsState()
-
-    // Direct-sites грузим один раз — не меняется в рантайме (Phase 6
-    // даст возможность редактировать, тогда переедет в Repository).
     val directSites = remember { Storage.loadDefaultSites(context) }
 
     val activeConfig = remember(configs, settings) {
@@ -67,7 +64,7 @@ fun HomeScreen(
 
     Scaffold(
         modifier = modifier,
-        topBar = { TopAppBar(title = { Text("KaproVPN") }) },
+        topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) },
     ) { innerPadding ->
         Column(
             modifier = Modifier
@@ -79,7 +76,6 @@ fun HomeScreen(
         ) {
             Spacer(Modifier.weight(1f))
 
-            // -- Активный конфиг или CTA --------------------------------
             if (activeConfig == null) {
                 EmptyState(onAddClick = onAddFirstConfig)
             } else {
@@ -90,7 +86,6 @@ fun HomeScreen(
                 )
             }
 
-            // -- Connection state ---------------------------------------
             Text(
                 text = stateLabel(xrayState),
                 style = MaterialTheme.typography.bodyMedium,
@@ -109,7 +104,6 @@ fun HomeScreen(
 
             Spacer(Modifier.size(8.dp))
 
-            // -- Connect / Disconnect ----------------------------------
             if (!isConnected) {
                 Button(
                     onClick = {
@@ -123,7 +117,7 @@ fun HomeScreen(
                             lastError = null
                             onConnect(json, cfg.name, dnsOption)
                         } catch (e: Throwable) {
-                            lastError = "Ошибка генерации конфига: ${e.message}"
+                            lastError = context.getString(R.string.home_config_error, e.message ?: "")
                         }
                     },
                     enabled = activeConfig != null && !isBusy,
@@ -131,7 +125,10 @@ fun HomeScreen(
                         containerColor = MaterialTheme.colorScheme.primary
                     ),
                 ) {
-                    Text(if (isBusy) "ПОДКЛЮЧЕНИЕ…" else "ВКЛЮЧИТЬ")
+                    Text(
+                        if (isBusy) stringResource(R.string.home_connecting)
+                        else stringResource(R.string.home_connect)
+                    )
                 }
             } else {
                 Button(
@@ -140,16 +137,18 @@ fun HomeScreen(
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.error
                     ),
-                ) { Text("ОТКЛЮЧИТЬ") }
+                ) { Text(stringResource(R.string.home_disconnect)) }
             }
 
-            // -- Bottom info --------------------------------------------
             Spacer(Modifier.weight(1f))
+            // Footer: count of bypassed sites + active DNS choice.
+            val isRussian = LocalContext.current.resources.configuration.locales[0].language == "ru"
+            val dnsLabel = if (isRussian) dnsOption.labelRu else dnsOption.labelEn
             Text(
-                text = "${directSites.size} RU-сайтов идут напрямую · DNS: ${dnsOption.labelRu}",
+                text = stringResource(R.string.home_footer, directSites.size, dnsLabel),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                textAlign = TextAlign.Center,
             )
         }
     }
@@ -174,7 +173,7 @@ private fun ActiveConfigCard(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text("Активный сервер",
+            Text(stringResource(R.string.home_active_server),
                 style = MaterialTheme.typography.bodySmall,
                 color = if (isConnected)
                     MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f)
@@ -202,26 +201,28 @@ private fun EmptyState(onAddClick: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("KaproVPN",
+        Text(stringResource(R.string.app_name),
             style = MaterialTheme.typography.headlineMedium,
             fontWeight = FontWeight.SemiBold)
         Text(
-            "Серверов пока нет.\nДобавь первый — открой вкладку «Серверы».",
+            "${stringResource(R.string.home_no_servers_title)}\n" +
+                stringResource(R.string.home_no_servers_hint),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            textAlign = TextAlign.Center,
         )
         Spacer(Modifier.size(8.dp))
         OutlinedButton(onClick = onAddClick) {
-            Text("Добавить сервер")
+            Text(stringResource(R.string.home_add_server))
         }
     }
 }
 
+@Composable
 private fun stateLabel(s: XrayBridge.State): String = when (s) {
-    XrayBridge.State.Idle -> "не подключено"
-    XrayBridge.State.Starting -> "подключение…"
-    XrayBridge.State.Connected -> "подключено"
-    XrayBridge.State.Stopping -> "отключение…"
-    is XrayBridge.State.Failed -> "ошибка: ${s.reason}"
+    XrayBridge.State.Idle -> stringResource(R.string.state_idle)
+    XrayBridge.State.Starting -> stringResource(R.string.state_connecting)
+    XrayBridge.State.Connected -> stringResource(R.string.state_connected)
+    XrayBridge.State.Stopping -> stringResource(R.string.state_disconnecting)
+    is XrayBridge.State.Failed -> stringResource(R.string.state_error, s.reason)
 }

@@ -268,10 +268,10 @@ class KaproVpnService : VpnService() {
         if (nm.getNotificationChannel(NOTIFICATION_CHANNEL) != null) return
         nm.createNotificationChannel(NotificationChannel(
             NOTIFICATION_CHANNEL,
-            "KaproVPN статус",
+            getString(R.string.vpn_notification_channel),
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "Уведомление активного VPN-туннеля"
+            description = getString(R.string.vpn_notification_channel_desc)
             setShowBadge(false)
         })
     }
@@ -292,11 +292,14 @@ class KaproVpnService : VpnService() {
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(if (connecting) "KaproVPN — подключение…" else "KaproVPN — подключено")
+            .setContentTitle(getString(
+                if (connecting) R.string.vpn_notification_connecting
+                else R.string.vpn_notification_connected
+            ))
             .setContentText(sessionName)
             .setOngoing(true)
             .setContentIntent(openAppIntent)
-            .addAction(0, "Отключить", stopIntent)
+            .addAction(0, getString(R.string.vpn_notification_disconnect), stopIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }

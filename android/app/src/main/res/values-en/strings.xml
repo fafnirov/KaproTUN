@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  English translations. Each key MUST exist in values/strings.xml (RU
+  source of truth). Missing keys → Android automatically falls back to
+  the default values/, so partial EN coverage is safe.
+-->
+<resources>
+    <string name="app_name">KaproVPN</string>
+
+    <!-- Bottom nav -->
+    <string name="tab_home">Home</string>
+    <string name="tab_configs">Servers</string>
+    <string name="tab_settings">Settings</string>
+
+    <!-- Home screen -->
+    <string name="home_active_server">Active server</string>
+    <string name="home_no_servers_title">No servers yet</string>
+    <string name="home_no_servers_hint">Add one — open the Servers tab.</string>
+    <string name="home_add_server">Add server</string>
+    <string name="home_connect">CONNECT</string>
+    <string name="home_disconnect">DISCONNECT</string>
+    <string name="home_connecting">CONNECTING…</string>
+    <string name="home_footer">%1$d RU sites bypass the VPN · DNS: %2$s</string>
+    <string name="home_config_error">Config generation failed: %1$s</string>
+
+    <!-- Connection state -->
+    <string name="state_idle">disconnected</string>
+    <string name="state_connecting">connecting…</string>
+    <string name="state_connected">connected</string>
+    <string name="state_disconnecting">disconnecting…</string>
+    <string name="state_error">error: %1$s</string>
+
+    <!-- Configs screen -->
+    <string name="configs_empty_title">No servers yet</string>
+    <string name="configs_empty_hint">Tap “Add” in the bottom-right and paste a share-URL from your VPN provider (vless:// / vmess:// / trojan:// / ss://).</string>
+    <string name="configs_add">Add</string>
+    <string name="configs_delete">Delete</string>
+    <string name="configs_active_marker">Active</string>
+    <string name="configs_import_subscription">Import subscription</string>
+    <string name="configs_import_done">Imported %1$d servers</string>
+
+    <!-- Add config dialog -->
+    <string name="add_dialog_title">New server</string>
+    <string name="add_dialog_url_label">share-URL</string>
+    <string name="add_dialog_url_placeholder">vless://...</string>
+    <string name="add_dialog_name_label">Name (optional)</string>
+    <string name="add_dialog_name_placeholder">e.g. NL Server #2</string>
+    <string name="add_dialog_save">Save</string>
+    <string name="add_dialog_cancel">Cancel</string>
+    <string name="add_dialog_parse_error">Couldn’t parse: %1$s</string>
+    <string name="add_dialog_generic_error">Error: %1$s</string>
+
+    <!-- Subscription dialog -->
+    <string name="sub_dialog_title">Subscription import</string>
+    <string name="sub_dialog_hint">If your provider gave you a subscription URL (with a base64-encoded server list inside), paste it here — all servers are imported at once.</string>
+    <string name="sub_dialog_url_label">Subscription URL</string>
+    <string name="sub_dialog_url_placeholder">https://...</string>
+    <string name="sub_dialog_url_required">Enter a URL</string>
+    <string name="sub_dialog_loading">Loading…</string>
+    <string name="sub_dialog_fetch">Fetch</string>
+    <string name="sub_dialog_fetching">Fetching…</string>
+    <string name="sub_dialog_add_all">Add all (%1$d)</string>
+    <string name="sub_dialog_close">Close</string>
+    <string name="sub_dialog_cancel">Cancel</string>
+    <string name="sub_dialog_no_results">Nothing parsed. Check the URL — is it really a subscription link?</string>
+    <string name="sub_dialog_fetch_error">Fetch failed: %1$s</string>
+    <string name="sub_dialog_summary">Found %1$d servers</string>
+    <string name="sub_dialog_summary_with_errors">Found %1$d servers (%2$d errors)</string>
+    <string name="sub_dialog_more_servers">…and %1$d more</string>
+
+    <!-- Settings screen -->
+    <string name="settings_dns_header">DNS server</string>
+    <string name="settings_dns_hint">Which DNS to use while the VPN is active. AdGuard adds blocking for ~10,000 ad domains at the xray layer.</string>
+    <string name="settings_behavior_header">Behavior</string>
+    <string name="settings_autoconnect_title">Auto-connect on launch</string>
+    <string name="settings_autoconnect_subtitle">Connect to the active server as soon as the app opens</string>
+    <string name="settings_about_header">About</string>
+    <string name="settings_xray_version">Xray-core: %1$s</string>
+    <string name="settings_app_version">KaproVPN Android (Phase 8)</string>
+
+    <!-- VPN service notification -->
+    <string name="vpn_notification_channel">KaproVPN status</string>
+    <string name="vpn_notification_channel_desc">Active VPN tunnel notification</string>
+    <string name="vpn_notification_connecting">KaproVPN — connecting…</string>
+    <string name="vpn_notification_connected">KaproVPN — connected</string>
+    <string name="vpn_notification_disconnect">Disconnect</string>
+</resources>

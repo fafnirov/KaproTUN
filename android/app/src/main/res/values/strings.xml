@@ -1,4 +1,87 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Источник правды (RU) — порт `kapro_vpn/core/i18n.py`. Каждое
+  значение здесь должно иметь соответствие в `values-en/strings.xml`.
+  При добавлении ключа сюда — не забыть продублировать в EN.
+-->
 <resources>
     <string name="app_name">KaproVPN</string>
+
+    <!-- Bottom nav -->
+    <string name="tab_home">Главная</string>
+    <string name="tab_configs">Серверы</string>
+    <string name="tab_settings">Настройки</string>
+
+    <!-- Home screen -->
+    <string name="home_active_server">Активный сервер</string>
+    <string name="home_no_servers_title">Серверов пока нет</string>
+    <string name="home_no_servers_hint">Добавь первый — открой вкладку «Серверы».</string>
+    <string name="home_add_server">Добавить сервер</string>
+    <string name="home_connect">ВКЛЮЧИТЬ</string>
+    <string name="home_disconnect">ОТКЛЮЧИТЬ</string>
+    <string name="home_connecting">ПОДКЛЮЧЕНИЕ…</string>
+    <string name="home_footer">%1$d RU-сайтов идут напрямую · DNS: %2$s</string>
+    <string name="home_config_error">Ошибка генерации конфига: %1$s</string>
+
+    <!-- Connection state -->
+    <string name="state_idle">не подключено</string>
+    <string name="state_connecting">подключение…</string>
+    <string name="state_connected">подключено</string>
+    <string name="state_disconnecting">отключение…</string>
+    <string name="state_error">ошибка: %1$s</string>
+
+    <!-- Configs screen -->
+    <string name="configs_empty_title">Серверов пока нет</string>
+    <string name="configs_empty_hint">Нажми «Добавить» внизу справа и вставь share-URL от твоего VPN-провайдера (vless:// / vmess:// / trojan:// / ss://).</string>
+    <string name="configs_add">Добавить</string>
+    <string name="configs_delete">Удалить</string>
+    <string name="configs_active_marker">Активный</string>
+    <string name="configs_import_subscription">Импорт по подписке</string>
+    <string name="configs_import_done">Импортировано серверов: %1$d</string>
+
+    <!-- Add config dialog -->
+    <string name="add_dialog_title">Новый сервер</string>
+    <string name="add_dialog_url_label">share-URL</string>
+    <string name="add_dialog_url_placeholder">vless://...</string>
+    <string name="add_dialog_name_label">Имя (опционально)</string>
+    <string name="add_dialog_name_placeholder">например, NL Server #2</string>
+    <string name="add_dialog_save">Сохранить</string>
+    <string name="add_dialog_cancel">Отмена</string>
+    <string name="add_dialog_parse_error">Не удалось распарсить: %1$s</string>
+    <string name="add_dialog_generic_error">Ошибка: %1$s</string>
+
+    <!-- Subscription dialog -->
+    <string name="sub_dialog_title">Импорт по подписке</string>
+    <string name="sub_dialog_hint">Если провайдер выдал ссылку на подписку (с base64-списком серверов внутри) — вставь её сюда, все сервера импортируются за раз.</string>
+    <string name="sub_dialog_url_label">Subscription URL</string>
+    <string name="sub_dialog_url_placeholder">https://...</string>
+    <string name="sub_dialog_url_required">Введите URL</string>
+    <string name="sub_dialog_loading">Загрузка…</string>
+    <string name="sub_dialog_fetch">Загрузить</string>
+    <string name="sub_dialog_fetching">Загружаю…</string>
+    <string name="sub_dialog_add_all">Добавить все (%1$d)</string>
+    <string name="sub_dialog_close">Закрыть</string>
+    <string name="sub_dialog_cancel">Отмена</string>
+    <string name="sub_dialog_no_results">Ничего не распарсилось. Проверь URL — это точно subscription-ссылка?</string>
+    <string name="sub_dialog_fetch_error">Ошибка загрузки: %1$s</string>
+    <string name="sub_dialog_summary">Найдено %1$d серверов</string>
+    <string name="sub_dialog_summary_with_errors">Найдено %1$d серверов (%2$d ошибок)</string>
+    <string name="sub_dialog_more_servers">…ещё %1$d</string>
+
+    <!-- Settings screen -->
+    <string name="settings_dns_header">DNS-сервер</string>
+    <string name="settings_dns_hint">Какой DNS использовать когда VPN активен. AdGuard добавит блокировку ~10 000 рекламных доменов на уровне xray.</string>
+    <string name="settings_behavior_header">Поведение</string>
+    <string name="settings_autoconnect_title">Автоподключение при запуске</string>
+    <string name="settings_autoconnect_subtitle">Подключаться к активному серверу как только откроется приложение</string>
+    <string name="settings_about_header">О приложении</string>
+    <string name="settings_xray_version">Xray-core: %1$s</string>
+    <string name="settings_app_version">KaproVPN Android (Phase 8)</string>
+
+    <!-- VPN service notification -->
+    <string name="vpn_notification_channel">KaproVPN статус</string>
+    <string name="vpn_notification_channel_desc">Уведомление активного VPN-туннеля</string>
+    <string name="vpn_notification_connecting">KaproVPN — подключение…</string>
+    <string name="vpn_notification_connected">KaproVPN — подключено</string>
+    <string name="vpn_notification_disconnect">Отключить</string>
 </resources>

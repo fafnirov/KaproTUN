@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -45,11 +46,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
-import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import pro.kaprovpn.android.R
 import pro.kaprovpn.android.core.AppRepository
 import pro.kaprovpn.android.core.ParseError
 import pro.kaprovpn.android.core.ProxyConfig
@@ -65,17 +69,18 @@ fun ConfigsScreen(modifier: Modifier = Modifier) {
     var showSubDialog by remember { mutableStateOf(false) }
     val snackbarHost = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     Scaffold(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text("Серверы") },
+                title = { Text(stringResource(R.string.tab_configs)) },
                 actions = {
                     IconButton(onClick = { showSubDialog = true }) {
                         Icon(
                             Icons.Filled.CloudDownload,
-                            contentDescription = "Импорт по подписке",
+                            contentDescription = stringResource(R.string.configs_import_subscription),
                         )
                     }
                 },
@@ -84,8 +89,11 @@ fun ConfigsScreen(modifier: Modifier = Modifier) {
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { showAddDialog = true },
-                icon = { Icon(Icons.Filled.Add, contentDescription = "Добавить") },
-                text = { Text("Добавить") },
+                icon = {
+                    Icon(Icons.Filled.Add,
+                        contentDescription = stringResource(R.string.configs_add))
+                },
+                text = { Text(stringResource(R.string.configs_add)) },
             )
         },
         snackbarHost = { SnackbarHost(snackbarHost) },
@@ -97,9 +105,7 @@ fun ConfigsScreen(modifier: Modifier = Modifier) {
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    horizontal = 16.dp, vertical = 12.dp
-                ),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(configs, key = { it.name }) { cfg ->
@@ -130,7 +136,9 @@ fun ConfigsScreen(modifier: Modifier = Modifier) {
             onAdded = { count ->
                 showSubDialog = false
                 scope.launch {
-                    snackbarHost.showSnackbar("Импортировано серверов: $count")
+                    snackbarHost.showSnackbar(
+                        context.getString(R.string.configs_import_done, count)
+                    )
                 }
             },
         )
@@ -161,7 +169,6 @@ private fun ConfigRow(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Активный маркер (зелёная галка) или прозрачный placeholder.
             Box(
                 modifier = Modifier
                     .size(24.dp)
@@ -174,7 +181,7 @@ private fun ConfigRow(
             ) {
                 if (isActive) Icon(
                     Icons.Filled.Check,
-                    contentDescription = "Активный",
+                    contentDescription = stringResource(R.string.configs_active_marker),
                     tint = MaterialTheme.colorScheme.onPrimary,
                     modifier = Modifier.size(16.dp),
                 )
@@ -191,7 +198,7 @@ private fun ConfigRow(
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Filled.Delete,
-                    contentDescription = "Удалить",
+                    contentDescription = stringResource(R.string.configs_delete),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -208,11 +215,11 @@ private fun EmptyConfigsState(modifier: Modifier = Modifier) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("Серверов пока нет", style = MaterialTheme.typography.headlineSmall)
+        Text(stringResource(R.string.configs_empty_title),
+            style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.size(8.dp))
         Text(
-            "Нажми «Добавить» внизу справа и вставь share-URL " +
-                "от твоего VPN-провайдера (vless:// / vmess:// / trojan:// / ss://).",
+            stringResource(R.string.configs_empty_hint),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -228,17 +235,18 @@ private fun AddConfigDialog(
     var urlInput by remember { mutableStateOf("") }
     var customName by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Новый сервер") },
+        title = { Text(stringResource(R.string.add_dialog_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
                     value = urlInput,
                     onValueChange = { urlInput = it; error = null },
-                    label = { Text("share-URL") },
-                    placeholder = { Text("vless://...") },
+                    label = { Text(stringResource(R.string.add_dialog_url_label)) },
+                    placeholder = { Text(stringResource(R.string.add_dialog_url_placeholder)) },
                     minLines = 2,
                     maxLines = 5,
                     modifier = Modifier.fillMaxWidth(),
@@ -246,8 +254,8 @@ private fun AddConfigDialog(
                 OutlinedTextField(
                     value = customName,
                     onValueChange = { customName = it },
-                    label = { Text("Имя (опционально)") },
-                    placeholder = { Text("например, NL Server #2") },
+                    label = { Text(stringResource(R.string.add_dialog_name_label)) },
+                    placeholder = { Text(stringResource(R.string.add_dialog_name_placeholder)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -263,14 +271,16 @@ private fun AddConfigDialog(
                     }
                     onSave(cfg)
                 } catch (e: ParseError) {
-                    error = "Не удалось распарсить: ${e.message}"
+                    error = context.getString(R.string.add_dialog_parse_error, e.message ?: "")
                 } catch (e: Throwable) {
-                    error = "Ошибка: ${e.message}"
+                    error = context.getString(R.string.add_dialog_generic_error, e.message ?: "")
                 }
-            }) { Text("Сохранить") }
+            }) { Text(stringResource(R.string.add_dialog_save)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Отмена") }
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.add_dialog_cancel))
+            }
         },
     )
 }

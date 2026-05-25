@@ -1,5 +1,6 @@
 package pro.kaprovpn.android.ui
 
+import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
@@ -18,20 +19,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
+import pro.kaprovpn.android.R
 import pro.kaprovpn.android.core.DnsOption
 
 /**
  * Корневой контейнер приложения. Скаффолд с NavigationBar в bottomBar,
  * переключающий три экрана: Home / Configs / Settings.
- *
- * Без navigation-compose lib намеренно — у нас всего 3 tab'а, hot-swap
- * через sealed class + remember достаточно. Меньше зависимостей.
  */
 @Composable
 fun AppNav(
     onConnect: (configJson: String, sessionName: String, dnsOption: DnsOption) -> Unit,
     onDisconnect: () -> Unit,
-    onNavigateToConfigs: () -> Unit = {},
 ) {
     var selectedTab by remember { mutableStateOf<Tab>(Tab.Home) }
 
@@ -39,18 +38,17 @@ fun AppNav(
         bottomBar = {
             NavigationBar {
                 Tab.ALL.forEach { tab ->
+                    val label = stringResource(tab.labelRes)
                     NavigationBarItem(
                         selected = selectedTab == tab,
                         onClick = { selectedTab = tab },
-                        icon = { Icon(tab.icon, contentDescription = tab.label) },
-                        label = { Text(tab.label, style = MaterialTheme.typography.labelSmall) },
+                        icon = { Icon(tab.icon, contentDescription = label) },
+                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
                     )
                 }
             }
         }
     ) { padding ->
-        // Phase 5: каждый экран сам делает свой padding относительно
-        // bottom bar — пробрасываем innerPadding контрактом.
         val modifier = Modifier.padding(padding)
         when (selectedTab) {
             Tab.Home -> HomeScreen(
@@ -65,17 +63,16 @@ fun AppNav(
     }
 }
 
-/** Три вкладки — больше пока не планируется. */
-sealed class Tab(val label: String, val icon: ImageVector) {
-    object Home : Tab("Главная", Icons.Filled.Home)
-    object Configs : Tab("Серверы", Icons.AutoMirrored.Filled.List)
-    object Settings : Tab("Настройки", Icons.Filled.Settings)
+/** Три вкладки. labelRes — индирекция через R.string чтобы получить
+ *  локализованную строку через stringResource в Composable-контексте. */
+sealed class Tab(@StringRes val labelRes: Int, val icon: ImageVector) {
+    object Home : Tab(R.string.tab_home, Icons.Filled.Home)
+    object Configs : Tab(R.string.tab_configs, Icons.AutoMirrored.Filled.List)
+    object Settings : Tab(R.string.tab_settings, Icons.Filled.Settings)
 
     companion object {
-        // lazy потому что static-init order для nested object'ов в Kotlin
-        // не гарантирован — без by lazy {} прямой `listOf(Home, ...)`
-        // может выполниться раньше чем Home/Configs/Settings проинициализи-
-        // руются, и список будет [null, null, null] → NPE при первом обращении.
+        // lazy — static-init order для nested object'ов не гарантирован.
+        // См. Phase 5 polish commit для деталей.
         val ALL: List<Tab> by lazy { listOf(Home, Configs, Settings) }
     }
 }

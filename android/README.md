@@ -129,11 +129,25 @@
 - Build + tests зелёные. E2E (проверка зашифрованных байт через
   adb run-as) — требует ручного добавления конфига в UI, опционально ✓
 
-**Не сделано (Phase 8+):**
+**Phase 8 — i18n RU/EN (готово):**
+- `res/values/strings.xml` — RU source of truth, ~50 ключей
+  (nav, screens, dialogs, errors, notification) ✓
+- `res/values-en/strings.xml` — EN-перевод, тот же набор ключей ✓
+- Все Compose-экраны (AppNav, HomeScreen, ConfigsScreen,
+  SettingsScreen, SubscriptionDialog) используют `stringResource()`
+  с form'атными параметрами для счётчиков ✓
+- `KaproVpnService` — `getString(R.string.vpn_notification_*)`
+  для channel + content + action ✓
+- `DnsOption.labelRu/labelEn` — UI выбирает по
+  `LocalConfiguration.current.locales[0].language` ✓
+- Tab labels хранят `@StringRes Int`, не String, чтобы
+  локализоваться корректно ✓
+- Build ✓. EN автоматически активируется когда устройство
+  переключено на English-локаль.
+
+**Не сделано (Phase 9+):**
 - Subscription auto-refresh каждые 12 часов — WorkManager periodic
   work (десктоп имеет в Sprint 2).
-- i18n (strings.xml RU/EN — порт `i18n.py` ключей; сейчас все
-  тексты захардкожены в RU).
 - Kill-switch (Always-on VPN — настройка системы Android, бесплатно).
 - Ping per config + sorting.
 - Release pipeline (signing, R8/ProGuard, ABI splits).
