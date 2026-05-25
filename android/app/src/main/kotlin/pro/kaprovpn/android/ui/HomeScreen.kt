@@ -25,11 +25,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import pro.kaprovpn.android.core.DnsOption
 import pro.kaprovpn.android.core.ParseError
 import pro.kaprovpn.android.core.ShareUrlParser
+import pro.kaprovpn.android.core.Storage
 import pro.kaprovpn.android.core.XrayConfigBuilder
 import pro.kaprovpn.android.vpn.XrayBridge
 
@@ -42,6 +44,12 @@ fun HomeScreen(
     // Phase 3 MVP: DNS захардкожен в System. Phase 5 поставит UI-пикер +
     // персистенс в DataStore, пока — sensible default.
     val dnsOption = DnsOption.SYSTEM
+
+    // Direct-list — bundled-список RU-сайтов из ассетов. Грузится один раз
+    // (remember с пустым ключом), на каждом коннекте используется.
+    // Phase 5 даст возможность редактировать.
+    val context = LocalContext.current
+    val directSites = remember { Storage.loadDefaultSites(context) }
     val state by XrayBridge.state.collectAsState()
     var urlInput by remember { mutableStateOf("") }
     var lastError by remember { mutableStateOf<String?>(null) }
@@ -63,7 +71,7 @@ fun HomeScreen(
         ) {
             Text("KaproVPN", style = MaterialTheme.typography.headlineMedium)
             Text(
-                "Phase 3: VpnService + TUN. Вставь share-URL — vless:// / vmess:// / trojan:// / ss://",
+                "Phase 4: split-routing на ${directSites.size} RU-сайтов (банки, госуслуги, маркетплейсы) идут напрямую",
                 style = MaterialTheme.typography.bodyMedium
             )
 
@@ -96,12 +104,13 @@ fun HomeScreen(
                     onClick = {
                         try {
                             val proxy = ShareUrlParser.parse(urlInput.trim())
-                            // Phase 3 MVP: пустой direct-list — туннелируем всё.
-                            // Phase 4: подтянем default_sites.json и сделаем
-                            // полноценный split-routing.
+                            // Split-routing: домены из directSites идут через
+                            // freedom-outbound xray → app-socket → bypass TUN
+                            // (через addDisallowedApplication в KaproVpnService)
+                            // → реальный IP. Всё остальное — через прокси.
                             val json = XrayConfigBuilder.buildConfigJson(
                                 proxy = proxy,
-                                directDomains = emptyList(),
+                                directDomains = directSites,
                                 dnsOption = dnsOption,
                             )
                             lastError = null

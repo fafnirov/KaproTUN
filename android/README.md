@@ -66,17 +66,28 @@
   Android 13+ exclude-routes через `Builder.excludeRoute()` для DNS-IP ✓
 - 31 unit-тест (22 парсер + 9 на XrayConfigBuilder) зелёные ✓
 
-**Phase 3 MVP не делает (нужно в Phase 4):**
-- Split-routing — пока туннелируется ВЕСЬ трафик (включая RU-сайты).
-  Доделать: загружать `default_sites.json` из assets, резолвить
-  домены в IP параллельно, `Builder.addRoute(ip, 32)` для bypass —
-  как в десктоп-`controller.py:_connect_tun`.
-- Сохранение конфигов (DataStore + JSON). Сейчас URL вводится каждый
-  раз заново.
+**Phase 4 — split-routing (готово):**
+- `core.Storage.loadDefaultSites(context)` — грузит `default_sites.json`
+  из ассетов (синкается build-task'ом из `../kapro_vpn/data/`). 108 RU-
+  доменов (банки, госуслуги, маркетплейсы) ✓
+- HomeScreen передаёт список в `XrayConfigBuilder.directDomains` ✓
+- На Android IP-резолв НЕ нужен (в отличие от десктопа): xray
+  freedom-outbound → app-socket → bypass TUN автоматом через
+  `Builder.addDisallowedApplication(packageName)`. Поэтому
+  split-routing работает "бесплатно" — xray роутит по domain rules,
+  Android выводит app-сокеты из TUN ✓
+
+**Не сделано (Phase 5+):**
+- Сохранение конфигов (DataStore + EncryptedSharedPreferences для
+  паролей — Android-аналог Windows DPAPI с десктопа). Сейчас URL
+  вводится заново на каждом коннекте.
 - DNS-picker в UI (модели уже готовы, нужен Compose-экран Settings).
-- Список конфигов / picker / ping.
+- Список конфигов / picker / ping per config.
+- Импорт по подписке (порт `subscription.py` + WorkManager для
+  12-часового auto-refresh).
 - Kill-switch (Always-on VPN — настройка системы Android, частично
   бесплатно).
+- i18n (strings.xml RU/EN — порт `i18n.py` ключей).
 
 ## Требования
 
