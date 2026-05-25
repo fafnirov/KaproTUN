@@ -261,6 +261,21 @@ def _wireguard_to_xray(url: str) -> dict[str, Any]:
         # consumer hardware (xray uses CPU-count if omitted, which can
         # over-allocate on big-core laptops).
         "workers": 2,
+        # Match the Xray-core docs example verbatim — these fields
+        # default to similar values internally but being explicit avoids
+        # version-to-version drift in defaults.
+        #
+        # domainStrategy: ForceIP means xray resolves any domain
+        # destination BEFORE handing it to the WG outbound (we always
+        # get IPs from tun2socks anyway, so it's a no-op for TUN mode,
+        # but matters for HTTP-proxy mode where browsers send domain
+        # names in CONNECT requests).
+        "domainStrategy": "ForceIP",
+        # reserved is for WG variants that overwrite 3 bytes of the
+        # handshake (Cloudflare WARP, some custom providers). For
+        # stock WG `[0,0,0]` is a no-op — equivalent to not setting it
+        # but more explicit about our intent to be vanilla-compatible.
+        "reserved": [0, 0, 0],
     }
     return {
         "tag": "proxy",
@@ -351,6 +366,14 @@ def build_config(
     outbound as the default for non-matching traffic, so domains not in the
     direct list go through `proxy` automatically.
     """
+    # WireGuard is new in v1.2 and uses xray's gVisor user-space stack —
+    # subtle handshake/MTU issues are hard to diagnose at the default
+    # `warning` level. Bump to `info` for WG so xray.log carries
+    # "connect to wireguard server" / "handshake completed" lines that
+    # let us tell apart "config is wrong" from "ISP is blocking UDP".
+    if proxy.protocol in ("wireguard", "wg"):
+        log_level = "info"
+
     proxy_outbound = proxy_to_xray_outbound(proxy)
     cleaned = sorted({d.strip().lower() for d in direct_domains if d.strip()})
 
@@ -369,7 +392,13 @@ def build_config(
     from . import xray_stats as _stats
 
     return {
-        "log": {"loglevel": log_level},
+        "log": {
+            "loglevel": log_level,
+            # Also write to file so users can grab xray.log after a
+            # crash/disconnect for diagnostics — the in-app Logs tab
+            # only holds the last ~500 lines in RAM.
+            "error": str(paths.log_file()),
+        },
         "stats": {},
         "policy": {
             "system": {
