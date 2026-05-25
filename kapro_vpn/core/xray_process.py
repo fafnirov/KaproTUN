@@ -29,12 +29,24 @@ class XrayProcess:
 
     # --- lifecycle --------------------------------------------------------
 
+    # Rotate xray.log when it grows past this size. ~1 MB is generous
+    # for a single session but stops the file from accumulating
+    # multi-GB over months of uninterrupted use. Old log is renamed
+    # xray.log.1 so users still have one backup for post-mortem.
+    MAX_LOG_BYTES = 1_048_576  # 1 MiB
+
     def start(self, config_path: str) -> None:
         if self.is_running():
             raise RuntimeError("xray is already running")
         exe = paths.xray_exe()
         if not exe.is_file():
             raise FileNotFoundError(f"xray.exe not found at {exe}")
+
+        # Rotate xray.log if it's grown unreasonably between sessions.
+        # xray appends to the same file across runs, so without this
+        # the file can creep up over months. Cheap (one stat + maybe
+        # one rename), runs once per connect.
+        self._rotate_log_if_needed()
 
         self._proc = subprocess.Popen(
             [str(exe), "run", "-c", config_path],
@@ -48,6 +60,30 @@ class XrayProcess:
         )
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
+
+    def _rotate_log_if_needed(self) -> None:
+        """If xray.log is over MAX_LOG_BYTES, rename to xray.log.1
+        (replacing any existing .1). Single-backup strategy — we don't
+        keep a chain, just the last full file.
+        """
+        log_path = paths.log_file()
+        try:
+            if not log_path.is_file():
+                return
+            if log_path.stat().st_size <= self.MAX_LOG_BYTES:
+                return
+            backup = log_path.with_suffix(log_path.suffix + ".1")
+            if backup.exists():
+                try:
+                    backup.unlink()
+                except OSError:
+                    return
+            log_path.replace(backup)
+        except OSError:
+            # Best-effort — if rotation fails (file locked by another
+            # process etc.) just leave the file alone, xray will
+            # continue appending.
+            pass
 
     def stop(self, timeout: float = 3.0) -> None:
         proc = self._proc

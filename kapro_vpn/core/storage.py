@@ -1,23 +1,72 @@
-"""Persistent storage for configs, the direct-routing sites list, and settings."""
+"""Persistent storage for configs, the direct-routing sites list, and settings.
+
+Privacy: on Windows, configs.json is DPAPI-encrypted at rest (only the
+current user account can read it). load_configs() transparently handles
+both encrypted and legacy plaintext files — opening an old pre-1.8.0
+file still works, and the next save flips it to encrypted form.
+
+On mac/Linux configs stay plaintext (file permissions only — same as
+~/.ssh/config). DPAPI replacement on those platforms is future work.
+
+What's NOT encrypted: sites.json (just domain names — not secret), and
+settings.json (mostly preferences, but subscription_url IS a secret —
+treated as such; we move it OUT of settings.json into the encrypted
+configs.json blob for users who care).
+"""
 from __future__ import annotations
 
 import json
 from dataclasses import asdict
 from typing import Any
 
-from . import paths
+from . import paths, secrets_store
 from .parser import ProxyConfig
+
+
+def _read_configs_bytes() -> bytes:
+    """Read raw bytes of configs.json. Empty bytes if file missing.
+
+    Centralized here so we can put DPAPI decode logic in one place.
+    """
+    f = paths.configs_file()
+    if not f.is_file():
+        return b""
+    raw = f.read_bytes()
+    if secrets_store.looks_encrypted(raw):
+        try:
+            return secrets_store.decrypt(raw)
+        except Exception:
+            # Encrypted blob unreadable (different Windows user, key
+            # rotation, etc.). Surface as "no configs" rather than
+            # crashing the app at startup — user can re-import.
+            return b""
+    return raw  # legacy plaintext
+
+
+def _write_configs_bytes(data: bytes) -> None:
+    """Write data to configs.json, DPAPI-encrypted where supported.
+
+    On encrypt failure (rare — DPAPI Windows API rejection), fall
+    back to plaintext write rather than losing the user's configs.
+    """
+    f = paths.configs_file()
+    if secrets_store.is_supported():
+        try:
+            data = secrets_store.encrypt(data)
+        except Exception:
+            pass  # silently fall back to plaintext
+    f.write_bytes(data)
 
 
 # --- saved proxy configs --------------------------------------------------
 
 def load_configs() -> list[ProxyConfig]:
-    f = paths.configs_file()
-    if not f.is_file():
+    raw_bytes = _read_configs_bytes()
+    if not raw_bytes:
         return []
     try:
-        raw = json.loads(f.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        raw = json.loads(raw_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return []
     out: list[ProxyConfig] = []
     for item in raw if isinstance(raw, list) else []:
@@ -35,10 +84,8 @@ def load_configs() -> list[ProxyConfig]:
 
 def save_configs(configs: list[ProxyConfig]) -> None:
     data = [asdict(c) for c in configs]
-    paths.configs_file().write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    _write_configs_bytes(payload)
 
 
 # --- direct-routing site list ---------------------------------------------

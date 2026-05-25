@@ -313,6 +313,28 @@ def build_config(
         {"type": "field", "outboundTag": "block",
          "ip": ["224.0.0.0/4", "255.255.255.255/32"]},
         {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"},
+        # DNS-leak hardening: queries to common public DNS resolvers
+        # ALSO get force-routed direct, even if some other rule below
+        # might match them. The controller already adds OS-level
+        # host-routes for these via the real gateway, but if anything
+        # slips through (e.g. an app doing DNS over TCP/853 which the
+        # kernel routes differently), this rule makes sure xray drops
+        # it to direct rather than tunnelling — keeping the DNS query
+        # off our VPN provider's view of the user's browsing.
+        {"type": "field", "outboundTag": "direct", "ip": [
+            "1.1.1.1/32", "1.0.0.1/32",      # Cloudflare
+            "8.8.8.8/32", "8.8.4.4/32",      # Google
+            "9.9.9.9/32",                     # Quad9
+            "77.88.8.8/32", "77.88.8.1/32",  # Yandex
+            "77.88.8.88/32", "77.88.8.7/32", # Yandex safe/family
+        ]},
+        # And by port: anything to UDP 53 / TCP 53 should NEVER tunnel
+        # unless it's already direct via the IP rule above. Catches DNS
+        # to less-common resolvers without us hard-coding their IPs.
+        {"type": "field", "outboundTag": "direct",
+         "network": "udp", "port": "53"},
+        {"type": "field", "outboundTag": "direct",
+         "network": "tcp", "port": "53"},
     ]
     if domain_rules:
         rules.append({"type": "field", "domain": domain_rules, "outboundTag": "direct"})
@@ -325,10 +347,16 @@ def build_config(
     return {
         "log": {
             "loglevel": log_level,
-            # Also write to file so users can grab xray.log after a
-            # crash/disconnect for diagnostics — the in-app Logs tab
-            # only holds the last ~500 lines in RAM.
+            # Also write ERROR-level log to file so users can grab xray.log
+            # after a crash/disconnect for diagnostics — the in-app Logs
+            # tab only holds the last ~500 lines in RAM.
             "error": str(paths.log_file()),
+            # Privacy: explicitly disable access-log. Without "access:
+            # none" xray would write a line per connection (timestamp +
+            # source + destination IP/host) — that's a full browsing
+            # history on disk. We don't want users to ever accidentally
+            # leak that to anyone with disk access.
+            "access": "none",
         },
         "stats": {},
         "policy": {

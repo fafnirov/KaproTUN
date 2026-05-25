@@ -181,27 +181,53 @@ jobs:
           path: ${{ matrix.payload_path }}
           if-no-files-found: error
 
+      - name: Extract release notes from CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          # Take the top-most "## " section from CHANGELOG.md — that's
+          # the "what's new in THIS release" block we maintain manually
+          # before every tag. Stop at the next "## " or "---" divider.
+          awk '
+            /^## / { if (found) exit; found=1; next }
+            /^---$/ { if (found) exit }
+            found { print }
+          ' CHANGELOG.md > /tmp/release-body-top.md
+
+          # Append the static "how to download" table after the
+          # per-release notes — same for every release.
+          cat >> /tmp/release-body-top.md <<'EOF'
+
+          ---
+
+          ### ⬇ Скачать (выбери под свою систему)
+
+          | OS | Файл | Что делать |
+          |----|------|-----------|
+          | Windows 10/11 (x64) | `KaproVPN-Setup.exe` | Запустить, пара кликов |
+          | macOS (Apple Silicon) | `KaproVPN-macOS-arm64.dmg` | Открыть DMG, перетащить в Applications |
+          | Linux (x64) | `KaproVPN-Linux-x64.AppImage` | `chmod +x` и запустить |
+
+          Полный changelog: [CHANGELOG.md](../../blob/main/CHANGELOG.md)
+
+          ---
+
+          Auto-built by GitHub Actions from `${{ github.ref_name }}`.
+          EOF
+
+          echo "=== Release body preview ==="
+          cat /tmp/release-body-top.md
+
       - name: Attach to GitHub Release (tag pushes)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.payload_path }}
           generate_release_notes: true
-          body: |
-            ## KaproVPN ${{ github.ref_name }}
-
-            ### ⬇ Скачать (выбери под свою систему)
-
-            | OS | Файл | Что делать |
-            |----|------|-----------|
-            | Windows 10/11 (x64) | `KaproVPN-Setup.exe` | Запустить, пара кликов |
-            | macOS (Apple Silicon) | `KaproVPN-macOS-arm64.dmg` | Открыть DMG, перетащить в Applications |
-            | Linux (x64) | `KaproVPN-Linux-x64.AppImage` | `chmod +x` и запустить |
-
-            **HTTP-прокси и TUN режимы работают на всех трёх ОС.**
-            TUN тоннелирует Telegram/Steam/игры системно (нужны
-            UAC на Windows, `sudo` на mac, `pkexec`/`sudo` на Linux).
-
-            Auto-built by GitHub Actions from `${{ github.ref_name }}`.
+          # Each matrix job runs this — but only ubuntu-latest extracted
+          # the body file. softprops accepts a body_path that doesn't
+          # exist (treats as empty) so windows/macos jobs just attach
+          # files without touching the body — ubuntu-latest set it once.
+          body_path: /tmp/release-body-top.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
