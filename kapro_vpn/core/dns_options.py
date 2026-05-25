@@ -57,14 +57,16 @@ SYSTEM = DnsOption(
 )
 
 # AdGuard DNS (94.140.14.14 / 94.140.15.15). Public, free, no logs.
-# Blocks ads + trackers via DNS-level domain blocklists. Most popular
-# "ad-block via DNS" option among Russian users.
+# When selected, KaproVPN also adds an xray routing rule that drops the
+# geosite:category-ads-all list (~10k ad/tracker domains) to blackhole —
+# this catches what Browser Secure-DNS bypasses (Chrome/Edge defaults to
+# 1.1.1.1 for DoH, ignoring any DNS we set OS-side). See xray_config.py.
 ADGUARD = DnsOption(
     key="adguard",
     label_ru="AdGuard — блокирует рекламу",
     label_en="AdGuard — blocks ads",
-    hint_ru="Режет рекламу и трекеры на уровне DNS. Работает на любом сайте, на любом сервере.",
-    hint_en="Filters ads and trackers at the DNS level. Works on any site through any server.",
+    hint_ru="Блокирует рекламу и трекеры — двойная защита: AdGuard DNS + ~10 000 ad-доменов через xray routing. Работает на любом сервере.",
+    hint_en="Blocks ads and trackers — two layers: AdGuard DNS + ~10K ad-domains via xray routing. Works on any server.",
     doh_servers=["https://dns.adguard-dns.com/dns-query"],
     plain_servers=["94.140.14.14", "94.140.15.15"],
     bypass_ips=["94.140.14.14", "94.140.15.15"],

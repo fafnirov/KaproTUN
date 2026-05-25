@@ -357,6 +357,26 @@ def build_config(
             "ip": [f"{ip}/32" for ip in dns_opt.bypass_ips],
         })
 
+    # AdGuard-only ad/tracker block via xray routing. v1.9.0 only added DNS
+    # override, but browsers (Chrome's "Secure DNS" → Cloudflare 1.1.1.1 by
+    # default) and apps with their own DoH bypass any OS-level DNS, so an
+    # AdGuard DoH server alone didn't actually block ads for most users.
+    #
+    # This rule looks at the SNI / HTTP CONNECT host on every outbound
+    # request and drops anything matching the bundled geosite "category-
+    # ads-all" list (~10k+ known ad/tracker domains, maintained by the
+    # v2fly community). Works regardless of which DNS the app uses.
+    #
+    # Why only on adguard: keeps the four-option positioning clean —
+    # Cloudflare (fast, no filter), Quad9 (security only, no ads), System
+    # (no change). User who wants ad-block picks AdGuard, gets ad-block.
+    if dns_opt.key == "adguard":
+        rules.append({
+            "type": "field",
+            "outboundTag": "block",
+            "domain": ["geosite:category-ads-all"],
+        })
+
     if domain_rules:
         rules.append({"type": "field", "domain": domain_rules, "outboundTag": "direct"})
 

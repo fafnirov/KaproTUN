@@ -246,6 +246,27 @@ def _make_dns_check(opt_key: str):
                 f"direct-outbound routing rule"
             )
 
+        # v1.9.1: AdGuard option (and ONLY adguard) must add a block-rule
+        # for geosite:category-ads-all. The other named options stay
+        # non-filtering — that's their positioning. Catches regression
+        # where someone moves the block rule out of the `if adguard` guard.
+        has_ad_block = any(
+            rule.get("outboundTag") == "block"
+            and "geosite:category-ads-all" in rule.get("domain", [])
+            for rule in full["routing"]["rules"]
+        )
+        if opt_key == "adguard" and not has_ad_block:
+            raise AssertionError(
+                "adguard must add a block-rule for geosite:category-ads-all "
+                "(the OS-DNS-only mechanism doesn't catch what browsers do "
+                "with their own DoH — this rule is the real ad-block)"
+            )
+        if opt_key != "adguard" and has_ad_block:
+            raise AssertionError(
+                f"{opt_key}: should NOT have ad-block rule (only adguard "
+                "is positioned as the ad-blocking option)"
+            )
+
     return inner
 
 
