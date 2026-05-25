@@ -214,13 +214,6 @@ installer/                    # standalone PyInstaller-сборка для Kapro
 - macOS: `~/Library/Application Support/KaproVPN/`
 - Linux: `~/.local/share/KaproVPN/`
 
-## Скриншоты
-
-<p align="center">
-  <img src="docs/screenshots/main-window.png" alt="Главное окно" width="420">
-  <img src="docs/screenshots/tray.png" alt="Меню в системном трее" width="320">
-</p>
-
 ## Контрибьюты
 
 PR'ы приветствуются. Самые полезные направления сейчас:

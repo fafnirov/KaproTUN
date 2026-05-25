@@ -207,13 +207,6 @@ User data (saved configs, edited site list, settings, logs) lives in:
 - macOS: `~/Library/Application Support/KaproVPN/`
 - Linux: `~/.local/share/KaproVPN/`
 
-## Screenshots
-
-<p align="center">
-  <img src="docs/screenshots/main-window.png" alt="Main window" width="420">
-  <img src="docs/screenshots/tray.png" alt="System tray quick-connect" width="320">
-</p>
-
 ## Contributing
 
 PRs welcome. The most useful directions right now:
