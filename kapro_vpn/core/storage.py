@@ -133,6 +133,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "kill_switch": False,    # leave TUN up if xray dies (no leak via real ISP)
     "language": "auto",      # "ru" / "en" / "auto" (detect from QLocale.system())
     "subscription_auto_refresh": True,  # background re-fetch every 12h
+    "dns_option": "system",  # see core/dns_options.py — system|adguard|cloudflare|quad9
 }
 
 

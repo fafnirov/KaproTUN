@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..core import (
-    admin, autostart, storage, tun2socks_installer,
+    admin, autostart, dns_options, storage, tun2socks_installer,
     updater, xray_installer, xray_stats,
 )
 from ..core.controller import MODE_HTTP_PROXY, MODE_TUN
@@ -335,6 +335,48 @@ class SettingsPage(QWidget):
         kill_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(kill_hint)
 
+        # --- DNS server choice ---
+        # Some subscription providers don't filter ads at the DNS layer, so
+        # picking AdGuard here gives ad-blocking that works on any server.
+        # System is the leave-it-alone default. RadioButton group instead of
+        # a combo so the user sees all four options + their hints at once —
+        # they're meaningfully different and a one-line dropdown loses that.
+        sep_dns = QFrame()
+        sep_dns.setFrameShape(QFrame.HLine)
+        outer.addWidget(sep_dns)
+
+        dns_label = QLabel("DNS-сервер")
+        dns_label.setObjectName("h2")
+        outer.addWidget(dns_label)
+
+        self.dns_group = QButtonGroup(self)
+        self.dns_group.setExclusive(True)
+        self._dns_radios: dict[str, QRadioButton] = {}
+        current_dns = str(manager.settings.get("dns_option", dns_options.DEFAULT_KEY))
+        for opt in dns_options.OPTIONS:
+            radio = QRadioButton(opt.label_ru)
+            radio.setChecked(opt.key == current_dns)
+            radio.toggled.connect(
+                lambda checked, k=opt.key: self._on_dns_option_changed(k, checked)
+            )
+            self.dns_group.addButton(radio)
+            outer.addWidget(radio)
+            hint = QLabel(opt.hint_ru)
+            hint.setObjectName("dim")
+            hint.setWordWrap(True)
+            hint.setContentsMargins(28, 0, 0, 4)
+            outer.addWidget(hint)
+            self._dns_radios[opt.key] = radio
+
+        dns_footer = QLabel(
+            "DoH (зашифрованный DNS) — провайдер не видит запросы. "
+            "Применяется при следующем подключении."
+        )
+        dns_footer.setObjectName("dim")
+        dns_footer.setWordWrap(True)
+        dns_footer.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(dns_footer)
+
         # --- Language toggle ---
         # Lives in Security section because it's the only other "global
         # preference" — too small to deserve its own section header.
@@ -483,6 +525,17 @@ class SettingsPage(QWidget):
 
     def _on_kill_switch_changed(self, checked: bool) -> None:
         self._manager.update_settings(kill_switch=checked)
+        self.settings_changed.emit()
+
+    def _on_dns_option_changed(self, key: str, checked: bool) -> None:
+        # Both old and new radios fire toggled() — we only care about the
+        # one being newly selected (checked=True). Saved immediately;
+        # applied at the next connect (xray needs a restart to re-read
+        # the dns block and the TUN adapter's resolver gets re-pinned in
+        # _connect_tun).
+        if not checked:
+            return
+        self._manager.update_settings(dns_option=key)
         self.settings_changed.emit()
 
     def _on_language_changed(self, _index: int) -> None:

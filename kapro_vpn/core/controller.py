@@ -7,7 +7,10 @@ import sys
 import time
 from typing import Callable, Optional
 
-from . import admin, geoip_ru, killswitch, paths, storage, system_proxy, xray_config
+from . import (
+    admin, dns_options, geoip_ru, killswitch, paths, storage, system_proxy,
+    xray_config,
+)
 from .parser import ProxyConfig
 from .xray_process import XrayProcess
 
@@ -329,8 +332,18 @@ class ConnectionManager:
 
             # Bypass DNS resolvers + big Russian service blocks (Yandex/VK
             # ranges) so DoH and CDN traffic doesn't loop through the tunnel.
+            # If the user picked a non-system DNS in Settings, splice its IPs
+            # in too — otherwise their DoH-over-port-443 would tunnel through
+            # the VPN server uselessly (and the provider would see the VPN's
+            # IP, not the user's).
+            dns_opt = dns_options.get(str(self.settings.get("dns_option", "system")))
+            bypass_list: list[tuple[str, str]] = list(_ALWAYS_BYPASS)
+            existing_ips = {entry[0] for entry in bypass_list}
+            for ip in dns_opt.bypass_ips:
+                if ip not in existing_ips:
+                    bypass_list.append((ip, "255.255.255.255"))
             added_always = session.add_bypass_cidrs(
-                _ALWAYS_BYPASS, real.gateway, real.index, metric=bypass_metric,
+                bypass_list, real.gateway, real.index, metric=bypass_metric,
             )
             self._log(f"[*] Добавлено {added_always} always-bypass роутов "
                       f"(DNS-серверы + Yandex/VK CIDR'ы)")
@@ -345,8 +358,12 @@ class ConnectionManager:
             if not session.add_route("128.0.0.0", "128.0.0.0", TUN_GATEWAY, tun.index, metric=tun_metric):
                 raise ConnectionError("Не удалось добавить маршрут 128.0.0.0/1 через TUN.")
 
-            # DNS via TUN so resolution doesn't leak to ISP.
-            session.set_dns(tun.name, TUN_DNS)
+            # DNS via TUN so resolution doesn't leak to ISP. If the user
+            # picked a non-system DNS, use its plain IPv4 servers here so
+            # the TUN adapter's resolver matches what xray uses internally;
+            # otherwise fall back to the safe Yandex+Cloudflare default.
+            tun_dns_servers = dns_opt.plain_servers if dns_opt.plain_servers else TUN_DNS
+            session.set_dns(tun.name, tun_dns_servers)
 
             # Split-routing in TUN mode: xray's freedom outbound can't be
             # trusted alone because its outgoing packets still hit the kernel
@@ -413,8 +430,11 @@ class ConnectionManager:
 
     def _write_and_check(self, config: ProxyConfig, direct_domains: list[str],
                          host: str, port: int) -> str:
+        dns_option = str(self.settings.get("dns_option", "system"))
         try:
-            path = xray_config.write_config(config, direct_domains, host, port)
+            path = xray_config.write_config(
+                config, direct_domains, host, port, dns_option=dns_option,
+            )
         except (ValueError, NotImplementedError) as e:
             raise ConnectionError(f"Конфиг не поддерживается: {e}") from e
         ok, msg = XrayProcess.check_config(path)

@@ -180,7 +180,81 @@ for label, cfg in parsed.items():
 
 
 # ---------------------------------------------------------------------------
-# Test 4 — Installer flow transitions
+# Test 4 — DNS options (v1.9.0)
+# ---------------------------------------------------------------------------
+# Each option must produce a valid config. "system" should NOT add a dns
+# block (xray complains about empty servers). Named options must add the
+# block, force IPv4, and include the bypass-by-IP routing rule for that
+# service's plain IPs.
+
+section("DNS options")
+
+from kapro_vpn.core import dns_options
+
+_vless_cfg = parsed["vless"]
+
+
+def _make_dns_check(opt_key: str):
+    opt = dns_options.get(opt_key)
+
+    def inner() -> None:
+        full = build_config(
+            _vless_cfg,
+            direct_domains=["example.com"],
+            dns_option=opt_key,
+        )
+        json.dumps(full, ensure_ascii=False)  # must remain serialisable
+
+        if opt_key == "system":
+            if "dns" in full:
+                raise AssertionError(
+                    "system DNS option should NOT emit a dns block "
+                    "(xray rejects empty servers)"
+                )
+            return
+
+        # Named option (adguard/cloudflare/quad9): dns block must exist
+        # with the expected DoH endpoints and IPv4-only strategy.
+        if "dns" not in full:
+            raise AssertionError(f"{opt_key}: dns block missing")
+        if full["dns"].get("queryStrategy") != "UseIPv4":
+            raise AssertionError(
+                f"{opt_key}: queryStrategy must be UseIPv4"
+            )
+        servers = full["dns"].get("servers", [])
+        if servers != opt.doh_servers:
+            raise AssertionError(
+                f"{opt_key}: dns servers mismatch — got {servers}, "
+                f"expected {opt.doh_servers}"
+            )
+
+        # And the plain IPs of that service must be in a direct-route rule,
+        # otherwise an app doing its own DoH-over-443 directly to those IPs
+        # would tunnel through the VPN unnecessarily.
+        wanted = {f"{ip}/32" for ip in opt.bypass_ips}
+        found_in_direct = False
+        for rule in full["routing"]["rules"]:
+            if rule.get("outboundTag") != "direct":
+                continue
+            ips = set(rule.get("ip", []))
+            if wanted.issubset(ips):
+                found_in_direct = True
+                break
+        if not found_in_direct:
+            raise AssertionError(
+                f"{opt_key}: bypass_ips {sorted(wanted)} not found in any "
+                f"direct-outbound routing rule"
+            )
+
+    return inner
+
+
+for opt in dns_options.OPTIONS:
+    check(f"dns_option={opt.key}", _make_dns_check(opt.key))
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — Installer flow transitions
 # ---------------------------------------------------------------------------
 # Catches regressions like "click does nothing because we addWidget but
 # forgot setCurrentWidget" — exactly the v1.8.1 uninstall-button bug.

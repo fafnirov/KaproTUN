@@ -12,7 +12,7 @@ import json
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import paths
+from . import dns_options, paths
 from .parser import ProxyConfig
 
 DEFAULT_LISTEN_HOST = "127.0.0.1"
@@ -280,15 +280,24 @@ def build_config(
     listen_host: str = DEFAULT_LISTEN_HOST,
     listen_port: int = DEFAULT_LISTEN_PORT,
     log_level: str = "warning",
+    dns_option: str = "system",
 ) -> dict[str, Any]:
     """Build a complete Xray-core client config with split routing.
 
     The proxy outbound is first in the outbounds list — Xray uses the first
     outbound as the default for non-matching traffic, so domains not in the
     direct list go through `proxy` automatically.
+
+    dns_option (from core/dns_options.py) controls how DNS resolution
+    happens. "system" — let the OS resolve everything, no xray-side dns
+    block. For named options (adguard/cloudflare/quad9) we add a `dns`
+    block with DoH servers AND a routing rule that forces those servers'
+    plain IPs to "direct" (so DoH-over-443 from apps that bypass xray's
+    own resolver still doesn't tunnel through the VPN).
     """
     proxy_outbound = proxy_to_xray_outbound(proxy)
     cleaned = sorted({d.strip().lower() for d in direct_domains if d.strip()})
+    dns_opt = dns_options.get(dns_option)
 
     # `domain:foo.bar` in Xray matches foo.bar AND any *.foo.bar
     domain_rules = [f"domain:{d}" for d in cleaned]
@@ -336,6 +345,18 @@ def build_config(
         {"type": "field", "outboundTag": "direct",
          "network": "tcp", "port": "53"},
     ]
+    # User-chosen DNS service — its plain IPs should never tunnel through
+    # the VPN (otherwise DoH-over-443 from apps that don't use xray's own
+    # resolver takes an unnecessary VPN-server round-trip and the DNS
+    # provider sees the VPN server's IP, not the user's). Skipped when
+    # dns_option == "system" because bypass_ips is empty in that case.
+    if dns_opt.bypass_ips:
+        rules.append({
+            "type": "field",
+            "outboundTag": "direct",
+            "ip": [f"{ip}/32" for ip in dns_opt.bypass_ips],
+        })
+
     if domain_rules:
         rules.append({"type": "field", "domain": domain_rules, "outboundTag": "direct"})
 
@@ -343,6 +364,17 @@ def build_config(
     # `xray api stats` CLI helper). Routed to the dedicated `api` outbound
     # rather than the proxy/direct ones.
     from . import xray_stats as _stats
+
+    # DNS block — only when the user picked a named service. For "system"
+    # we leave xray's default behavior (resolve via the OS), so this block
+    # is omitted entirely. For DoH options, point xray at the encrypted
+    # endpoint and force IPv4-only queries (we don't tunnel v6 anyway).
+    dns_block: dict[str, Any] | None = None
+    if dns_opt.doh_servers:
+        dns_block = {
+            "servers": list(dns_opt.doh_servers),
+            "queryStrategy": "UseIPv4",
+        }
 
     return {
         "log": {
@@ -368,6 +400,10 @@ def build_config(
             }
         },
         "api": {"tag": "api", "services": ["StatsService"]},
+        # Conditional dns block — present only for non-system DNS option.
+        # Using dict-spread to avoid emitting an empty key xray would
+        # otherwise complain about.
+        **({"dns": dns_block} if dns_block else {}),
         "inbounds": [
             {
                 "tag": "http-in",
@@ -424,8 +460,11 @@ def write_config(
     direct_domains: list[str],
     listen_host: str = DEFAULT_LISTEN_HOST,
     listen_port: int = DEFAULT_LISTEN_PORT,
+    dns_option: str = "system",
 ) -> str:
-    config = build_config(proxy, direct_domains, listen_host, listen_port)
+    config = build_config(
+        proxy, direct_domains, listen_host, listen_port, dns_option=dns_option,
+    )
     target = paths.runtime_config_file()
     target.write_text(
         json.dumps(config, indent=2, ensure_ascii=False),
