@@ -290,11 +290,16 @@ def get_installed_version() -> Optional[str]:
     # WireGuard for Windows doesn't expose --version cleanly, but the
     # binary's file-info has it. PowerShell one-liner gives a clean
     # string; cheap enough.
+    #
+    # errors="replace" is critical on RU Windows — without it, any
+    # cp1251 byte we can't decode (Russian-locale PowerShell output
+    # leaks them sometimes) crashes the subprocess reader thread.
     try:
         proc = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command",
              f"(Get-Item '{exe}').VersionInfo.ProductVersion"],
             capture_output=True, text=True, timeout=5,
+            encoding="utf-8", errors="replace",
             creationflags=_NO_WINDOW,
         )
         return (proc.stdout or "").strip() or None
@@ -360,15 +365,22 @@ def install_tunnel(conf_text: str, tunnel_name: str) -> Path:
     # /installtunnelservice is the official, documented CLI verb.
     # It requires admin privileges; controller has already gated on
     # admin.is_admin() before calling us.
+    #
+    # Use bytes (no text=True) — wireguard.exe stderr on RU Windows
+    # contains cp1251 bytes that crash Python's utf-8 reader thread.
+    # Decode at the error site with errors="replace" so we never lose
+    # the returncode just because the message was un-decodable.
     proc = subprocess.run(
         [str(exe), "/installtunnelservice", str(conf_file)],
-        capture_output=True, text=True, timeout=15,
+        capture_output=True, timeout=15,
         creationflags=_NO_WINDOW,
     )
     if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or b"").decode(
+            "utf-8", errors="replace",
+        ).strip() or "(no output)"
         raise WireGuardError(
-            f"wireguard.exe вернул ошибку (rc={proc.returncode}):\n"
-            f"{(proc.stderr or proc.stdout or '').strip()}"
+            f"wireguard.exe вернул ошибку (rc={proc.returncode}):\n{err}"
         )
     return conf_file
 
@@ -381,10 +393,11 @@ def uninstall_tunnel(tunnel_name: str) -> None:
     if exe is None:
         # Nothing to do — the service can't exist without the exe.
         return
+    # bytes mode, see install_tunnel for rationale.
     try:
         subprocess.run(
             [str(exe), "/uninstalltunnelservice", tunnel_name],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, timeout=15,
             creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
@@ -396,23 +409,50 @@ def uninstall_tunnel(tunnel_name: str) -> None:
 def is_tunnel_active(tunnel_name: str) -> bool:
     """True if the Windows service for this tunnel is in Running state.
 
-    Uses `sc query` rather than Get-Service to avoid the PowerShell
-    startup cost on the hot path.
+    Uses PowerShell `Get-Service` because `sc query` localizes its
+    output — on Russian Windows you get "СОСТОЯНИЕ : 4 РАБОТАЕТ"
+    instead of "STATE : 4 RUNNING", which broke our string match
+    in v1.3.0–1.3.2 (we always saw "not running" even when it was).
+    Get-Service returns the ServiceControllerStatus enum value
+    ("Running", "Stopped", etc) which is ALWAYS English regardless
+    of system locale.
     """
     service_name = f"WireGuardTunnel${tunnel_name}"
+    # Backtick-escape the $ for the PowerShell-string literal.
+    ps_service = service_name.replace("$", "`$")
     try:
         proc = subprocess.run(
-            ["sc", "query", service_name],
-            capture_output=True, text=True, timeout=5,
+            ["powershell.exe", "-NoProfile", "-Command",
+             f"(Get-Service -Name '{ps_service}' -ErrorAction SilentlyContinue).Status"],
+            capture_output=True, timeout=5,
             creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return "RUNNING" in (proc.stdout or "")
+    out = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+    return out == "Running"
+
+
+def get_tunnel_status(tunnel_name: str) -> str:
+    """Last-known status of the service: 'Running' / 'Stopped' /
+    'StartPending' / 'StopPending' / '' (no such service).
+    """
+    service_name = f"WireGuardTunnel${tunnel_name}"
+    ps_service = service_name.replace("$", "`$")
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command",
+             f"(Get-Service -Name '{ps_service}' -ErrorAction SilentlyContinue).Status"],
+            capture_output=True, timeout=5,
+            creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (proc.stdout or b"").decode("utf-8", errors="replace").strip()
 
 
 def wait_for_tunnel_up(tunnel_name: str, timeout: float = 10.0) -> bool:
-    """Block until the service reports RUNNING (or timeout)."""
+    """Block until the service reports Running (or timeout)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if is_tunnel_active(tunnel_name):
@@ -427,21 +467,28 @@ def list_kaprovpn_tunnels() -> list[str]:
     Useful for startup cleanup — if a previous run crashed without
     uninstalling its tunnel, this lets us find and remove it before
     starting a new one.
+
+    PowerShell again to dodge sc's localization: Get-Service returns
+    the Name property as the actual service name (locale-independent),
+    while `sc query` writes "ИМЯ_СЛУЖБЫ:" instead of "SERVICE_NAME:"
+    on Russian Windows — breaking the v1.3.0–1.3.2 string match.
     """
     try:
         proc = subprocess.run(
-            ["sc", "query", "type=", "service", "state=", "all"],
-            capture_output=True, text=True, timeout=10,
+            ["powershell.exe", "-NoProfile", "-Command",
+             "Get-Service -Name 'WireGuardTunnel$KaproVPN-*' "
+             "-ErrorAction SilentlyContinue | "
+             "Select-Object -ExpandProperty Name"],
+            capture_output=True, timeout=10,
             creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return []
-    out = proc.stdout or ""
-    # Lines look like "SERVICE_NAME: WireGuardTunnel$KaproVPN-foo"
+    out = (proc.stdout or b"").decode("utf-8", errors="replace")
     found = []
     for line in out.splitlines():
         line = line.strip()
-        if line.startswith("SERVICE_NAME:") and "WireGuardTunnel$KaproVPN-" in line:
+        if line.startswith("WireGuardTunnel$KaproVPN-"):
             name = line.split("WireGuardTunnel$", 1)[1].strip()
             found.append(name)
     return found

@@ -260,13 +260,18 @@ class ConnectionManager:
         # Service install is async — wait for it to actually be RUNNING
         # before adding bypass routes (the WG interface needs to exist
         # for routes via it to be valid).
-        if not wireguard_service.wait_for_tunnel_up(tunnel_name, timeout=10.0):
+        if not wireguard_service.wait_for_tunnel_up(tunnel_name, timeout=15.0):
+            last_status = wireguard_service.get_tunnel_status(tunnel_name) or "(unknown)"
             wireguard_service.uninstall_tunnel(tunnel_name)
             raise ConnectionError(
-                "Windows-служба WG зарегистрировалась, но не вышла в RUNNING "
-                "за 10 секунд. Проверь journal в Event Viewer "
-                "(Application log, source: WireGuard) — там будет конкретная "
-                "ошибка от tunnel.dll."
+                f"WG-туннель зарегистрирован, но не вышел в Running за 15 секунд.\n"
+                f"Последний статус службы: {last_status}.\n\n"
+                f"Если 'Stopped' — tunnel.dll стартовал и сразу упал. Скорее "
+                f"всего endpoint недоступен с твоей сети (RKN режет UDP к "
+                f"WG-серверу) или ключи в .conf не совпадают с серверными.\n"
+                f"Если 'StartPending' — служба зависла на инициализации.\n\n"
+                f"Полная диагностика: Event Viewer → Application log → "
+                f"source 'WireGuard'."
             )
         self._log(f"[*] WG-туннель активен")
         self._active_wg_tunnel = tunnel_name
