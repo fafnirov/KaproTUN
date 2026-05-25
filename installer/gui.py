@@ -171,7 +171,10 @@ class MaintenancePage(QWidget):
     installed. Two big choices: Reinstall or Uninstall. No accidental
     re-install — user has to deliberately pick.
     """
-    reinstall_clicked = Signal(bool)  # bool = create desktop shortcut
+    # No bool arg: at reinstall time the user already has shortcuts
+    # from the original install. Re-running install with create_desktop=
+    # True would just produce a duplicate Desktop shortcut.
+    reinstall_clicked = Signal()
     uninstall_clicked = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -218,17 +221,15 @@ class MaintenancePage(QWidget):
 
         # --- Reinstall (primary action — most common when a user
         # re-runs Setup.exe is to update to a newer version) ---
-        self.desktop_check = QCheckBox("Создать ярлык на Рабочем столе")
-        self.desktop_check.setChecked(False)  # default off: they already have a shortcut
-        layout.addWidget(self.desktop_check, alignment=Qt.AlignHCenter)
-        layout.addSpacing(10)
-
+        # No "Create desktop shortcut" checkbox here: the user already
+        # has shortcuts from the original install, and re-running
+        # install with create_desktop=True would just produce a
+        # duplicate on the Desktop. Pure-reinstall keeps existing
+        # shortcuts as-is.
         reinstall_btn = QPushButton("Переустановить")
         reinstall_btn.setObjectName("primary")
         reinstall_btn.setMinimumHeight(44)
-        reinstall_btn.clicked.connect(
-            lambda: self.reinstall_clicked.emit(self.desktop_check.isChecked())
-        )
+        reinstall_btn.clicked.connect(self.reinstall_clicked.emit)
         layout.addWidget(reinstall_btn)
         layout.addSpacing(8)
 
@@ -473,10 +474,14 @@ class InstallerWindow(QMainWindow):
         self.stack.addWidget(self.maintenance)
         self.stack.setCurrentWidget(self.maintenance)
 
-    def _switch_to_install(self, create_desktop: bool) -> None:
+    def _switch_to_install(self) -> None:
         """Maintenance → Reinstall: build the install flow and kick it
         off without showing the Welcome page (we don't need consent
         twice, the user just clicked Reinstall).
+
+        Reinstall always passes create_desktop=False — the user
+        already has a Desktop shortcut from the original install,
+        no point creating a duplicate.
         """
         # Build install flow if not yet present.
         if not hasattr(self, "installing"):
@@ -489,7 +494,7 @@ class InstallerWindow(QMainWindow):
         self._uninstall = False
         # Re-use the install worker path directly (same as
         # WelcomePage's install_clicked signal would have triggered).
-        self._start_install(create_desktop)
+        self._start_install(create_desktop=False)
 
     def _switch_to_uninstall(self) -> None:
         """Maintenance → Uninstall: build the existing uninstall flow."""
@@ -583,6 +588,14 @@ class InstallerWindow(QMainWindow):
         self.installing = InstallingPage()
         self.installing.set_progress("…", 0)
         self.stack.addWidget(self.installing)
+
+        # QStackedWidget.addWidget auto-selects only when the stack was
+        # empty before. Through the maintenance → uninstall path the
+        # stack already contains MaintenancePage, so without an explicit
+        # setCurrentWidget the confirm page would be hidden behind it
+        # and the user sees "nothing happens" when clicking Удалить.
+        # Caught in v1.8.1 user testing — fixed in 1.8.2.
+        self.stack.setCurrentWidget(confirm)
 
     def _start_uninstall(self) -> None:
         self.stack.setCurrentWidget(self.installing)

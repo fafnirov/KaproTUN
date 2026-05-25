@@ -180,6 +180,118 @@ for label, cfg in parsed.items():
 
 
 # ---------------------------------------------------------------------------
+# Test 4 — Installer flow transitions
+# ---------------------------------------------------------------------------
+# Catches regressions like "click does nothing because we addWidget but
+# forgot setCurrentWidget" — exactly the v1.8.1 uninstall-button bug.
+# We don't need a real display: QT_QPA_PLATFORM=offscreen lets the GUI
+# code run headless in CI without an X server.
+
+section("Installer flow transitions")
+
+
+def _setup_qt_app() -> None:
+    """One QApplication for the whole installer-test section."""
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+
+
+def _make_installer_check(label: str, fn):
+    def inner() -> None:
+        _setup_qt_app()
+        from installer.gui import InstallerWindow, MaintenancePage
+        fn(InstallerWindow, MaintenancePage)
+    return inner
+
+
+def _install_mode_starts_on_welcome(InstallerWindow, MaintenancePage):
+    from installer.gui import WelcomePage
+    w = InstallerWindow(mode="install")
+    cur = w.stack.currentWidget()
+    if not isinstance(cur, WelcomePage):
+        raise AssertionError(
+            f"install mode should land on WelcomePage, got {type(cur).__name__}"
+        )
+
+
+def _maintenance_mode_starts_on_maintenance(InstallerWindow, MaintenancePage):
+    w = InstallerWindow(mode="maintenance")
+    cur = w.stack.currentWidget()
+    if not isinstance(cur, MaintenancePage):
+        raise AssertionError(
+            f"maintenance mode should land on MaintenancePage, got {type(cur).__name__}"
+        )
+
+
+def _uninstall_mode_starts_on_confirm(InstallerWindow, MaintenancePage):
+    # Direct --uninstall flow lands on the confirm widget (not the
+    # same class as MaintenancePage). We identify by checking the
+    # current widget is NOT the maintenance page (which would only
+    # exist in maintenance mode anyway).
+    w = InstallerWindow(mode="uninstall")
+    cur = w.stack.currentWidget()
+    if cur is None:
+        raise AssertionError("uninstall mode left stack empty")
+    # We expect a generic QWidget confirm page. Sanity: it should have
+    # at least one Delete button as a child.
+    from PySide6.QtWidgets import QPushButton
+    btns = [b for b in cur.findChildren(QPushButton) if b.text() == "Удалить"]
+    if not btns:
+        raise AssertionError(
+            "uninstall mode confirm page has no 'Удалить' button"
+        )
+
+
+def _maintenance_uninstall_button_switches_page(InstallerWindow, MaintenancePage):
+    # The v1.8.1 bug: this transition silently did nothing. Now we
+    # check the stack's current widget actually moves to a NEW page
+    # after clicking Uninstall in Maintenance UI.
+    w = InstallerWindow(mode="maintenance")
+    initial = w.stack.currentWidget()
+    # Trigger maintenance → uninstall path the same way the user does.
+    w.maintenance.uninstall_clicked.emit()
+    after = w.stack.currentWidget()
+    if after is initial:
+        raise AssertionError(
+            "maintenance → uninstall: stack stayed on MaintenancePage "
+            "(the v1.8.1 regression — setCurrentWidget was missing)"
+        )
+
+
+def _maintenance_reinstall_button_starts_install(InstallerWindow, MaintenancePage):
+    w = InstallerWindow(mode="maintenance")
+    # Spying: when Reinstall is clicked, _switch_to_install should
+    # build/switch to InstallingPage. We can check the stack contains
+    # an InstallingPage after the signal fires (the worker itself
+    # would be async — we don't wait for it).
+    from installer.gui import InstallingPage
+    w.maintenance.reinstall_clicked.emit()
+    has_installing = any(
+        isinstance(w.stack.widget(i), InstallingPage)
+        for i in range(w.stack.count())
+    )
+    if not has_installing:
+        raise AssertionError(
+            "maintenance → reinstall: InstallingPage never added to stack"
+        )
+
+
+check("install mode lands on WelcomePage",
+      _make_installer_check("install->welcome", _install_mode_starts_on_welcome))
+check("maintenance mode lands on MaintenancePage",
+      _make_installer_check("maintenance->page", _maintenance_mode_starts_on_maintenance))
+check("uninstall mode lands on confirm page",
+      _make_installer_check("uninstall->confirm", _uninstall_mode_starts_on_confirm))
+check("Maintenance Uninstall button actually switches page",
+      _make_installer_check("regression-1.8.1", _maintenance_uninstall_button_switches_page))
+check("Maintenance Reinstall button starts install flow",
+      _make_installer_check("maint->install", _maintenance_reinstall_button_starts_install))
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 

@@ -8,6 +8,36 @@ users see when they click the release tag.
 
 ---
 
+## v1.8.2 — Фиксы v1.8.1: кнопка «Удалить» теперь работает
+
+Юзер протестировал v1.8.1 — нашёл что я пропустил:
+
+- 🔴 **Кнопка «Удалить KaproVPN» в Maintenance UI ничего не делала**.
+  Confirm-page добавлялась в stack, но я забыл `setCurrentWidget()`.
+  Через `--uninstall` флаг работало случайно (пустой stack
+  автоматически выбирает первую widget). Через Maintenance → Удалить
+  стек уже содержал MaintenancePage, новая страница пряталась.
+- 🚫 **Лишний чекбокс «Создать ярлык на Рабочем столе»** в Maintenance
+  UI. При reinstall ярлык уже есть, чекбокс создал бы дубликат на
+  Desktop'е. Убран — reinstall всегда сохраняет существующие ярлыки.
+
+Также добавил **5 автотестов установщика в smoke-test pipeline**:
+
+- install mode lands on WelcomePage
+- maintenance mode lands on MaintenancePage
+- uninstall mode lands on confirm page (с проверкой что кнопка
+  «Удалить» там есть)
+- **Maintenance → Uninstall actually switches page** (явно ловит
+  v1.8.1-регрессию)
+- Maintenance → Reinstall builds InstallingPage
+
+Эти проверки гоняются в CI до сборки бинарей — следующий раз
+сломаю переход внутри установщика, релиз не опубликуется.
+
+Спасибо за то что протестировал — я должен был сам, был обязан.
+
+---
+
 ## v1.8.1 — Нормальный Setup.exe: «Переустановить / Удалить»
 
 Раньше повторный запуск `KaproVPN-Setup.exe` показывал тот же
