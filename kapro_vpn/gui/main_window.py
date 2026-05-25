@@ -352,6 +352,7 @@ class SettingsPage(QWidget):
         self.dns_group = QButtonGroup(self)
         self.dns_group.setExclusive(True)
         self._dns_radios: dict[str, QRadioButton] = {}
+        self._ublock_helper: Optional[QLabel] = None
         current_dns = str(manager.settings.get("dns_option", dns_options.DEFAULT_KEY))
         for opt in dns_options.OPTIONS:
             radio = QRadioButton(opt.label_ru)
@@ -367,6 +368,29 @@ class SettingsPage(QWidget):
             hint.setContentsMargins(28, 0, 0, 4)
             outer.addWidget(hint)
             self._dns_radios[opt.key] = radio
+
+            # YouTube-ads helper — shown only under AdGuard, because that's
+            # the option users pick for "block ads" and immediately notice
+            # YouTube isn't covered. Native YT ads come from the same
+            # domains as content (googlevideo.com) so no DNS/SNI filter
+            # can touch them — only DOM-level browser extensions can.
+            # Rather than fake a fix or hide the limitation, point users
+            # at the tool that actually works, with a one-click link.
+            if opt.key == "adguard":
+                self._ublock_helper = QLabel(
+                    "📺 <b>YouTube-реклама всё равно показывается?</b> "
+                    "Это нативные ad'ы — режутся только браузером. Установи "
+                    "<a href='https://ublockorigin.com/' style='color:#f59e0b'>"
+                    "uBlock Origin</a> для Chrome/Firefox/Edge — 30 секунд, "
+                    "бесплатно, режет YouTube-ads на 100% (поверх нашего AdGuard)."
+                )
+                self._ublock_helper.setObjectName("dim")
+                self._ublock_helper.setWordWrap(True)
+                self._ublock_helper.setTextFormat(Qt.RichText)
+                self._ublock_helper.setOpenExternalLinks(True)
+                self._ublock_helper.setContentsMargins(28, 4, 0, 8)
+                self._ublock_helper.setVisible(opt.key == current_dns)
+                outer.addWidget(self._ublock_helper)
 
         dns_footer = QLabel(
             "DoH (зашифрованный DNS) — провайдер не видит запросы. "
@@ -536,6 +560,10 @@ class SettingsPage(QWidget):
         if not checked:
             return
         self._manager.update_settings(dns_option=key)
+        # Show YouTube-ads helper only when AdGuard is active — under
+        # the other options it'd be confusing noise.
+        if self._ublock_helper is not None:
+            self._ublock_helper.setVisible(key == "adguard")
         self.settings_changed.emit()
 
     def _on_language_changed(self, _index: int) -> None:
