@@ -166,6 +166,119 @@ class WelcomePage(QWidget):
         return (lbl, True)
 
 
+class MaintenancePage(QWidget):
+    """Shown when Setup.exe runs on a machine where KaproVPN is already
+    installed. Two big choices: Reinstall or Uninstall. No accidental
+    re-install — user has to deliberately pick.
+    """
+    reinstall_clicked = Signal(bool)  # bool = create desktop shortcut
+    uninstall_clicked = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("page")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(40, 28, 40, 28)
+        layout.setSpacing(0)
+
+        hero_widget, hero_has_text = self._build_hero()
+        layout.addWidget(hero_widget, alignment=Qt.AlignHCenter)
+        layout.addSpacing(18)
+
+        if not hero_has_text:
+            title = QLabel("KaproVPN")
+            title.setObjectName("h1")
+            title.setAlignment(Qt.AlignHCenter)
+            layout.addWidget(title)
+            layout.addSpacing(4)
+
+        # Detect the installed version so the user can see whether the
+        # Setup.exe they ran is the same / newer / older than what's
+        # already on disk. Cheap (one file-version probe via the same
+        # PowerShell trick the in-app updater uses).
+        installed_ver = _detect_installed_version()
+        if installed_ver and installed_ver != __version__:
+            sub = QLabel(
+                f"Уже установлен: v{installed_ver}<br>"
+                f"Этот установщик: v{__version__}"
+            )
+        else:
+            sub = QLabel(f"Уже установлен · v{installed_ver or __version__}")
+        sub.setObjectName("muted")
+        sub.setAlignment(Qt.AlignHCenter)
+        sub.setTextFormat(Qt.RichText)
+        layout.addWidget(sub)
+        layout.addSpacing(20)
+
+        blurb = QLabel("Что сделать?")
+        blurb.setObjectName("muted")
+        blurb.setAlignment(Qt.AlignHCenter)
+        layout.addWidget(blurb)
+        layout.addStretch(1)
+
+        # --- Reinstall (primary action — most common when a user
+        # re-runs Setup.exe is to update to a newer version) ---
+        self.desktop_check = QCheckBox("Создать ярлык на Рабочем столе")
+        self.desktop_check.setChecked(False)  # default off: they already have a shortcut
+        layout.addWidget(self.desktop_check, alignment=Qt.AlignHCenter)
+        layout.addSpacing(10)
+
+        reinstall_btn = QPushButton("Переустановить")
+        reinstall_btn.setObjectName("primary")
+        reinstall_btn.setMinimumHeight(44)
+        reinstall_btn.clicked.connect(
+            lambda: self.reinstall_clicked.emit(self.desktop_check.isChecked())
+        )
+        layout.addWidget(reinstall_btn)
+        layout.addSpacing(8)
+
+        # --- Uninstall (destructive secondary) ---
+        uninstall_btn = QPushButton("Удалить KaproVPN")
+        uninstall_btn.setObjectName("danger")
+        uninstall_btn.setMinimumHeight(38)
+        uninstall_btn.clicked.connect(self.uninstall_clicked.emit)
+        layout.addWidget(uninstall_btn)
+        layout.addSpacing(10)
+
+        footer = QLabel(
+            f"<span style='color:#71717a; font-size:8pt'>"
+            f"Конфиги и настройки сохраняются при «Переустановить» и "
+            f"очищаются при «Удалить»."
+            f"</span>"
+        )
+        footer.setTextFormat(Qt.RichText)
+        footer.setAlignment(Qt.AlignHCenter)
+        footer.setWordWrap(True)
+        layout.addWidget(footer)
+
+    # Reuse WelcomePage's hero-building logic — same artwork, same
+    # fallback rules. Duplicating the method here to avoid pulling
+    # WelcomePage as a base class (Qt mixins get messy).
+    _build_hero = WelcomePage._build_hero
+
+
+def _detect_installed_version() -> Optional[str]:
+    """Read the version embedded in the installed KaproVPN.exe.
+
+    Cheap PowerShell shell-out via Get-Item.VersionInfo. Returns None
+    if probe fails — caller falls back to "unknown version".
+    """
+    exe = paths.installed_exe_path()
+    if not exe.is_file():
+        return None
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command",
+             f"(Get-Item '{exe}').VersionInfo.ProductVersion"],
+            capture_output=True, timeout=5,
+            encoding="utf-8", errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return (proc.stdout or "").strip() or None
+    except Exception:
+        return None
+
+
 class InstallingPage(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -275,12 +388,25 @@ class DonePage(QWidget):
 class InstallerWindow(QMainWindow):
     """The whole installer is one frameless window with a 3-page stack."""
 
-    def __init__(self, uninstall_mode: bool = False):
+    def __init__(self, mode: str = "install"):
+        """`mode` ∈ {'install', 'maintenance', 'uninstall'}.
+
+        - install: classic Welcome → Installing → Done flow.
+        - maintenance: Reinstall / Uninstall choice for users who run
+          Setup.exe a second time. Selecting Reinstall falls through
+          to the install flow; selecting Uninstall to the uninstall flow.
+        - uninstall: direct confirm + uninstall (used by Programs &
+          Features Uninstall button which we register with --uninstall).
+        """
         super().__init__()
-        self._uninstall = uninstall_mode
-        self.setWindowTitle(
-            "KaproVPN — Удаление" if uninstall_mode else "KaproVPN — Установка"
-        )
+        self._mode = mode
+        self._uninstall = (mode == "uninstall")
+        title = {
+            "install": "KaproVPN — Установка",
+            "maintenance": "KaproVPN — Установлен",
+            "uninstall": "KaproVPN — Удаление",
+        }.get(mode, "KaproVPN — Установка")
+        self.setWindowTitle(title)
         self.setWindowIcon(app_icons.app_icon())
         # Roomier than the cramped 620 — the welcome page has hero +
         # title + version + blurb + checkbox + button + footer and the
@@ -296,9 +422,7 @@ class InstallerWindow(QMainWindow):
         root.setSpacing(0)
 
         self.titlebar = TitleBar()
-        self.titlebar.title_label.setText(
-            "KaproVPN — Удаление" if uninstall_mode else "KaproVPN — Установка"
-        )
+        self.titlebar.title_label.setText(title)
         self.titlebar.btn_min.setVisible(False)  # no minimize for installer
         self.titlebar.close_clicked.connect(self.close)
         root.addWidget(self.titlebar)
@@ -306,8 +430,14 @@ class InstallerWindow(QMainWindow):
         self.stack = QStackedWidget()
         root.addWidget(self.stack, stretch=1)
 
-        if uninstall_mode:
+        # Build pages lazily — uninstall and maintenance modes both need
+        # the install pages too (uninstall to show "done", maintenance
+        # because Reinstall routes through them). Keep flow methods to
+        # build sub-trees as needed.
+        if mode == "uninstall":
             self._build_uninstall_flow()
+        elif mode == "maintenance":
+            self._build_maintenance_flow()
         else:
             self._build_install_flow()
 
@@ -324,6 +454,50 @@ class InstallerWindow(QMainWindow):
         self.stack.addWidget(self.installing)
 
         self.stack.setCurrentWidget(self.welcome)
+
+    # --- maintenance flow (Reinstall / Uninstall choice) ----------------
+
+    def _build_maintenance_flow(self) -> None:
+        """Two-choice menu when the user runs Setup.exe on a machine
+        that already has KaproVPN installed.
+
+        Reinstall ⇒ falls through to the install flow (which is
+        idempotent in operations.install_everything — overwrites in
+        place, preserves configs).
+
+        Uninstall ⇒ falls through to the uninstall flow.
+        """
+        self.maintenance = MaintenancePage()
+        self.maintenance.reinstall_clicked.connect(self._switch_to_install)
+        self.maintenance.uninstall_clicked.connect(self._switch_to_uninstall)
+        self.stack.addWidget(self.maintenance)
+        self.stack.setCurrentWidget(self.maintenance)
+
+    def _switch_to_install(self, create_desktop: bool) -> None:
+        """Maintenance → Reinstall: build the install flow and kick it
+        off without showing the Welcome page (we don't need consent
+        twice, the user just clicked Reinstall).
+        """
+        # Build install flow if not yet present.
+        if not hasattr(self, "installing"):
+            self.installing = InstallingPage()
+            self.stack.addWidget(self.installing)
+        # Update window chrome so the user knows what's happening now.
+        self.setWindowTitle("KaproVPN — Переустановка")
+        self.titlebar.title_label.setText("KaproVPN — Переустановка")
+        self._mode = "install"
+        self._uninstall = False
+        # Re-use the install worker path directly (same as
+        # WelcomePage's install_clicked signal would have triggered).
+        self._start_install(create_desktop)
+
+    def _switch_to_uninstall(self) -> None:
+        """Maintenance → Uninstall: build the existing uninstall flow."""
+        self.setWindowTitle("KaproVPN — Удаление")
+        self.titlebar.title_label.setText("KaproVPN — Удаление")
+        self._mode = "uninstall"
+        self._uninstall = True
+        self._build_uninstall_flow()
 
     def _start_install(self, create_desktop: bool) -> None:
         self.stack.setCurrentWidget(self.installing)
@@ -443,10 +617,20 @@ class InstallerWindow(QMainWindow):
         self.stack.setCurrentWidget(done)
 
 
-def run(uninstall: bool = False) -> int:
+def run(mode: str = "install", *, uninstall: bool = False) -> int:
+    """Launch the installer GUI in the given mode.
+
+    `mode` is one of "install" / "maintenance" / "uninstall" — see
+    InstallerWindow docstring. The legacy `uninstall=True` kwarg is
+    kept for backwards-compat (was the only flag before v1.8.1); if
+    set, it overrides `mode` to "uninstall".
+    """
     import sys
 
     from PySide6.QtWidgets import QApplication
+
+    if uninstall:
+        mode = "uninstall"
 
     app = QApplication(sys.argv)
     app.setApplicationName("KaproVPN Installer")
@@ -454,7 +638,7 @@ def run(uninstall: bool = False) -> int:
     app.setStyleSheet(DARK_QSS)
     app.setWindowIcon(app_icons.app_icon())
 
-    window = InstallerWindow(uninstall_mode=uninstall)
+    window = InstallerWindow(mode=mode)
     window.show()
     return app.exec()
 
