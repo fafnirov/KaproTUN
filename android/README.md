@@ -22,7 +22,7 @@
 - 22 unit-теста, `./gradlew :app:testDebugUnitTest` зелёные ✓
 - `default_sites.json` синкается из `../kapro_vpn/data/` build-task'ом ✓
 
-**Phase 2 — libv2ray интеграция (in progress):**
+**Phase 2 — libv2ray интеграция (done):**
 - `libv2ray.aar` v26.5.19 (2dust/AndroidLibXrayLite) подключён через
   Gradle download-task — файл качается локально на первый build
   (~55 MB), gitignore'нится ✓
@@ -30,9 +30,11 @@
   `coreVersion()`, `init(context)`, state-флоу, log-флоу.
   Полное API (start/stop/queryStats) — TODO Phase 3 ✓
 - Smoke-кнопка "Проверить Xray-core" на HomeScreen зовёт
-  `Libv2ray.checkVersionX()` через JNI — ждёт прогона на эмуляторе ✓
+  `Libv2ray.checkVersionX()` через JNI ✓
 - `./gradlew :app:assembleDebug` зелёный, APK 150 MB debug
   (4 ABI + Xray-core) ✓
+- **Smoke-test прогнан на AVD (x86_64, Android 17):
+  `Lib v37, Xray-core v26.5.9` — JNI работает, .so грузится** ✓
 
 **Дальше (Phase 3):** VpnService с TUN-fd → `CoreController.startLoop`,
 split-routing через `Builder.addRoute()` для resolved direct-IP, foreground
