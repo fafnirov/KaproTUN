@@ -277,8 +277,26 @@ class ConnectionManager:
             # Pin server IP through the real gateway (loop prevention).
             if not session.add_route(server_ip, "255.255.255.255",
                                      real.gateway, real.index, metric=bypass_metric):
+                rc = getattr(session, "last_error_rc", 0)
+                hint = ""
+                if rc == 87:
+                    hint = (" Windows вернул ERROR_INVALID_PARAMETER (87). "
+                            "Возможно gateway или метрика не подходят к интерфейсу.")
+                elif rc == 160:
+                    hint = (" Windows вернул ERROR_BAD_ARGUMENTS (160). "
+                            "Метрика маршрута ниже метрики интерфейса.")
+                elif rc == 183:
+                    hint = (" Windows вернул ERROR_ALREADY_EXISTS (183) и delete-retry "
+                            "не сработал. Сделай вручную в админ-PowerShell: "
+                            f"`route delete {server_ip}` и подключись снова.")
+                elif rc == 1314:
+                    hint = (" Windows вернул ERROR_PRIVILEGE_NOT_HELD (1314). "
+                            "Перезапусти KaproVPN от админа.")
+                elif rc:
+                    hint = f" (Windows rc={rc})"
                 raise ConnectionError(
                     f"Не удалось добавить host-route для VPN-сервера ({server_ip})."
+                    + hint
                 )
 
             # Bypass DNS resolvers + big Russian service blocks (Yandex/VK

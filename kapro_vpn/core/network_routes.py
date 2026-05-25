@@ -53,6 +53,8 @@ class _MIB_IPFORWARDROW(ctypes.Structure):
 _MIB_IPROUTE_TYPE_INDIRECT = 4
 _MIB_IPPROTO_NETMGMT = 3
 _NO_ERROR = 0
+_ERROR_ALREADY_EXISTS = 183
+_ERROR_NOT_FOUND = 1168
 
 if sys.platform == "win32":
     _iphlpapi = ctypes.windll.iphlpapi
@@ -278,14 +280,41 @@ class RouteSession:
     """Tracks routes/DNS changes so they can all be undone on disconnect."""
     routes: list[_RouteEntry] = field(default_factory=list)
     dns_changed: list[_DnsEntry] = field(default_factory=list)
+    # Last non-zero rc from a failed CreateIpForwardEntry call. The
+    # controller reads this to surface a useful error message instead
+    # of "Не удалось добавить host-route" with no detail.
+    last_error_rc: int = 0
 
     def add_route(self, dest: str, mask: str, gateway: str, if_index: int,
                   metric: int = 1) -> bool:
-        """Add a single route via the native Win32 API."""
+        """Add a single route via the native Win32 API.
+
+        Auto-recovers from ERROR_ALREADY_EXISTS (183): if a previous
+        crashed KaproVPN left a stale /32 for the same destination,
+        Windows refuses to add ours. We delete the stale entry and
+        retry once — the new route then lives in our session, so a
+        clean disconnect removes it.
+        """
         rc = _create_route_native(dest, mask, gateway, if_index, metric)
+        if rc == _ERROR_ALREADY_EXISTS:
+            # Try deleting the conflicting entry. The args have to
+            # match the EXISTING row exactly for the delete to land —
+            # but we don't know its gateway/index. CreateIp's docs
+            # say the row's primary key is (dest, mask, next_hop),
+            # so deleting with our intended next_hop usually clears
+            # the stale entry from a previous run because we'd have
+            # used the same gateway then. If it doesn't, the retry
+            # below still surfaces a non-zero rc and the caller
+            # raises a clean error.
+            _delete_route_native(dest, mask, gateway, if_index, metric)
+            rc = _create_route_native(dest, mask, gateway, if_index, metric)
         if rc == _NO_ERROR:
             self.routes.append(_RouteEntry(dest, mask, gateway, if_index, metric))
             return True
+        # Stash the last rc on the session so the controller can
+        # include it in its error message — turns the generic
+        # "Не удалось добавить host-route" into something diagnosable.
+        self.last_error_rc = rc
         return False
 
     def add_bypass_routes(self, ips: list[str], gateway: str, if_index: int,
