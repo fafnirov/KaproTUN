@@ -46,6 +46,7 @@ from ..core.parser import ProxyConfig
 from . import icons
 from .add_page import AddConfigPage
 from .onboarding import OnboardingPage
+from .subscription_autorefresh import SubscriptionAutoRefresh
 from .config_dialog import AddConfigDialog
 from .configs_picker import ConfigsPickerDialog
 from .installer_dialog import ensure_geoip_ru_cached, ensure_tun2socks_installed, ensure_xray_installed
@@ -720,6 +721,15 @@ class MainWindow(QMainWindow):
         # Defer by 500 ms so the splash → window swap finishes first.
         QTimer.singleShot(500, self._refresh_tray_pings)
 
+        # Subscription auto-refresh — silent re-fetch every 12 h, adds
+        # new servers from the provider's rotating list. Disabled per
+        # config in Settings if user wants. Logs to LogsPage, no toast
+        # unless the diff is non-empty (handled inside _on_sub_added).
+        self._sub_autorefresh = SubscriptionAutoRefresh(self)
+        self._sub_autorefresh.configs_added.connect(self._on_sub_autorefresh_added)
+        self._sub_autorefresh.log_message.connect(self.logs_page.append)
+        self._sub_autorefresh.start()
+
         # Periodic status refresh — detects subprocess crashes and updates timer
         self._poll = QTimer(self)
         self._poll.timeout.connect(self._refresh_home)
@@ -1313,6 +1323,20 @@ class MainWindow(QMainWindow):
         self.tray.hide()
         from PySide6.QtWidgets import QApplication
         QApplication.quit()
+
+    def _on_sub_autorefresh_added(self, count: int) -> None:
+        """Subscription auto-refresh found N new servers — reload from
+        storage so the picker, tray quick-connect, and home stay current.
+        Toast the count so the user knows their list grew.
+        """
+        self.configs = storage.load_configs()
+        self._refresh_home()
+        self._refresh_tray_pings()
+        show_toast(
+            self,
+            f"Подписка обновилась: +{count} нов{'ый' if count == 1 else 'ых'} сервер{'' if count == 1 else 'ов' if count > 4 else 'а'}",
+            kind="success", duration_ms=5000,
+        )
 
     def _on_tray_config_picked(self, cfg: ProxyConfig) -> None:
         """User picked a config from the tray (quick-connect or submenu).
