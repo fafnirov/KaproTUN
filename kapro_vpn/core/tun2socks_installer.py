@@ -33,7 +33,13 @@ TUN2SOCKS_PINNED_VERSION = "v2.6.0"
 
 # Windows-only: WinTUN driver from wintun.net
 WINTUN_URL = "https://www.wintun.net/builds/wintun-0.14.1.zip"
+WINTUN_FILENAME = "wintun-0.14.1.zip"  # used for the mirror URL
 WINTUN_DLL_IN_ZIP = "wintun/bin/amd64/wintun.dll"
+
+# Our own mirror — same setup as xray_installer. See server-setup/
+# for nginx + sync-binaries.sh. Mirror is tried FIRST, upstream is
+# the fallback when our server is down or doesn't have a file yet.
+KAPROVPN_MIRROR_BASE = "https://files.kaprovpn.pro"
 
 # Bypass system proxy on our own downloads — see xray_installer for full
 # story. TL;DR: a stale 127.0.0.1:2080 registry entry from a crashed
@@ -151,6 +157,27 @@ def _download(url: str, progress: ProgressCb, total_offset: int = 0,
     raise RuntimeError(f"Не удалось скачать после {attempts} попыток: {last_err}")
 
 
+def _mirror_url(filename: str) -> str:
+    return f"{KAPROVPN_MIRROR_BASE}/{filename}"
+
+
+def _download_with_fallback(filename: str, upstream_url: str,
+                            progress: ProgressCb) -> bytes:
+    """Try the mirror first, fall back to upstream on any failure.
+
+    The mirror serves files by the same filename GitHub uses (so the
+    sync script doesn't have to rename anything). On 404 / DNS-fail /
+    timeout we drop down to the upstream URL transparently.
+    """
+    mirror = _mirror_url(filename)
+    try:
+        return _download(mirror, progress, attempts=2)
+    except RuntimeError:
+        # mirror miss — fall through to upstream
+        pass
+    return _download(upstream_url, progress, attempts=2)
+
+
 def _install_tun2socks(progress: ProgressCb) -> None:
     """Pull the right tun2socks-<os>-<arch> binary out of its release zip.
 
@@ -161,7 +188,7 @@ def _install_tun2socks(progress: ProgressCb) -> None:
     (paths.tun2socks_exe() handles the .exe suffix on Windows).
     """
     release = _fetch_tun2socks_release()
-    data = _download(release.url, progress)
+    data = _download_with_fallback(release.filename, release.url, progress)
     target = paths.tun2socks_exe()
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         # Look for any non-directory member whose basename contains
@@ -186,8 +213,13 @@ def _install_tun2socks(progress: ProgressCb) -> None:
 
 
 def _install_wintun(progress: ProgressCb) -> None:
-    """Windows-only: WinTUN driver DLL from wintun.net."""
-    data = _download(WINTUN_URL, progress)
+    """Windows-only: WinTUN driver DLL.
+
+    Source order: our mirror → wintun.net upstream. wintun.net is
+    slow-ish from RU and occasionally times out, so the mirror is a
+    real win for first-launch latency.
+    """
+    data = _download_with_fallback(WINTUN_FILENAME, WINTUN_URL, progress)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         dll_member = next(
             (n for n in zf.namelist()

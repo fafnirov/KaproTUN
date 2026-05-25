@@ -33,6 +33,13 @@ GITHUB_LATEST = "https://api.github.com/repos/XTLS/Xray-core/releases/latest"
 # DNS blocked, etc.). Mirrors the asset matrix above.
 PINNED_VERSION = "v26.3.27"
 
+# Our own mirror — server we control, files manually synced via
+# server-setup/sync-binaries.sh. Tried FIRST: faster (no API hop, no
+# CDN-redirect, often less blocked in RU than github.com), and lets
+# us keep working when GitHub itself has a bad day. Falls back to
+# upstream GitHub URL on any failure (404/timeout/etc).
+KAPROVPN_MIRROR_BASE = "https://files.kaprovpn.pro"
+
 # Bypass system proxy — we're fetching our own deps, not user traffic.
 # Without this, a stale 127.0.0.1:2080 system proxy (left over from a
 # crashed HTTP-mode session where xray died without restoring the
@@ -124,19 +131,27 @@ def fetch_latest_release() -> ReleaseInfo:
     )
 
 
-def download_and_install(progress: ProgressCb = None) -> None:
-    """Download latest Xray-core zip, extract xray binary + geo data files.
+def _mirror_url(filename: str) -> str:
+    """URL on our own server for the given asset filename.
 
-    Per-chunk read timeout (20 s) + 3 retries — survives the case where a
-    throttled CDN starts a download but stops sending bytes mid-stream.
+    Filename matches what GitHub releases use (e.g. `Xray-windows-64.zip`)
+    so the sync script just `wget`s upstream and drops the file in nginx
+    docroot — no renaming.
     """
-    release = fetch_latest_release()
-    raw: bytes = b""
-    for attempt in range(3):
+    return f"{KAPROVPN_MIRROR_BASE}/{filename}"
+
+
+def _download_to_memory(url: str, progress: ProgressCb,
+                        attempts: int = 2) -> bytes:
+    """One source, N attempts. Raises on final failure."""
+    sink = io.BytesIO()
+    last_err: Optional[Exception] = None
+    for attempt in range(attempts):
         try:
-            sink = io.BytesIO()
+            sink.seek(0)
+            sink.truncate(0)
             downloaded = 0
-            with requests.get(release.url, stream=True, timeout=(10, 20),
+            with requests.get(url, stream=True, timeout=(10, 20),
                               proxies=_NO_PROXY) as r:
                 r.raise_for_status()
                 total = int(r.headers.get("Content-Length", 0))
@@ -147,13 +162,38 @@ def download_and_install(progress: ProgressCb = None) -> None:
                     downloaded += len(chunk)
                     if progress:
                         progress(downloaded, total)
-            raw = sink.getvalue()
-            break
+            return sink.getvalue()
         except (requests.exceptions.RequestException, OSError) as e:
-            if attempt == 2:
-                raise RuntimeError(
-                    f"Не удалось скачать Xray-core после 3 попыток: {e}"
-                ) from e
+            last_err = e
+    raise RuntimeError(f"download from {url} failed: {last_err}")
+
+
+def download_and_install(progress: ProgressCb = None) -> None:
+    """Download latest Xray-core zip, extract xray binary + geo data files.
+
+    Try OUR mirror first (fast, we control), fall back to whatever URL
+    the GitHub Releases API hands us (could be the latest tag or our
+    pinned fallback). If both fail with 6 attempts total, surface a
+    clear error so the installer dialog can suggest a manual download.
+    """
+    release = fetch_latest_release()
+    sources = [
+        _mirror_url(f"Xray-{_asset_marker()}.zip"),  # try ours first
+        release.url,                                  # then upstream
+    ]
+    raw: Optional[bytes] = None
+    errors: list[str] = []
+    for src in sources:
+        try:
+            raw = _download_to_memory(src, progress, attempts=2)
+            break
+        except RuntimeError as e:
+            errors.append(str(e))
+    if raw is None:
+        raise RuntimeError(
+            "Не удалось скачать Xray-core ни с зеркала, ни с GitHub:\n  - "
+            + "\n  - ".join(errors)
+        )
     buf = io.BytesIO(raw)
 
     install_dir = paths.xray_dir()

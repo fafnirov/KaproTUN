@@ -1,0 +1,41 @@
+# /etc/nginx/sites-available/files.kaprovpn.pro
+#
+# Minimal config for serving KaproVPN client dependency binaries.
+# certbot --nginx will inject the 443 server block + SSL config
+# automatically when you run it; this file covers just the HTTP-80
+# side that certbot uses for the ACME challenge.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name files.kaprovpn.pro;
+
+    root /var/www/files.kaprovpn.pro;
+
+    # Just static files, no PHP/CGI here.
+    index off;
+    autoindex off;        # don't expose the file listing
+
+    # Make zip downloads efficient — proper MIME + caching.
+    types {
+        application/zip      zip;
+        application/x-msdownload exe;
+    }
+
+    # 1 day cache on assets — they change weekly at most.
+    location ~* \.(zip|exe|dll)$ {
+        expires 1d;
+        add_header Cache-Control "public, immutable";
+        add_header X-Content-Type-Options "nosniff";
+    }
+
+    # Hide the 404 internals and any other junk requests by serving
+    # an empty 404 page.
+    error_page 404 /404.html;
+    location = /404.html {
+        return 404 "not found\n";
+    }
+
+    access_log /var/log/nginx/files.kaprovpn.pro.access.log;
+    error_log  /var/log/nginx/files.kaprovpn.pro.error.log warn;
+}
