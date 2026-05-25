@@ -7,7 +7,7 @@ import sys
 import time
 from typing import Callable, Optional
 
-from . import admin, geoip_ru, storage, system_proxy, xray_config
+from . import admin, geoip_ru, killswitch, paths, storage, system_proxy, xray_config
 from .parser import ProxyConfig
 from .xray_process import XrayProcess
 
@@ -115,7 +115,8 @@ class ConnectionManager:
 
     def disconnect(self) -> None:
         # Order matters: stop TUN routing first so traffic stops hitting the
-        # tunnel, then tear down processes, then restore system proxy.
+        # tunnel, then tear down processes, then restore system proxy, then
+        # finally take down the kill-switch firewall block.
         if self._route_session is not None:
             try:
                 self._route_session.restore()
@@ -129,6 +130,13 @@ class ConnectionManager:
             finally:
                 self._saved_proxy_state = None
         self.process.stop()
+        # Kill-switch teardown LAST — until now the firewall block is the
+        # safety net if any step above leaves traffic in a weird state.
+        # Safe to call even if it wasn't installed (idempotent).
+        try:
+            killswitch.remove()
+        except Exception:
+            pass
         self._active = None
 
     def is_connected(self) -> bool:
@@ -153,6 +161,10 @@ class ConnectionManager:
         port = int(self.settings.get("listen_port", 2080))
         self._write_and_check(config, direct_domains, host, port)
         self._start_xray()
+        # Kill-switch goes up RIGHT AFTER xray starts but BEFORE we
+        # touch system proxy — so if proxy-set fails, the firewall is
+        # already in place and a partially-broken setup can't leak.
+        self._maybe_arm_killswitch()
         if self.settings.get("auto_set_system_proxy", True):
             self._saved_proxy_state = system_proxy.get_state()
             try:
@@ -221,6 +233,10 @@ class ConnectionManager:
         port = int(self.settings.get("listen_port", 2080))
         self._write_and_check(config, direct_domains, host, port)
         self._start_xray()
+        # Arm kill-switch before tun2socks comes up — same reasoning as
+        # _connect_http: firewall block must exist before any traffic
+        # is routed, so a mid-setup crash can't leak.
+        self._maybe_arm_killswitch()
 
         # Step 4: launch tun2socks — it creates the TUN device and forwards
         # all packets to xray's SOCKS5 inbound at port+1.
@@ -399,6 +415,34 @@ class ConnectionManager:
             self.process.start(str(xray_config.paths.runtime_config_file()))
         except Exception as e:
             raise ConnectionError(f"Не удалось запустить Xray: {e}") from e
+
+    def _maybe_arm_killswitch(self) -> None:
+        """If user enabled kill-switch in settings, install firewall rules.
+
+        Silent no-op when:
+          - Setting is off
+          - Not on Windows (other OSes not supported yet)
+          - Not running as admin (rule install would fail anyway)
+
+        We DON'T raise on failure — kill-switch is defence-in-depth, the
+        connection itself works either way. A `[!] Kill-switch не
+        активирован` log line is enough signal.
+        """
+        if not self.settings.get("kill_switch", False):
+            return
+        if not killswitch.is_supported():
+            self._log("[!] Kill-switch пока работает только на Windows")
+            return
+        if not admin.is_admin():
+            self._log("[!] Kill-switch требует админа — пропускаю")
+            return
+        xray_exe = paths.xray_exe()
+        if killswitch.install(xray_exe):
+            self._log("[*] Kill-switch активирован (firewall блок весь трафик "
+                      "мимо xray)")
+        else:
+            self._log("[!] Не удалось установить firewall-правила kill-switch "
+                      "— продолжаю без него")
 
     def _atexit_cleanup(self) -> None:
         try:

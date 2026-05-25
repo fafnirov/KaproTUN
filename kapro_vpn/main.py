@@ -9,7 +9,7 @@ import sys
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from .core import autostart, storage, system_proxy
+from .core import autostart, killswitch, storage, system_proxy
 from .gui import icons
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
@@ -146,6 +146,17 @@ def main() -> int:
     # instance guard already proved we're the only KaproVPN, so any
     # leftover helper process is by definition orphaned. Kill them.
     _kill_orphan_helpers()
+
+    # Third defensive sweep: if the previous run crashed while
+    # kill-switch was active, the firewall rules are still in place
+    # — every app on the machine has no internet. Clear them so the
+    # user isn't trapped (we'll re-install on their next connect if
+    # they still have the setting enabled).
+    try:
+        if killswitch.is_active():
+            killswitch.remove()
+    except Exception:
+        pass
 
     splash = None
     if not start_minimized:
