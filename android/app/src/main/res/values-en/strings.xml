@@ -38,6 +38,10 @@
     <string name="configs_active_marker">Active</string>
     <string name="configs_import_subscription">Import subscription</string>
     <string name="configs_import_done">Imported %1$d servers</string>
+    <string name="configs_ping_refresh">Refresh ping</string>
+    <string name="configs_ping_pending">…</string>
+    <string name="configs_ping_failed">unreachable</string>
+    <string name="configs_ping_ms">%1$d ms</string>
 
     <!-- Add config dialog -->
     <string name="add_dialog_title">New server</string>

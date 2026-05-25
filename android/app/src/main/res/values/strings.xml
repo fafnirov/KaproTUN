@@ -38,6 +38,10 @@
     <string name="configs_active_marker">Активный</string>
     <string name="configs_import_subscription">Импорт по подписке</string>
     <string name="configs_import_done">Импортировано серверов: %1$d</string>
+    <string name="configs_ping_refresh">Обновить пинг</string>
+    <string name="configs_ping_pending">…</string>
+    <string name="configs_ping_failed">недоступен</string>
+    <string name="configs_ping_ms">%1$d мс</string>
 
     <!-- Add config dialog -->
     <string name="add_dialog_title">Новый сервер</string>

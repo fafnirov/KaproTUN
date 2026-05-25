@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -64,6 +65,7 @@ import pro.kaprovpn.android.core.ShareUrlParser
 fun ConfigsScreen(modifier: Modifier = Modifier) {
     val configs by AppRepository.configs.collectAsState()
     val settings by AppRepository.settings.collectAsState()
+    val pings by AppRepository.pings.collectAsState()
     val activeName = settings.activeConfigName
     var showAddDialog by remember { mutableStateOf(false) }
     var showSubDialog by remember { mutableStateOf(false) }
@@ -77,6 +79,15 @@ fun ConfigsScreen(modifier: Modifier = Modifier) {
             TopAppBar(
                 title = { Text(stringResource(R.string.tab_configs)) },
                 actions = {
+                    IconButton(
+                        onClick = { scope.launch { AppRepository.pingAll() } },
+                        enabled = configs.isNotEmpty(),
+                    ) {
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = stringResource(R.string.configs_ping_refresh),
+                        )
+                    }
                     IconButton(onClick = { showSubDialog = true }) {
                         Icon(
                             Icons.Filled.CloudDownload,
@@ -112,6 +123,7 @@ fun ConfigsScreen(modifier: Modifier = Modifier) {
                     ConfigRow(
                         config = cfg,
                         isActive = cfg.name == activeName,
+                        ping = pings[cfg.name] ?: AppRepository.PingState.NotMeasured,
                         onSelect = { AppRepository.setActiveConfig(cfg.name) },
                         onDelete = { AppRepository.removeConfig(cfg.name) },
                     )
@@ -149,6 +161,7 @@ fun ConfigsScreen(modifier: Modifier = Modifier) {
 private fun ConfigRow(
     config: ProxyConfig,
     isActive: Boolean,
+    ping: AppRepository.PingState,
     onSelect: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -195,6 +208,8 @@ private fun ConfigRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            PingBadge(ping)
+            Spacer(Modifier.width(4.dp))
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Filled.Delete,
@@ -203,6 +218,32 @@ private fun ConfigRow(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun PingBadge(state: AppRepository.PingState) {
+    val (text, color) = when (state) {
+        is AppRepository.PingState.Ok -> stringResource(R.string.configs_ping_ms, state.ms) to
+            // Цветовая индикация: <100мс — зелёный, <300мс — янтарный, >300 — красный
+            when {
+                state.ms < 100 -> MaterialTheme.colorScheme.primary
+                state.ms < 300 -> MaterialTheme.colorScheme.secondary
+                else -> MaterialTheme.colorScheme.error
+            }
+        AppRepository.PingState.InProgress ->
+            stringResource(R.string.configs_ping_pending) to MaterialTheme.colorScheme.onSurfaceVariant
+        AppRepository.PingState.Failed ->
+            stringResource(R.string.configs_ping_failed) to MaterialTheme.colorScheme.error
+        AppRepository.PingState.NotMeasured ->
+            "" to MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    if (text.isNotEmpty()) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+        )
     }
 }
 

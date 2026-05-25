@@ -177,9 +177,22 @@
 - Strings RU/EN ✓
 - Build ✓
 
-**Не сделано (Phase 11+):**
-- Ping per config + sorting.
-- Release pipeline (signing, R8/ProGuard, ABI splits).
+**Phase 11 — Ping per config (готово):**
+- `XrayBridge.measureDelay(configJson, testUrl)` — suspend-обёртка
+  над статическим `Libv2ray.measureOutboundDelay`. Не требует
+  активной сессии — поднимает мини-pipeline под капотом ✓
+- `AppRepository.pings: StateFlow<Map<String, PingState>>`. Состояния:
+  NotMeasured / InProgress / Ok(ms) / Failed ✓
+- `AppRepository.pingConfig(name)` + `pingAll()` — параллельный
+  замер всех серверов через async + awaitAll ✓
+- ConfigsScreen — refresh-кнопка в TopAppBar + ms-бейдж в каждой
+  строке. Цветовая индикация: <100мс зелёный (primary), <300мс
+  янтарный (secondary), ≥300мс красный (error) ✓
+- Strings RU/EN ✓
+- Build ✓
+
+**Не сделано (Phase 12+):**
+- Release pipeline (signing config, R8/ProGuard, ABI splits, AAB).
 
 ## Требования
 

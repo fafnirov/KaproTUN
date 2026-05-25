@@ -1,9 +1,15 @@
 package pro.kaprovpn.android.core
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import pro.kaprovpn.android.vpn.XrayBridge
 
 /**
  * Single source of truth для конфигов + настроек приложения.
@@ -18,6 +24,8 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 object AppRepository {
 
+    private const val TAG = "AppRepository"
+
     private lateinit var ctx: Context
 
     private val _configs = MutableStateFlow<List<ProxyConfig>>(emptyList())
@@ -25,6 +33,11 @@ object AppRepository {
 
     private val _settings = MutableStateFlow(AppSettings())
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
+
+    /** Latency-результаты по имени конфига. Лежат в памяти, не персистятся
+     *  (значения быстро устаревают на мобильной сети). */
+    private val _pings = MutableStateFlow<Map<String, PingState>>(emptyMap())
+    val pings: StateFlow<Map<String, PingState>> = _pings.asStateFlow()
 
     @Synchronized
     fun init(context: Context) {
@@ -144,5 +157,49 @@ object AppRepository {
         val next = transform(_settings.value)
         _settings.value = next
         Storage.saveSettings(ctx, next)
+    }
+
+    // -- ping ------------------------------------------------------------
+
+    /**
+     * Замерить latency одного конфига. Результат публикуется в [pings].
+     * Suspend — должна вызываться из coroutine (например, lifecycleScope
+     * или rememberCoroutineScope в Compose).
+     */
+    suspend fun pingConfig(name: String) {
+        val cfg = _configs.value.find { it.name == name } ?: return
+        _pings.update { it + (name to PingState.InProgress) }
+        try {
+            val json = XrayConfigBuilder.buildConfigJson(
+                proxy = cfg,
+                directDomains = emptyList(),    // пинг — точка-точка, без split
+                dnsOption = DnsOption.SYSTEM,   // тоже без DNS-block для замера
+            )
+            val ms = XrayBridge.measureDelay(json)
+            _pings.update { it + (name to PingState.Ok(ms)) }
+        } catch (e: Throwable) {
+            Log.w(TAG, "pingConfig($name) failed", e)
+            _pings.update { it + (name to PingState.Failed) }
+        }
+    }
+
+    /** Пингануть все конфиги параллельно. Возвращается когда последний завершён. */
+    suspend fun pingAll(): Unit = coroutineScope {
+        val names = _configs.value.map { it.name }
+        names.map { name -> async { pingConfig(name) } }.awaitAll()
+    }
+
+    sealed class PingState {
+        /** Ещё не мерили. */
+        object NotMeasured : PingState()
+
+        /** В процессе. */
+        object InProgress : PingState()
+
+        /** Успешный замер. */
+        data class Ok(val ms: Long) : PingState()
+
+        /** Конфиг невалиден или сервер недоступен. */
+        object Failed : PingState()
     }
 }

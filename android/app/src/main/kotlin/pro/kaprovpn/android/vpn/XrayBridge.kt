@@ -152,6 +152,23 @@ object XrayBridge {
         0L
     }
 
+    /**
+     * Замерить TCP-handshake latency для [configJson] (полный Xray-конфиг).
+     * Использует статический [Libv2ray.measureOutboundDelay] — не требует
+     * активной сессии (стартует мини-pipeline под капотом).
+     *
+     * @param testUrl что пинговать. `generate_204` — стандарт для
+     *   latency-проб: возвращает 204 No Content, маленький и быстрый.
+     * @return latency в миллисекундах. Бросает [Exception] при любой
+     *   ошибке (timeout, DNS, конфиг невалиден).
+     */
+    suspend fun measureDelay(
+        configJson: String,
+        testUrl: String = "https://www.google.com/generate_204",
+    ): Long = withContext(Dispatchers.IO) {
+        Libv2ray.measureOutboundDelay(configJson, testUrl)
+    }
+
     // -- types ----------------------------------------------------------------
 
     sealed class State {
