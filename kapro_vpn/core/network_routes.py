@@ -53,8 +53,11 @@ class _MIB_IPFORWARDROW(ctypes.Structure):
 _MIB_IPROUTE_TYPE_INDIRECT = 4
 _MIB_IPPROTO_NETMGMT = 3
 _NO_ERROR = 0
-_ERROR_ALREADY_EXISTS = 183
+_ERROR_ALREADY_EXISTS = 183           # exact duplicate (same dest+mask+next_hop+proto)
 _ERROR_NOT_FOUND = 1168
+_ERROR_OBJECT_ALREADY_EXISTS = 5010   # same dest+mask but different proto/origin —
+                                       # e.g. a stale entry from a dead TUN adapter
+                                       # pointing at an ifIndex that no longer exists
 
 if sys.platform == "win32":
     _iphlpapi = ctypes.windll.iphlpapi
@@ -289,24 +292,37 @@ class RouteSession:
                   metric: int = 1) -> bool:
         """Add a single route via the native Win32 API.
 
-        Auto-recovers from ERROR_ALREADY_EXISTS (183): if a previous
-        crashed KaproVPN left a stale /32 for the same destination,
-        Windows refuses to add ours. We delete the stale entry and
-        retry once — the new route then lives in our session, so a
-        clean disconnect removes it.
+        Auto-recovers from two "already exists" variants:
+
+          - ERROR_ALREADY_EXISTS (183): exact duplicate — a previous
+            session left a stale row with identical
+            (dest, mask, next_hop, proto). Native DeleteIpForwardEntry
+            matches by all those fields, so the args we'd reuse for
+            create also work for delete.
+
+          - ERROR_OBJECT_ALREADY_EXISTS (5010): same (dest, mask) but
+            different proto / ifIndex — typically a /32 left over from
+            a TUN adapter that died ungracefully (the route still
+            points at a now-dead ifIndex). Native delete CAN'T match
+            this — we don't know the dead ifIndex. The shell
+            `route delete <dest>` form matches by destination only and
+            removes it regardless of next_hop/index/proto.
+
+        In both cases we try native delete first (cheap), then shell
+        delete (catches the 5010 mismatched-proto case), then retry
+        create. If the retry still fails the caller raises a clean
+        error with the rc as a hint.
         """
         rc = _create_route_native(dest, mask, gateway, if_index, metric)
-        if rc == _ERROR_ALREADY_EXISTS:
-            # Try deleting the conflicting entry. The args have to
-            # match the EXISTING row exactly for the delete to land —
-            # but we don't know its gateway/index. CreateIp's docs
-            # say the row's primary key is (dest, mask, next_hop),
-            # so deleting with our intended next_hop usually clears
-            # the stale entry from a previous run because we'd have
-            # used the same gateway then. If it doesn't, the retry
-            # below still surfaces a non-zero rc and the caller
-            # raises a clean error.
+        if rc in (_ERROR_ALREADY_EXISTS, _ERROR_OBJECT_ALREADY_EXISTS):
             _delete_route_native(dest, mask, gateway, if_index, metric)
+            if rc == _ERROR_OBJECT_ALREADY_EXISTS:
+                # The proto/ifIndex mismatch means native delete almost
+                # certainly missed. Fall back to the shell form that
+                # ignores those fields. Shelling out is ~10 ms but we
+                # only do it on the recovery path — single-digit times
+                # per connect, not per-route.
+                delete_route(dest, mask)
             rc = _create_route_native(dest, mask, gateway, if_index, metric)
         if rc == _NO_ERROR:
             self.routes.append(_RouteEntry(dest, mask, gateway, if_index, metric))

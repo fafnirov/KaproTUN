@@ -305,6 +305,18 @@ class ConnectionManager:
                     hint = (" Windows вернул ERROR_ALREADY_EXISTS (183) и delete-retry "
                             "не сработал. Сделай вручную в админ-PowerShell: "
                             f"`route delete {server_ip}` и подключись снова.")
+                elif rc == 5010:
+                    # Same family as 183 but for a mismatched-proto entry
+                    # (typically a /32 left over from a TUN adapter that
+                    # died ungracefully). Our auto-recovery already tries
+                    # both native + shell delete — if we still hit this
+                    # the stale entry is glued in by something we can't
+                    # touch from user-space. Reboot is the sure fix;
+                    # `route -f` (flush all) usually works too.
+                    hint = (" Windows вернул ERROR_OBJECT_ALREADY_EXISTS (5010) — "
+                            "висит мёртвая запись от прошлого TUN-адаптера, и наш "
+                            "delete-retry её не выгрыз. В админ-PowerShell: "
+                            f"`route delete {server_ip}` (или перезагрузка снимет точно).")
                 elif rc == 1314:
                     hint = (" Windows вернул ERROR_PRIVILEGE_NOT_HELD (1314). "
                             "Перезапусти KaproVPN от админа.")
