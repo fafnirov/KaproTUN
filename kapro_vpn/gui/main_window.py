@@ -45,6 +45,7 @@ from ..core.controller import ConnectionManager
 from ..core.parser import ProxyConfig
 from . import icons
 from .add_page import AddConfigPage
+from .onboarding import OnboardingPage
 from .config_dialog import AddConfigDialog
 from .configs_picker import ConfigsPickerDialog
 from .installer_dialog import ensure_geoip_ru_cached, ensure_tun2socks_installed, ensure_xray_installed
@@ -655,6 +656,19 @@ class MainWindow(QMainWindow):
         self._prev_traffic: Optional[xray_stats.TrafficStats] = None
         self._update_worker: Optional[_UpdateCheckWorker] = None
         self._crash_notified = False  # avoid spamming the same kill-switch toast
+        # Auto-reconnect state: when xray dies without us asking, we try
+        # to bring it back up to MAX times with exponential backoff. Reset
+        # on successful connect, on user-initiated disconnect, or after
+        # all attempts fail.
+        self._reconnect_attempts = 0
+        self._reconnect_max = 3
+        # Backoff schedule: 1s after first crash, 5s after second, 15s
+        # after third. Matches the rough "transient ISP blip / config-
+        # being-rotated / brief endpoint downtime" timescales.
+        self._reconnect_backoff = (1, 5, 15)
+        self._reconnect_timer = QTimer(self)
+        self._reconnect_timer.setSingleShot(True)
+        self._reconnect_timer.timeout.connect(self._do_auto_reconnect)
 
         # --- App-shell layout (everything inside the rounded dark frame) ---
         shell = QWidget()
@@ -672,10 +686,12 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage(self.manager)
         self.logs_page = LogsPage()
         self.add_page = AddConfigPage()
-        self.stack.addWidget(self.home_page)     # index 0
-        self.stack.addWidget(self.settings_page) # index 1
-        self.stack.addWidget(self.logs_page)     # index 2
-        self.stack.addWidget(self.add_page)      # index 3
+        self.onboarding_page = OnboardingPage()
+        self.stack.addWidget(self.home_page)        # index 0
+        self.stack.addWidget(self.settings_page)    # index 1
+        self.stack.addWidget(self.logs_page)        # index 2
+        self.stack.addWidget(self.add_page)         # index 3
+        self.stack.addWidget(self.onboarding_page)  # index 4
         root.addWidget(self.stack, stretch=1)
 
         nav_sep = QFrame()
@@ -691,6 +707,12 @@ class MainWindow(QMainWindow):
 
         self._wire_signals()
         self._refresh_home()
+        # If this is a clean install (no saved configs), open onboarding
+        # instead of the empty Home card — _goto("home") detects this.
+        # First-time UX: user sees Welcome + 3 big actions, not a sad
+        # "Конфиг не выбран" panel.
+        if not self.configs:
+            self._goto("home")  # routes to onboarding via empty-state hijack
         self.nav.set_active("home")
 
         # Kick off the initial tray-pings background scan so the
@@ -721,6 +743,12 @@ class MainWindow(QMainWindow):
         self.add_page.back_clicked.connect(lambda: self._goto("home"))
         self.add_page.config_ready.connect(self._on_add_page_saved)
         self.add_page.subscription_clicked.connect(self._on_import_subscription)
+        # Onboarding: the two action buttons reuse the existing import-
+        # subscription and add-config-page paths. Same destinations as
+        # the bottom-nav "+" and Settings → Subscription import, just
+        # exposed earlier to brand-new users with zero saved configs.
+        self.onboarding_page.subscription_clicked.connect(self._on_import_subscription)
+        self.onboarding_page.add_config_clicked.connect(self._on_open_add_page)
         self.nav.home_clicked.connect(lambda: self._goto("home"))
         self.nav.settings_clicked.connect(lambda: self._goto("settings"))
         self.nav.add_clicked.connect(self._on_open_add_page)
@@ -735,6 +763,15 @@ class MainWindow(QMainWindow):
         self.tray.config_selected.connect(self._on_tray_config_picked)
 
     def _goto(self, name: str) -> None:
+        # Empty-state hijack: any "go home" request when the user has
+        # zero saved configs lands on the onboarding screen instead.
+        # The bottom-nav highlight still says "home" so the spatial
+        # model is consistent — onboarding is "what Home looks like
+        # when you haven't done anything yet".
+        if name == "home" and not self.configs:
+            self._fade_to(4)  # onboarding stack index
+            self.nav.set_active("home")
+            return
         target_index, nav_key = {
             "home":     (0, "home"),
             "settings": (1, "settings"),
@@ -857,16 +894,55 @@ class MainWindow(QMainWindow):
                     )
                     self._crash_notified = True
             else:
-                self.logs_page.append(
-                    f"[!] Xray-core завершился неожиданно (код {rc}). Отключаюсь."
-                )
-                show_toast(self, "VPN упал — отключение", kind="error", duration_ms=5000)
-                self.manager.disconnect()
-                self._connected_at = 0.0
-                self._crash_notified = False
+                # Plain HTTP-mode crash (or TUN without kill-switch): try
+                # to auto-reconnect a few times before giving up. Most
+                # crashes are transient — a brief network blip or xray
+                # config-reload glitch.
+                if (self._reconnect_attempts < self._reconnect_max
+                        and not self._reconnect_timer.isActive()):
+                    delay = self._reconnect_backoff[self._reconnect_attempts]
+                    self._reconnect_attempts += 1
+                    self.logs_page.append(
+                        f"[!] Xray-core упал (код {rc}). "
+                        f"Авто-переподключение #{self._reconnect_attempts}/"
+                        f"{self._reconnect_max} через {delay} с…"
+                    )
+                    show_toast(
+                        self,
+                        f"VPN упал. Переподключение #{self._reconnect_attempts}…",
+                        kind="info", duration_ms=delay * 1000,
+                    )
+                    # Tear down xray/proxy state but DON'T clear self._active —
+                    # the timer will reuse it for the reconnect attempt.
+                    saved = self._active_config
+                    self.manager.disconnect()
+                    self._active_config = saved
+                    self._connected_at = 0.0
+                    self._reconnect_timer.start(delay * 1000)
+                elif self._reconnect_attempts >= self._reconnect_max:
+                    if not self._crash_notified:
+                        self.logs_page.append(
+                            f"[!] Авто-переподключение не удалось после "
+                            f"{self._reconnect_max} попыток. Ткни «ВКЛЮЧИТЬ» "
+                            f"вручную когда захочешь снова."
+                        )
+                        show_toast(
+                            self,
+                            f"VPN не поднимается ({self._reconnect_max} попыток). "
+                            f"Переподключи вручную.",
+                            kind="error", duration_ms=10000,
+                        )
+                        self._crash_notified = True
+                    self.manager.disconnect()
+                    self._connected_at = 0.0
         else:
             # Reset crash-notified flag when state is healthy
             self._crash_notified = False
+            # Successful steady-state — reset the auto-reconnect counter
+            # so the NEXT crash gets a fresh 3-attempt budget instead of
+            # immediately giving up.
+            if self.manager.is_connected() and self._reconnect_attempts > 0:
+                self._reconnect_attempts = 0
 
         active_name = self._active_config.name if self._active_config else ""
         if self.manager.is_connected():
@@ -953,6 +1029,9 @@ class MainWindow(QMainWindow):
 
     def _on_connect_success(self) -> None:
         self._connecting = False
+        # Successful connect ⇒ wipe the auto-reconnect counter so the
+        # next crash gets its own full 3-attempt budget.
+        self._reconnect_attempts = 0
         self.manager.update_settings(last_config_name=self._active_config.name)
         self._connected_at = time.time()
         mode_tag = "TUN" if self.manager.current_mode() == MODE_TUN else "HTTP"
@@ -966,9 +1045,36 @@ class MainWindow(QMainWindow):
         self._connecting = False
         self.home_page.set_state("idle")
         self._refresh_home()
+        # If this was triggered by auto-reconnect (we're mid-attempts),
+        # silently let the timer try again instead of popping a modal
+        # — the user would be furious to OK 3 dialogs in 30 seconds.
+        if self._reconnect_attempts > 0:
+            self.logs_page.append(
+                f"[!] Попытка #{self._reconnect_attempts} не удалась: {msg}"
+            )
+            return
         QMessageBox.critical(self, "Не удалось подключиться", msg)
 
+    def _do_auto_reconnect(self) -> None:
+        """Fired by self._reconnect_timer after backoff elapses.
+
+        Re-runs _do_connect with the same active config. _do_connect
+        spawns its own worker and routes the result through
+        _on_connect_success / _on_connect_failed — those handlers know
+        about self._reconnect_attempts and continue the chain.
+        """
+        if self._active_config is None or self._connecting:
+            return
+        self.logs_page.append(
+            f"[*] Авто-переподключение: попытка #{self._reconnect_attempts}…"
+        )
+        self._do_connect()
+
     def _do_disconnect(self) -> None:
+        # User asked for it — kill the auto-reconnect chain too so we
+        # don't bring the VPN back up against their wishes.
+        self._reconnect_timer.stop()
+        self._reconnect_attempts = 0
         self.manager.disconnect()
         self._connected_at = 0.0
         self.logs_page.append("[*] Отключено, системный прокси восстановлен")

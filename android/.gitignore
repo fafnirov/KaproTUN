@@ -1,0 +1,22 @@
+# Gradle
+.gradle/
+build/
+
+# Local SDK path / signing — never commit
+local.properties
+keystore.properties
+*.keystore
+*.jks
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+.cxx/
+
+# Kotlin
+.kotlin/
+
+# OS
+.DS_Store
+Thumbs.db
