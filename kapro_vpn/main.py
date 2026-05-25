@@ -9,7 +9,7 @@ import sys
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from .core import autostart, killswitch, storage, system_proxy
+from .core import autostart, i18n, killswitch, storage, system_proxy
 from .gui import icons
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
@@ -117,6 +117,10 @@ def main() -> int:
     start_minimized = autostart.MINIMIZED_FLAG in sys.argv
 
     app = QApplication(sys.argv)
+    # i18n must be initialised BEFORE any window/widget is built, because
+    # those build their UI text with tr() at construction time. After
+    # QApplication so QLocale.system() works inside detect_system_locale().
+    i18n.init_from_settings(storage.load_settings().get("language"))
     app.setApplicationName("KaproVPN")
     app.setOrganizationName("KaproVPN")
     app.setStyleSheet(DARK_QSS)

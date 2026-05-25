@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
+from ..core.i18n import tr
 from ..core.parser import ProxyConfig
 from . import icons
 
@@ -37,7 +38,7 @@ class TrayManager(QObject):
 
         self.tray = QSystemTrayIcon(parent)
         self.tray.setIcon(icons.tray_idle())
-        self.tray.setToolTip("KaproVPN — не подключено")
+        self.tray.setToolTip(tr("tray.tooltip_idle"))
         self.tray.activated.connect(self._on_tray_activated)
 
         self.menu = QMenu()
@@ -60,18 +61,19 @@ class TrayManager(QObject):
         """state ∈ {'idle', 'connecting', 'connected'}"""
         if state == "connected":
             self.tray.setIcon(icons.tray_connected())
-            self.tray.setToolTip(
-                f"KaproVPN — подключено{f' · {active_name}' if active_name else ''}"
-            )
-            self.action_toggle.setText("Отключить")
+            tip = tr("tray.tooltip_connected")
+            if active_name:
+                tip = f"{tip} · {active_name}"
+            self.tray.setToolTip(tip)
+            self.action_toggle.setText(tr("tray.menu_disconnect"))
         elif state == "connecting":
             self.tray.setIcon(icons.tray_connecting())
-            self.tray.setToolTip("KaproVPN — подключение…")
-            self.action_toggle.setText("Отменить подключение")
+            self.tray.setToolTip(tr("tray.tooltip_connecting"))
+            self.action_toggle.setText(tr("tray.menu_cancel_connect"))
         else:
             self.tray.setIcon(icons.tray_idle())
-            self.tray.setToolTip("KaproVPN — не подключено")
-            self.action_toggle.setText("Подключить")
+            self.tray.setToolTip(tr("tray.tooltip_idle"))
+            self.action_toggle.setText(tr("tray.menu_connect"))
 
     def set_configs(
         self,
@@ -126,16 +128,16 @@ class TrayManager(QObject):
         # --- Full configs submenu (everything saved, not just top-3) ---
         self.configs_menu.clear()
         if not configs:
-            no_configs = QAction("(нет конфигов)", self.configs_menu)
+            no_configs = QAction(tr("tray.menu_no_configs"), self.configs_menu)
             no_configs.setEnabled(False)
             self.configs_menu.addAction(no_configs)
             return
         for cfg in configs:
             ms = pings.get(cfg.name)
             if isinstance(ms, int) and ms >= 0:
-                label = f"{cfg.name}  ·  {ms} мс"
+                label = f"{cfg.name}  ·  {tr('picker.ping_ms', ms=ms)}"
             elif ms == -1:
-                label = f"{cfg.name}  ·  UDP"
+                label = f"{cfg.name}  ·  {tr('picker.ping_udp')}"
             elif ms is None:
                 label = f"{cfg.name}  ·  ?"
             else:
@@ -161,28 +163,28 @@ class TrayManager(QObject):
         self._quick_actions: list[QAction] = []
         self._quick_separator: Optional[QAction] = None
 
-        self.action_toggle = QAction("Подключить", self.menu)
+        self.action_toggle = QAction(tr("tray.menu_connect"), self.menu)
         self.action_toggle.triggered.connect(self.toggle_clicked)
         self.menu.addAction(self.action_toggle)
 
         self.menu.addSeparator()
 
-        self.configs_menu = QMenu("Конфиги", self.menu)
+        self.configs_menu = QMenu(tr("tray.menu_configs"), self.menu)
         self.menu.addMenu(self.configs_menu)
         # populated later via set_configs()
-        no_configs = QAction("(нет конфигов)", self.configs_menu)
+        no_configs = QAction(tr("tray.menu_no_configs"), self.configs_menu)
         no_configs.setEnabled(False)
         self.configs_menu.addAction(no_configs)
 
         self.menu.addSeparator()
 
-        self.action_show = QAction("Главное окно", self.menu)
+        self.action_show = QAction(tr("tray.menu_show"), self.menu)
         self.action_show.triggered.connect(self.show_window_clicked)
         self.menu.addAction(self.action_show)
 
         self.menu.addSeparator()
 
-        self.action_quit = QAction("Выход", self.menu)
+        self.action_quit = QAction(tr("tray.menu_quit"), self.menu)
         self.action_quit.triggered.connect(self.quit_clicked)
         self.menu.addAction(self.action_quit)
 

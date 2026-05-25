@@ -18,6 +18,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -332,6 +333,39 @@ class SettingsPage(QWidget):
         kill_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(kill_hint)
 
+        # --- Language toggle ---
+        # Lives in Security section because it's the only other "global
+        # preference" — too small to deserve its own section header.
+        from ..core import i18n as _i18n
+        lang_row = QHBoxLayout()
+        lang_row.setContentsMargins(0, 6, 0, 0)
+        lang_label = QLabel(_i18n.tr("settings.language_label"))
+        lang_row.addWidget(lang_label)
+        lang_row.addStretch(1)
+        self.lang_combo = QComboBox()
+        # Order: Auto first (most users will leave it as detected),
+        # then RU/EN alphabetical so it's predictable.
+        self.lang_combo.addItem(_i18n.tr("settings.language_auto"), "auto")
+        self.lang_combo.addItem("English", "en")
+        self.lang_combo.addItem("Русский", "ru")
+        current_lang = manager.settings.get("language", "auto")
+        for i in range(self.lang_combo.count()):
+            if self.lang_combo.itemData(i) == current_lang:
+                self.lang_combo.setCurrentIndex(i)
+                break
+        self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
+        lang_row.addWidget(self.lang_combo)
+        outer.addLayout(lang_row)
+        lang_hint = QLabel(
+            "Изменение применится после перезапуска KaproVPN."
+            if _i18n.current_locale() == "ru"
+            else "Changes take effect after KaproVPN restarts."
+        )
+        lang_hint.setObjectName("dim")
+        lang_hint.setWordWrap(True)
+        lang_hint.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(lang_hint)
+
         # Separator
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
@@ -448,6 +482,16 @@ class SettingsPage(QWidget):
     def _on_kill_switch_changed(self, checked: bool) -> None:
         self._manager.update_settings(kill_switch=checked)
         self.settings_changed.emit()
+
+    def _on_language_changed(self, _index: int) -> None:
+        """Persist language choice. Takes effect on next launch — we don't
+        rebuild the UI in-place because that means re-translating every
+        widget that was constructed at startup (settings labels, tray
+        menu items, etc.) and chasing every label is fragile. Restart
+        is one extra click for a change users make ~once per install.
+        """
+        new_lang = self.lang_combo.currentData()
+        self._manager.update_settings(language=new_lang)
 
     def _on_check_updates_clicked(self) -> None:
         """Forwarded to MainWindow which owns the worker thread."""

@@ -96,16 +96,17 @@ class CircleConnectButton(QPushButton):
             return
         self._state = state
 
+        from ..core.i18n import tr  # lazy import — avoid circular
         if state == "connected":
-            self.setText("ПОДКЛЮЧЕНО")
+            self.setText(tr("home.disconnect"))
             self.setProperty("state", "connected")
             self._start_burst(settle_to=self.CONNECTED_GLOW, then=None)
         elif state == "connecting":
-            self.setText("ПОДКЛЮЧЕНИЕ…")
+            self.setText(tr("home.connecting"))
             self.setProperty("state", "connecting")
             self._start_burst(settle_to=self.PULSE_LOW, then=self._pulse.start)
         else:
-            self.setText("ВКЛЮЧИТЬ")
+            self.setText(tr("home.connect"))
             self.setProperty("state", "idle")
             self._start_burst(settle_to=0.0, then=None)
 

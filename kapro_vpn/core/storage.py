@@ -84,6 +84,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "autoconnect_on_launch": False,
     "subscription_url": "",  # last imported subscription, for one-click re-sync
     "kill_switch": False,    # leave TUN up if xray dies (no leak via real ISP)
+    "language": "auto",      # "ru" / "en" / "auto" (detect from QLocale.system())
 }
 
 
