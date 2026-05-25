@@ -46,13 +46,9 @@ import requests
 
 from . import paths
 
-# Default install path of WireGuard for Windows. Users who chose a custom
-# install location can set $WIREGUARD_EXE in their environment.
-DEFAULT_EXE = r"C:\Program Files\WireGuard\wireguard.exe"
-
-# Pinned MSI version we know works with our orchestration. WireGuard for
-# Windows is API-stable across versions but we pin to avoid an upstream
-# breaking change silently breaking our users. Bump after manual smoke-test.
+# Pinned MSI version we extract binaries from. Bump after manual smoke-test
+# of a newer release (WireGuard for Windows is API-stable across versions
+# but we pin to avoid surprises).
 WIREGUARD_MSI_VERSION = "0.5.3"
 WIREGUARD_MSI_FILENAME = f"wireguard-amd64-{WIREGUARD_MSI_VERSION}.msi"
 
@@ -63,6 +59,12 @@ WIREGUARD_MSI_UPSTREAM = (
 # Our mirror (server-setup/sync-binaries.sh re-hosts the MSI). Primary
 # because it's geographically closer + we control its uptime.
 WIREGUARD_MSI_MIRROR = f"https://files.kaprovpn.pro/{WIREGUARD_MSI_FILENAME}"
+
+# Legacy system install path — checked LAST as a fallback for users who
+# already had WireGuard for Windows installed (e.g. from KaproVPN v1.3.1
+# which used to install the MSI). New installs go to our portable path
+# under app_data_dir() / "wg" / "bin" instead.
+LEGACY_SYSTEM_EXE = r"C:\Program Files\WireGuard\wireguard.exe"
 
 DOWNLOAD_URL = WIREGUARD_MSI_UPSTREAM  # legacy alias, kept for callers
 
@@ -84,17 +86,43 @@ def wg_dir() -> Path:
     return p
 
 
+def wg_bin_dir() -> Path:
+    """Where the portable WireGuard binaries live (our private copy).
+
+    Windows SCM uses the path of the exe that called /installtunnelservice
+    as the service binary path, so this can be anywhere on disk — no need
+    to live in C:\\Program Files. LOCALAPPDATA is readable by SYSTEM
+    (which the registered tunnel service runs as), so this works for
+    service registration too.
+    """
+    p = wg_dir() / "bin"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def find_wireguard_exe() -> Optional[Path]:
-    """Locate wireguard.exe. Returns None if WireGuard for Windows
-    isn't installed.
+    """Locate wireguard.exe. Checks our portable install first, then
+    legacy system install paths.
+
+    Order of precedence:
+      1. $WIREGUARD_EXE env var (manual override for advanced users)
+      2. Our portable copy under %LOCALAPPDATA%\\KaproVPN\\wg\\bin
+      3. C:\\Program Files\\WireGuard (legacy — left over from v1.3.1
+         or from the user installing wireguard.com MSI manually)
+      4. PATH (if user put wireguard.exe somewhere on PATH)
+
+    Returns None if not found anywhere.
     """
     if sys.platform != "win32":
         return None
     env_override = os.environ.get("WIREGUARD_EXE")
     if env_override and Path(env_override).is_file():
         return Path(env_override)
-    if Path(DEFAULT_EXE).is_file():
-        return Path(DEFAULT_EXE)
+    portable = wg_bin_dir() / "wireguard.exe"
+    if portable.is_file():
+        return portable
+    if Path(LEGACY_SYSTEM_EXE).is_file():
+        return Path(LEGACY_SYSTEM_EXE)
     found = shutil.which("wireguard.exe")
     if found:
         return Path(found)
@@ -146,69 +174,113 @@ def _download_msi(progress: ProgressCb = None) -> bytes:
     )
 
 
-def silent_install(progress: ProgressCb = None) -> None:
-    """Download WireGuard for Windows MSI and install it silently.
+_PORTABLE_BINARIES = ("wireguard.exe", "tunnel.dll", "wg.exe", "wintun.dll")
 
-    Requires admin (msiexec /i with /quiet on a system component needs
-    elevation). Controller has already gated on admin.is_admin() before
-    calling us, so this is safe.
 
-    Side effect: registers WireGuard as a normal Windows program (shows
-    up in Add/Remove Programs, Start Menu). KaproVPN doesn't uninstall
-    it on its own removal — the user may use it for other tunnels.
+def portable_install(progress: ProgressCb = None) -> None:
+    """Download the WireGuard MSI and extract its binaries to OUR path.
+
+    Does NOT run msiexec /i (system install). Instead runs
+    msiexec /a (administrative install) which unpacks files to a temp
+    directory without touching the system: no service registration,
+    no Programs & Features entry, no Start Menu shortcut.
+
+    We then copy just the four files we need into
+    %LOCALAPPDATA%\\KaproVPN\\wg\\bin\\ and discard the rest.
+
+    Requires admin because msiexec /a still needs it for some MSIs;
+    even when it doesn't, the controller has already gated on
+    admin.is_admin() before reaching here (WG needs admin to register
+    the service later anyway).
     """
     if sys.platform != "win32":
-        raise RuntimeError("WireGuard MSI install is Windows-only")
+        raise RuntimeError("WireGuard portable install is Windows-only")
 
     raw = _download_msi(progress=progress)
 
-    # Write the MSI to a temp file — msiexec needs a real path.
-    fd, tmp_path = tempfile.mkstemp(
-        suffix=".msi", prefix="kaprovpn-wg-",
-    )
+    fd, msi_path = tempfile.mkstemp(suffix=".msi", prefix="kaprovpn-wg-")
     try:
         os.write(fd, raw)
     finally:
         os.close(fd)
 
+    # msiexec /a wants a target dir; it'll create a "PFiles\WireGuard\"
+    # subtree inside (mirroring where it would normally install).
+    extract_dir = Path(tempfile.mkdtemp(prefix="kaprovpn-wg-extract-"))
     try:
-        # /i  = install
-        # /quiet  = no UI (also blocks reboot prompt — we use /norestart anyway)
-        # /norestart = never reboot, even if MSI requests it
-        # ACCEPTEULA=1 = pre-accept the EULA (so install doesn't block on it)
         proc = subprocess.run(
-            ["msiexec", "/i", tmp_path, "/quiet", "/norestart", "ACCEPTEULA=1"],
+            ["msiexec", "/a", msi_path, "/qn",
+             f"TARGETDIR={extract_dir}"],
             capture_output=True, timeout=180,
             creationflags=_NO_WINDOW,
         )
-        if proc.returncode not in (0, 3010):
-            # 3010 = "success, but a reboot is required". For WG, no
-            # reboot is actually needed for the CLI to work; the service
-            # subsystem is reachable without one.
+        if proc.returncode != 0:
             raise RuntimeError(
-                f"msiexec вернул {proc.returncode}. "
+                f"msiexec /a вернул {proc.returncode}. "
                 f"stderr: {(proc.stderr or b'').decode('utf-8', errors='replace')[:200]}"
             )
+
+        # Walk the extracted tree, find each of our needed binaries.
+        # MSI layout is TARGETDIR\PFiles\WireGuard\<files> typically.
+        found: dict[str, Path] = {}
+        for path in extract_dir.rglob("*"):
+            name = path.name.lower()
+            if path.is_file() and name in _PORTABLE_BINARIES:
+                # Prefer matches deeper in the tree (more specific
+                # WireGuard subfolder) over shallow ones if there's
+                # a duplicate — irrelevant for current MSI layout but
+                # robust against future repacks.
+                found[name] = path
+
+        missing = [n for n in _PORTABLE_BINARIES if n not in found]
+        if missing:
+            raise RuntimeError(
+                f"WireGuard MSI распакован, но не нашлись: {', '.join(missing)}. "
+                f"Содержимое: {[p.name for p in extract_dir.rglob('*') if p.is_file()][:10]}"
+            )
+
+        # Copy into our portable bin dir. Atomic-ish per file — if we
+        # crash mid-copy the user gets a re-install on next launch.
+        target_dir = wg_bin_dir()
+        for name in _PORTABLE_BINARIES:
+            shutil.copy2(found[name], target_dir / name)
+
     finally:
+        # Clean up both the temp MSI and the extract dir — they're
+        # ~10 MB each, no need to leave them around.
         try:
-            os.remove(tmp_path)
+            os.remove(msi_path)
+        except OSError:
+            pass
+        try:
+            shutil.rmtree(extract_dir, ignore_errors=True)
         except OSError:
             pass
 
-    # Sanity-check that the install actually landed.
+    # Sanity check.
     if not is_installed():
         raise RuntimeError(
-            "MSI отработал без ошибки, но wireguard.exe всё равно не "
-            "найден на диске. Возможно, антивирус помешал — попробуй "
-            "временно выключить защиту реального времени и переподключиться."
+            "Файлы скопировались, но wireguard.exe не находится. "
+            "Возможно, антивирус удалил его — временно отключи защиту "
+            "реального времени и попробуй снова."
         )
 
 
 def ensure_installed(progress: ProgressCb = None) -> None:
-    """Idempotent: install only if missing."""
+    """Idempotent: install only if missing.
+
+    Detects both our portable install and a legacy system install
+    (from v1.3.1 or wireguard.com manual install) as "already installed"
+    — no need to download MSI again in either case.
+    """
     if is_installed():
         return
-    silent_install(progress=progress)
+    portable_install(progress=progress)
+
+
+# Backwards-compat shim for any caller still using the old name.
+def silent_install(progress: ProgressCb = None) -> None:
+    portable_install(progress=progress)
 
 
 def get_installed_version() -> Optional[str]:
