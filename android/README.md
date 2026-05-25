@@ -36,9 +36,34 @@
 - **Smoke-test прогнан на AVD (x86_64, Android 17):
   `Lib v37, Xray-core v26.5.9` — JNI работает, .so грузится** ✓
 
-**Дальше (Phase 3):** VpnService с TUN-fd → `CoreController.startLoop`,
-split-routing через `Builder.addRoute()` для resolved direct-IP, foreground
-notification, permission flow в MainActivity.
+**Phase 3 — VpnService + TUN (готово, ждёт e2e):**
+- `vpn.KaproVpnService` (extends `VpnService`) — TUN-интерфейс через
+  `Builder.addAddress/addRoute/addDnsServer/setMtu/establish`, foreground
+  с notification + действие «Отключить» ✓
+- `XrayBridge.start(config, tunFd)` + `stop()` — suspend через
+  `Dispatchers.IO`, сериализация через `Mutex`. Распаковка
+  `geoip.dat`/`geosite.dat` из AAR-assets в env-dir на init ✓
+- `MainActivity` — VPN permission flow через
+  `registerForActivityResult(StartActivityForResult())` ✓
+- `HomeScreen` — `OutlinedTextField` для share-URL, кнопка
+  ВКЛЮЧИТЬ парсит → `XrayConfigBuilder` → стартует сервис;
+  state наблюдается через `XrayBridge.state` ✓
+- Manifest: service зарегистрирован с `BIND_VPN_SERVICE` и
+  `foregroundServiceType=specialUse` ✓
+- `./gradlew :app:assembleDebug` зелёный ✓
+- E2E на устройстве: **требует валидный share-URL** — пользователь
+  должен вставить свой.
+
+**Phase 3 MVP не делает (нужно в Phase 4):**
+- Split-routing — пока туннелируется ВЕСЬ трафик (включая RU-сайты).
+  Доделать: загружать `default_sites.json` из assets, резолвить
+  домены в IP параллельно, `Builder.addRoute(ip, 32)` для bypass —
+  как в десктоп-`controller.py:_connect_tun`.
+- Сохранение конфигов (DataStore + JSON). Сейчас URL вводится каждый
+  раз заново.
+- Список конфигов / picker / ping.
+- Kill-switch (Always-on VPN — настройка системы Android, частично
+  бесплатно).
 
 ## Требования
 

@@ -34,17 +34,20 @@
             </intent-filter>
         </activity>
 
-        <!--
-            KaproVpnService будет зарегистрирован здесь в следующем этапе:
-            <service
-                android:name=".vpn.KaproVpnService"
-                android:exported="false"
-                android:foregroundServiceType="specialUse"
-                android:permission="android.permission.BIND_VPN_SERVICE">
-                <intent-filter>
-                    <action android:name="android.net.VpnService" />
-                </intent-filter>
-            </service>
-        -->
+        <service
+            android:name=".vpn.KaproVpnService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <!-- Android 14+ требует объявить причину для специальных foreground-сервисов.
+                 "vpn_tunnel" — описание для Play Console review (мы не публикуемся
+                 в Play, но AGP всё равно требует поле). -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn_tunnel — System-wide VPN routing via Xray-core" />
+        </service>
     </application>
 </manifest>
