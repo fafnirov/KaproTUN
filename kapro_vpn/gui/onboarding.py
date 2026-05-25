@@ -14,8 +14,9 @@ Three big buttons covering the three realistic paths a new user is on:
      → opens the inline AddConfigPage.
 
   3. They have no VPN provider yet and don't know where to get one.
-     → opens kaprovpn.pro/setup in the browser, where we list
-     vetted providers + setup walkthroughs.
+     → opens kaprovpn.pro in the browser — landing page already covers
+     "what it does", "where to get configs", links to the GmailVPN
+     partner service, and download links for every OS.
 
 The page only ever shows up when configs.json is empty. The moment the
 user adds their first config, MainWindow switches to the Home page and
@@ -40,9 +41,11 @@ from PySide6.QtWidgets import (
 from ..core.i18n import current_locale
 
 
-# Where to send users without a provider — we own this URL, can put
-# whatever "how to get started" content makes sense.
-SETUP_GUIDE_URL = "https://kaprovpn.pro/setup"
+# Where to send users without a provider — kaprovpn.pro main page is
+# already the setup guide (problem / features / how it works / downloads
+# / GmailVPN partner link). Was /setup until v1.9.3, which returned 404 —
+# never had separate content, never needed.
+SETUP_GUIDE_URL = "https://kaprovpn.pro/"
 
 
 class OnboardingPage(QWidget):
