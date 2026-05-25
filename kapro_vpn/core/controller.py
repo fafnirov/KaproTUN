@@ -257,6 +257,23 @@ class ConnectionManager:
         except wireguard_service.WireGuardError as e:
             raise ConnectionError(str(e)) from e
 
+        # Sanity-check that wireguard.exe actually created the service.
+        # On some Windows configurations (KB-pending updates, broken WG
+        # install), /installtunnelservice exits with rc=0 but silently
+        # fails to register the service. Detect that here so we don't
+        # spend 15 s polling for a status that'll always be empty.
+        initial_status = wireguard_service.get_tunnel_status(tunnel_name)
+        if not initial_status:
+            raise ConnectionError(
+                f"wireguard.exe вернул успех, но Windows-служба "
+                f"'WireGuardTunnel${tunnel_name}' не появилась в списке. "
+                f"Возможно, легаси-установка WireGuard в Program Files "
+                f"битая — попробуй удалить её через Параметры → "
+                f"Приложения → WireGuard, и переподключись."
+            )
+        self._log(f"[*] Служба зарегистрирована (статус: {initial_status}), "
+                  f"жду пока выйдет в Running…")
+
         # Service install is async — wait for it to actually be RUNNING
         # before adding bypass routes (the WG interface needs to exist
         # for routes via it to be valid).

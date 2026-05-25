@@ -407,42 +407,30 @@ def uninstall_tunnel(tunnel_name: str) -> None:
 
 
 def is_tunnel_active(tunnel_name: str) -> bool:
-    """True if the Windows service for this tunnel is in Running state.
-
-    Uses PowerShell `Get-Service` because `sc query` localizes its
-    output — on Russian Windows you get "СОСТОЯНИЕ : 4 РАБОТАЕТ"
-    instead of "STATE : 4 RUNNING", which broke our string match
-    in v1.3.0–1.3.2 (we always saw "not running" even when it was).
-    Get-Service returns the ServiceControllerStatus enum value
-    ("Running", "Stopped", etc) which is ALWAYS English regardless
-    of system locale.
-    """
-    service_name = f"WireGuardTunnel${tunnel_name}"
-    # Backtick-escape the $ for the PowerShell-string literal.
-    ps_service = service_name.replace("$", "`$")
-    try:
-        proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command",
-             f"(Get-Service -Name '{ps_service}' -ErrorAction SilentlyContinue).Status"],
-            capture_output=True, timeout=5,
-            creationflags=_NO_WINDOW,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    out = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
-    return out == "Running"
+    """True if the Windows service for this tunnel is in Running state."""
+    return get_tunnel_status(tunnel_name) == "Running"
 
 
 def get_tunnel_status(tunnel_name: str) -> str:
     """Last-known status of the service: 'Running' / 'Stopped' /
     'StartPending' / 'StopPending' / '' (no such service).
+
+    Locale-independent: uses Get-Service which returns the
+    ServiceControllerStatus enum value (always English) regardless
+    of system locale, unlike `sc query` which prints localized text.
+
+    NB on PowerShell escaping: in single-quoted strings the dollar
+    sign is a LITERAL character (variable expansion only happens
+    inside double-quoted strings). So we pass the service name
+    straight, no backtick-escape — earlier versions added a backtick
+    before $ which made PowerShell search for a name with a literal
+    backtick in it and find nothing.
     """
     service_name = f"WireGuardTunnel${tunnel_name}"
-    ps_service = service_name.replace("$", "`$")
     try:
         proc = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command",
-             f"(Get-Service -Name '{ps_service}' -ErrorAction SilentlyContinue).Status"],
+             f"(Get-Service -Name '{service_name}' -ErrorAction SilentlyContinue).Status"],
             capture_output=True, timeout=5,
             creationflags=_NO_WINDOW,
         )
