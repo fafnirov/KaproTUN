@@ -86,7 +86,22 @@ class ReleaseInfo:
 
 
 def is_installed() -> bool:
-    return paths.xray_exe().is_file()
+    """True only if ALL three required files are present.
+
+    Used to be just `xray.exe is_file()`, which created a silent
+    failure mode: if a wipe-and-reinstall left xray.exe locked by a
+    running process but successfully deleted geoip.dat (which isn't
+    locked), the next launch saw "xray.exe exists, install OK" and
+    skipped re-download — then xray crashed at startup because
+    `geoip:private` rules in our routing config can't load without
+    geoip.dat. Now we require all three.
+    """
+    geo_dir = paths.xray_dir()
+    return (
+        paths.xray_exe().is_file()
+        and (geo_dir / "geoip.dat").is_file()
+        and (geo_dir / "geosite.dat").is_file()
+    )
 
 
 def get_installed_version() -> Optional[str]:
@@ -201,7 +216,7 @@ def download_and_install(progress: ProgressCb = None) -> None:
     # always "xray" (unix) or "xray.exe" (windows). Pull whichever shows
     # up plus the geo data, and write it under the right name for our OS.
     target_bin = paths.xray_exe()
-    extracted_bin = False
+    extracted = {"bin": False, "geoip": False, "geosite": False}
     with zipfile.ZipFile(buf) as zf:
         for member in zf.namelist():
             base = member.rsplit("/", 1)[-1]
@@ -209,14 +224,26 @@ def download_and_install(progress: ProgressCb = None) -> None:
                 continue
             base_lower = base.lower()
             if base_lower in ("xray", "xray.exe"):
-                data = zf.read(member)
-                target_bin.write_bytes(data)
-                extracted_bin = True
-            elif base_lower in ("geoip.dat", "geosite.dat"):
-                (install_dir / base).write_bytes(zf.read(member))
+                target_bin.write_bytes(zf.read(member))
+                extracted["bin"] = True
+            elif base_lower == "geoip.dat":
+                (install_dir / "geoip.dat").write_bytes(zf.read(member))
+                extracted["geoip"] = True
+            elif base_lower == "geosite.dat":
+                (install_dir / "geosite.dat").write_bytes(zf.read(member))
+                extracted["geosite"] = True
 
-    if not extracted_bin or not target_bin.is_file():
-        raise RuntimeError("xray binary not found in the downloaded archive")
+    # All three are required — xray's routing config references
+    # `geoip:private` (and bypass rules can reference `geoip:ru` /
+    # `geosite:*`), so a missing .dat breaks startup with a cryptic
+    # "failed to load GeoIP" error. Better to fail loudly here so the
+    # installer dialog can offer a retry.
+    missing = [k for k, ok in extracted.items() if not ok]
+    if missing:
+        raise RuntimeError(
+            f"Xray archive is incomplete — missing: {', '.join(missing)}. "
+            f"Try again or download manually from GitHub."
+        )
 
     # Unix-likes need the exec bit. Belt-and-braces: set it for owner+group+
     # other so a sudo install for one user, then non-sudo run by another,
