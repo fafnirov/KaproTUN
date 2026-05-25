@@ -1,5 +1,3 @@
-@file:JvmName("ShareUrlParser")
-
 package pro.kaprovpn.android.core
 
 import kotlinx.serialization.json.Json

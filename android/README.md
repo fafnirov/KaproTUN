@@ -9,8 +9,21 @@
 
 ## Статус
 
-🚧 **v0.1.0-dev** — пока только скелет: Compose Hello-world, без VPN-логики.
-Следующие этапы — см. таск-лист в корне репо.
+🚧 **v0.1.0-dev** — Phase 1 закрыта.
+
+**Готово:**
+- Gradle 8.10.2 + AGP 8.7.3 + Kotlin 2.0.21 + Compose BOM 2024.10.01 ✓
+- Compose Hello-world на тёмной янтарной теме ✓
+- `core.ShareUrlParser` — порт `kapro_vpn/core/parser.py`,
+  4 протокола (vless, vmess, trojan, ss) + hysteria2.
+  Permissive splitter — корректно ест кириллицу/пробелы во fragment ✓
+- `core.XrayConfigBuilder` — порт `kapro_vpn/core/xray_config.py`,
+  Xray-JSON со split-routing (geoip:private + domain:rules) ✓
+- 22 unit-теста, `./gradlew :app:testDebugUnitTest` зелёные ✓
+- `default_sites.json` синкается из `../kapro_vpn/data/` build-task'ом ✓
+
+**Дальше (Phase 2):** интеграция libXray (Go-AAR), JNI-мост, VpnService,
+hev-socks5-tunnel для TUN → SOCKS5 mapping. Это RealHard™ часть.
 
 ## Требования
 
