@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import signal
 import socket
+import subprocess
 import sys
 
 from PySide6.QtCore import Qt, QTimer
@@ -13,6 +14,48 @@ from .gui import icons
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
 from .gui.styles import DARK_QSS
+
+# Hidden-window flags for subprocess on Windows (no console flash for
+# the orphan-killer taskkill calls).
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _kill_orphan_helpers() -> None:
+    """Force-kill any leftover xray / tun2socks processes.
+
+    Why this is safe: the single-instance guard runs immediately before
+    this — so if we got this far, we are the ONLY KaproVPN running.
+    Anything else with xray.exe or tun2socks.exe in its image name is
+    an orphan from a previous crashed KaproVPN run, holding file
+    handles that block the next download/start. Kill them.
+
+    Why this matters in practice: on Windows, an open file handle in
+    a running process makes the file un-deletable AND un-overwritable.
+    A fresh download of xray.exe over an orphaned-but-running copy
+    fails with `PermissionError [Errno 13]`, which surfaces as
+    "Не удалось скачать Xray-core" to the user.
+    """
+    # On Unix `pkill` is the closest equivalent. Both calls are
+    # idempotent — they exit non-zero when no matching process exists,
+    # which we swallow.
+    if sys.platform == "win32":
+        for name in ("xray.exe", "tun2socks.exe"):
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", name],
+                    capture_output=True, timeout=3, creationflags=_NO_WINDOW,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+    else:
+        for name in ("xray", "tun2socks"):
+            try:
+                subprocess.run(
+                    ["pkill", "-9", "-x", name],
+                    capture_output=True, timeout=3,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
 
 
 def _clear_stale_system_proxy() -> None:
@@ -96,6 +139,13 @@ def main() -> int:
     # pointing at our dead local port. Clear it before any downloads
     # (xray installer, geoip, updater) try to route through nothing.
     _clear_stale_system_proxy()
+
+    # Also defensive: a crashed previous run may have left orphan
+    # xray.exe / tun2socks.exe processes holding file handles, which
+    # blocks the very next download with PermissionError. Single-
+    # instance guard already proved we're the only KaproVPN, so any
+    # leftover helper process is by definition orphaned. Kill them.
+    _kill_orphan_helpers()
 
     splash = None
     if not start_minimized:

@@ -146,6 +146,44 @@ def fetch_latest_release() -> ReleaseInfo:
     )
 
 
+def _write_with_kill_retry(target, data: bytes) -> None:
+    """Write `data` to `target`. If the first write hits PermissionError
+    (typically because an orphan xray.exe is holding the file handle),
+    force-kill any running xray and retry once.
+
+    Belt-and-suspenders for the main.py startup orphan-killer: covers
+    the rare case where an orphan is spawned AFTER our startup sweep
+    (e.g. our own connection-attempt subprocess failed to terminate
+    cleanly and we re-attempt install on the next connect click).
+    """
+    import subprocess as _sp
+    no_window = getattr(_sp, "CREATE_NO_WINDOW", 0)
+    try:
+        target.write_bytes(data)
+        return
+    except PermissionError:
+        pass
+    # Kill any holder, wait a beat for the handle to actually release,
+    # then retry once. If it still fails, propagate the error so the
+    # caller (download_and_install) wraps it in a user-readable
+    # "Не удалось скачать" + manual-download instructions.
+    if sys.platform == "win32":
+        try:
+            _sp.run(["taskkill", "/F", "/IM", "xray.exe"],
+                    capture_output=True, timeout=3, creationflags=no_window)
+        except (OSError, _sp.SubprocessError):
+            pass
+    else:
+        try:
+            _sp.run(["pkill", "-9", "-x", "xray"],
+                    capture_output=True, timeout=3)
+        except (OSError, _sp.SubprocessError):
+            pass
+    import time
+    time.sleep(0.5)
+    target.write_bytes(data)  # re-raise on second failure
+
+
 def _mirror_url(filename: str) -> str:
     """URL on our own server for the given asset filename.
 
@@ -224,7 +262,7 @@ def download_and_install(progress: ProgressCb = None) -> None:
                 continue
             base_lower = base.lower()
             if base_lower in ("xray", "xray.exe"):
-                target_bin.write_bytes(zf.read(member))
+                _write_with_kill_retry(target_bin, zf.read(member))
                 extracted["bin"] = True
             elif base_lower == "geoip.dat":
                 (install_dir / "geoip.dat").write_bytes(zf.read(member))
