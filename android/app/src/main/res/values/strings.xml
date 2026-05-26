@@ -55,7 +55,17 @@
     <string name="onboarding_path_noprovider_subtitle">Открою сайт kaprovpn.pro с инструкциями и партнёрскими провайдерами</string>
     <string name="configs_add">Добавить</string>
     <string name="configs_delete">Удалить</string>
+    <string name="configs_share">Поделиться</string>
     <string name="configs_active_marker">Активный</string>
+    <string name="share_title">Поделиться сервером</string>
+    <string name="share_qr_content_desc">QR-код с share-URL</string>
+    <string name="share_qr_failed">Не удалось сгенерировать QR — URL слишком длинный.</string>
+    <string name="share_url_label">share-URL</string>
+    <string name="share_copy">Копировать</string>
+    <string name="share_send">Отправить…</string>
+    <string name="share_send_via">Отправить через…</string>
+    <string name="share_copied">URL скопирован</string>
+    <string name="share_close">Закрыть</string>
     <string name="configs_import_subscription">Импорт по подписке</string>
     <string name="configs_add_via_url">Вставить URL вручную</string>
     <string name="configs_add_via_qr">Сканировать QR-код</string>

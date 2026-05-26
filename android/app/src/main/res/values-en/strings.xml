@@ -55,7 +55,17 @@
     <string name="onboarding_path_noprovider_subtitle">Open kaprovpn.pro with instructions and partner providers</string>
     <string name="configs_add">Add</string>
     <string name="configs_delete">Delete</string>
+    <string name="configs_share">Share</string>
     <string name="configs_active_marker">Active</string>
+    <string name="share_title">Share server</string>
+    <string name="share_qr_content_desc">QR code with share-URL</string>
+    <string name="share_qr_failed">Couldn\'t generate QR — the URL is too long.</string>
+    <string name="share_url_label">share-URL</string>
+    <string name="share_copy">Copy</string>
+    <string name="share_send">Send…</string>
+    <string name="share_send_via">Send via…</string>
+    <string name="share_copied">URL copied</string>
+    <string name="share_close">Close</string>
     <string name="configs_import_subscription">Import subscription</string>
     <string name="configs_add_via_url">Paste URL manually</string>
     <string name="configs_add_via_qr">Scan QR code</string>

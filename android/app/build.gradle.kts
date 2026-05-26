@@ -197,5 +197,10 @@ dependencies {
     implementation(libs.androidx.camera.view)
     implementation(libs.mlkit.barcode.scanning)
 
+    // ZXing для генерации QR в ShareConfigDialog (обратная операция к
+    // сканеру выше). Только pure-Java core, без android-extras и
+    // embedded-reader — у нас уже есть свой reader через ML Kit + CameraX.
+    implementation(libs.zxing.core)
+
     testImplementation(libs.junit)
 }

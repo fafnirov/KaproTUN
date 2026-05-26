@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -97,6 +98,9 @@ fun ConfigsScreen(
     var addDialogInitialUrl by remember { mutableStateOf("") }
     var showSubDialog by remember { mutableStateOf(false) }
     var showAddMenu by remember { mutableStateOf(false) }
+    // Non-null когда открыт ShareConfigDialog для какого-то конфига.
+    // Один state, потому что одновременно открыт только один диалог.
+    var shareDialogConfig by remember { mutableStateOf<ProxyConfig?>(null) }
     val snackbarHost = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -205,6 +209,7 @@ fun ConfigsScreen(
                         ActiveServerHero(
                             config = activeConfig,
                             ping = pings[activeConfig.name] ?: AppRepository.PingState.NotMeasured,
+                            onShare = { shareDialogConfig = activeConfig },
                             onDelete = { AppRepository.removeConfig(activeConfig.name) },
                         )
                         Spacer(Modifier.size(8.dp))
@@ -228,6 +233,7 @@ fun ConfigsScreen(
                         config = cfg,
                         ping = pings[cfg.name] ?: AppRepository.PingState.NotMeasured,
                         onSelect = { AppRepository.setActiveConfig(cfg.name) },
+                        onShare = { shareDialogConfig = cfg },
                         onDelete = { AppRepository.removeConfig(cfg.name) },
                     )
                 }
@@ -263,6 +269,13 @@ fun ConfigsScreen(
             },
         )
     }
+
+    shareDialogConfig?.let { cfg ->
+        ShareConfigDialog(
+            config = cfg,
+            onDismiss = { shareDialogConfig = null },
+        )
+    }
 }
 
 /**
@@ -273,6 +286,7 @@ fun ConfigsScreen(
 private fun ActiveServerHero(
     config: ProxyConfig,
     ping: AppRepository.PingState,
+    onShare: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Box(
@@ -302,6 +316,18 @@ private fun ActiveServerHero(
                     fontWeight = FontWeight.Bold,
                 )
                 Spacer(Modifier.weight(1f))
+                IconButton(
+                    onClick = onShare,
+                    modifier = Modifier.size(24.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.Share,
+                        contentDescription = stringResource(R.string.configs_share),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
                 IconButton(
                     onClick = onDelete,
                     modifier = Modifier.size(24.dp),
@@ -342,6 +368,7 @@ private fun CompactConfigRow(
     config: ProxyConfig,
     ping: AppRepository.PingState,
     onSelect: () -> Unit,
+    onShare: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Row(
@@ -375,6 +402,14 @@ private fun CompactConfigRow(
         }
         PingBadge(ping)
         Spacer(Modifier.width(4.dp))
+        IconButton(onClick = onShare, modifier = Modifier.size(32.dp)) {
+            Icon(
+                Icons.Filled.Share,
+                contentDescription = stringResource(R.string.configs_share),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
         IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
             Icon(
                 Icons.Filled.Delete,
