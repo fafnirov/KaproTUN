@@ -99,7 +99,7 @@
     <string name="settings_alwayson_open">Open system VPN settings</string>
     <string name="settings_about_header">About</string>
     <string name="settings_xray_version">Xray-core: %1$s</string>
-    <string name="settings_app_version">KaproVPN Android (Phase 8)</string>
+    <string name="settings_app_version">KaproVPN Android v0.1.0-dev</string>
 
     <!-- VPN service notification -->
     <string name="vpn_notification_channel">KaproVPN status</string>
