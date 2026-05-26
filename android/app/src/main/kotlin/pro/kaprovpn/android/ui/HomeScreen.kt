@@ -56,6 +56,7 @@ fun HomeScreen(
 ) {
     val context = LocalContext.current
     val xrayState by XrayBridge.state.collectAsState()
+    val traffic by XrayBridge.traffic.collectAsState()
     val configs by AppRepository.configs.collectAsState()
     val settings by AppRepository.settings.collectAsState()
     val directSites = remember { Storage.loadDefaultSites(context) }
@@ -80,6 +81,10 @@ fun HomeScreen(
             while (true) {
                 val elapsed = (System.currentTimeMillis() - connectedSince) / 1000
                 uptimeText = formatUptime(elapsed)
+                // Pull-семплинг bandwidth: дёргаем queryStats и пушим snapshot
+                // в XrayBridge.traffic. Раз в секунду — достаточно для UI
+                // (быстрее даёт нервно дрожащие цифры), не нагружает JNI.
+                XrayBridge.sampleTraffic()
                 delay(1000L)
             }
         } else {
@@ -164,9 +169,10 @@ fun HomeScreen(
                 textAlign = TextAlign.Center,
             )
 
-            // Bandwidth убрали с главного экрана — десктоп его тоже не
-            // показывает, а Phase 16 текущие цифры доступны в Logs если
-            // вернёмся к ним.
+            if (xrayState is XrayBridge.State.Connected) {
+                Spacer(Modifier.size(8.dp))
+                TrafficStats(traffic)
+            }
 
             lastError?.let { err ->
                 Text("⚠ $err",
@@ -278,4 +284,51 @@ private fun formatUptime(seconds: Long): String {
     val s = seconds % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s)
     else "%d:%02d".format(m, s)
+}
+
+/**
+ * Две строки `↓ 12.4 MB · 1.2 MB/с` / `↑ 480 KB · 84 KB/с` — total за
+ * сессию и текущая скорость для downlink/uplink. Цифры идут из libv2ray
+ * через [XrayBridge.sampleTraffic] (опрос раз в секунду).
+ */
+@Composable
+private fun TrafficStats(snapshot: XrayBridge.TrafficSnapshot) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = stringResource(
+                R.string.home_traffic_down,
+                formatBytes(snapshot.downlinkTotal),
+                formatBytes(snapshot.downlinkBps),
+            ),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.size(2.dp))
+        Text(
+            text = stringResource(
+                R.string.home_traffic_up,
+                formatBytes(snapshot.uplinkTotal),
+                formatBytes(snapshot.uplinkBps),
+            ),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * Decimal SI-форматирование: 534 → "534 B", 12400 → "12.4 KB",
+ * 1_240_000 → "1.2 MB", 1_240_000_000 → "1.24 GB".
+ *
+ * Decimal а не binary потому что у Android в системных индикаторах сети,
+ * data usage и Files точно такой же стиль — пользователь привык.
+ */
+internal fun formatBytes(bytes: Long): String {
+    val b = bytes.coerceAtLeast(0L)
+    return when {
+        b < 1_000L -> "$b B"
+        b < 1_000_000L -> "%.1f KB".format(b / 1_000.0)
+        b < 1_000_000_000L -> "%.1f MB".format(b / 1_000_000.0)
+        else -> "%.2f GB".format(b / 1_000_000_000.0)
+    }
 }

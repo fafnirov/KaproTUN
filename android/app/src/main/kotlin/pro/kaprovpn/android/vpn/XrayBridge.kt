@@ -47,12 +47,21 @@ object XrayBridge {
     private val _logs = MutableSharedFlow<LogLine>(replay = 256, extraBufferCapacity = 256)
     val logs: SharedFlow<LogLine> = _logs.asSharedFlow()
 
+    private val _traffic = MutableStateFlow(TrafficSnapshot.ZERO)
+    /**
+     * Bandwidth-снепшот текущей сессии: ↑↓ totals + текущая скорость.
+     * Обновляется только когда UI зовёт [sampleTraffic] (опрос pull-model
+     * раз в секунду из HomeScreen). На [start] сбрасывается в ZERO.
+     */
+    val traffic: StateFlow<TrafficSnapshot> = _traffic.asStateFlow()
+
     /** Сериализует start/stop — два паралельных start'а сломали бы порт SOCKS5. */
     private val lifecycleMutex = Mutex()
 
     @Volatile private var controller: CoreController? = null
     @Volatile private var initialized: Boolean = false
     @Volatile private var envDir: File? = null
+    @Volatile private var lastSampleAt: Long = 0L
 
     // -- public API -----------------------------------------------------------
 
@@ -108,6 +117,8 @@ object XrayBridge {
             throw ConnectionException("Уже подключено — сначала отключись")
         }
         _state.value = State.Starting
+        _traffic.value = TrafficSnapshot.ZERO
+        lastSampleAt = 0L
         withContext(Dispatchers.IO) {
             try {
                 val c = Libv2ray.newCoreController(callbackHandler)
@@ -145,11 +156,47 @@ object XrayBridge {
         }
     }
 
-    /** Per-outbound bandwidth counter, в байтах за всё время этой сессии. */
+    /**
+     * Per-outbound bandwidth counter из libv2ray. **ВНИМАНИЕ:** в
+     * AndroidLibXrayLite каждый вызов atomic-swap'ает счётчик в 0 — то есть
+     * возвращает дельту с предыдущего вызова, а не running total. UI код
+     * должен сам аккумулировать (см. [sampleTraffic]).
+     */
     fun queryStats(tag: String, link: String = "uplink"): Long = try {
         controller?.queryStats(tag, link) ?: 0L
     } catch (_: Throwable) {
         0L
+    }
+
+    /**
+     * Опросить libv2ray, посчитать speed относительно прошлого вызова,
+     * обновить [traffic]. Зовётся UI'ем ~раз в секунду пока сессия активна.
+     *
+     * `proxy` — outbound-tag из [XrayConfigBuilder] (см. строки
+     * `put("tag", "proxy")` в каждом proto-конвертере). Считаем только его
+     * — direct/block нам неинтересны, пользователю важна цифра «через VPN».
+     */
+    fun sampleTraffic() {
+        val c = controller
+        if (c == null || !c.isRunning) {
+            // Не зануляем traffic — пусть UI покажет последний snapshot после
+            // disconnect. На следующем start() он сбрасывается в ZERO явно.
+            return
+        }
+        val now = System.currentTimeMillis()
+        val deltaUp = queryStats("proxy", "uplink").coerceAtLeast(0L)
+        val deltaDown = queryStats("proxy", "downlink").coerceAtLeast(0L)
+        val prev = _traffic.value
+        val intervalMs = if (lastSampleAt == 0L) 1000L else (now - lastSampleAt).coerceAtLeast(1L)
+        val uplinkBps = deltaUp * 1000L / intervalMs
+        val downlinkBps = deltaDown * 1000L / intervalMs
+        lastSampleAt = now
+        _traffic.value = TrafficSnapshot(
+            uplinkTotal = prev.uplinkTotal + deltaUp,
+            downlinkTotal = prev.downlinkTotal + deltaDown,
+            uplinkBps = uplinkBps,
+            downlinkBps = downlinkBps,
+        )
     }
 
     /**
@@ -180,6 +227,22 @@ object XrayBridge {
     }
 
     data class LogLine(val severity: Int, val message: String)
+
+    /**
+     * Bandwidth-замер сессии. `*Total` — всё что прошло через outbound `proxy`
+     * с момента последнего [start]. `*Bps` — байты в секунду за последний
+     * интервал между [sampleTraffic]-вызовами (≈1с).
+     */
+    data class TrafficSnapshot(
+        val uplinkTotal: Long,
+        val downlinkTotal: Long,
+        val uplinkBps: Long,
+        val downlinkBps: Long,
+    ) {
+        companion object {
+            val ZERO = TrafficSnapshot(0L, 0L, 0L, 0L)
+        }
+    }
 
     class ConnectionException(message: String, cause: Throwable? = null) :
         RuntimeException(message, cause)
