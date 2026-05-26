@@ -28,4 +28,20 @@ data class AppSettings(
     /** Включён ли auto-refresh подписки. Default — on, чтобы новые
      *  пользователи сразу получали свежие конфиги без ручного re-import. */
     val subscriptionAutorefresh: Boolean = true,
+
+    /**
+     * Per-app split-tunneling: пакеты, которые НЕ ходят через VPN. Применяется
+     * через `VpnService.Builder.addDisallowedApplication`. Удобно для:
+     *  - банковских клиентов, которые блочат VPN-IP при логине;
+     *  - мессенджеров вроде Telegram, чей anti-DPI работает лучше «прямого»
+     *    подключения чем через наш xray;
+     *  - downloader'ов где не хочется лишних мегабайт через прокси.
+     *
+     * Изменение применяется на следующем connect (системе нельзя поменять
+     * правила routing'а на живом TUN, надо пересоздавать interface).
+     *
+     * Хранится как List, а не Set, для стабильной serialization order'а;
+     * на чтении превращаем в Set.
+     */
+    val excludedPackages: List<String> = emptyList(),
 )

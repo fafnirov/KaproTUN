@@ -102,6 +102,16 @@
     <string name="settings_autoconnect_subtitle">Подключаться к активному серверу как только откроется приложение</string>
     <string name="settings_subrefresh_title">Автообновление подписки</string>
     <string name="settings_subrefresh_subtitle">Раз в 12 часов перетягивать свежий список с твоей последней subscription-ссылки</string>
+    <string name="settings_excluded_apps_title">Приложения мимо VPN</string>
+    <string name="settings_excluded_apps_hint">Выбранные приложения ходят в интернет напрямую, минуя туннель. Полезно для банков (блокируют VPN-IP) и Telegram (свой anti-DPI работает лучше прямого подключения).</string>
+    <string name="settings_excluded_apps_none">Ни одного — весь трафик через VPN</string>
+    <string name="settings_excluded_apps_count">Исключено приложений: %1$d</string>
+    <string name="excluded_apps_title">Приложения мимо VPN</string>
+    <string name="excluded_apps_hint">Изменения применятся при следующем подключении.</string>
+    <string name="excluded_apps_search">Поиск по имени или package</string>
+    <string name="excluded_apps_search_clear">Очистить поиск</string>
+    <string name="excluded_apps_empty">Ничего не найдено</string>
+    <string name="back">Назад</string>
     <string name="settings_alwayson_title">Always-on VPN (kill-switch)</string>
     <string name="settings_alwayson_subtitle">В системных настройках Android включи «Always-on VPN» и «Block connections without VPN». Тогда KaproVPN будет автостартовать на загрузке и блокировать весь трафик если туннель упал — никаких leak\'ов на реальный IP.</string>
     <string name="settings_alwayson_open">Открыть системные настройки VPN</string>

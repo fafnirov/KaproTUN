@@ -34,6 +34,10 @@ fun AppNav(
     onDisconnect: () -> Unit,
 ) {
     var selectedTab by remember { mutableStateOf<Tab>(Tab.Home) }
+    // Sub-screen flag for the Settings tab. We don't pull in androidx.navigation
+    // for one nested screen — a single boolean here keeps lifecycle and back
+    // dispatch trivial. Adds up later when we have several deep screens.
+    var settingsSubScreen by remember { mutableStateOf<SettingsSubScreen>(SettingsSubScreen.Root) }
 
     Scaffold(
         bottomBar = {
@@ -60,9 +64,29 @@ fun AppNav(
             )
             Tab.Configs -> ConfigsScreen(modifier = modifier)
             Tab.Logs -> LogsScreen(modifier = modifier)
-            Tab.Settings -> SettingsScreen(modifier = modifier)
+            Tab.Settings -> {
+                when (settingsSubScreen) {
+                    SettingsSubScreen.Root -> SettingsScreen(
+                        modifier = modifier,
+                        onOpenExcludedApps = {
+                            settingsSubScreen = SettingsSubScreen.ExcludedApps
+                        },
+                    )
+                    SettingsSubScreen.ExcludedApps -> ExcludedAppsScreen(
+                        modifier = modifier,
+                        onBack = { settingsSubScreen = SettingsSubScreen.Root },
+                    )
+                }
+            }
         }
     }
+}
+
+/** Settings has one-deep nested screens. Adding more later? Reach for
+ *  androidx.navigation. For now: simple sealed list. */
+private sealed class SettingsSubScreen {
+    object Root : SettingsSubScreen()
+    object ExcludedApps : SettingsSubScreen()
 }
 
 /** Четыре вкладки. labelRes — индирекция через R.string чтобы получить

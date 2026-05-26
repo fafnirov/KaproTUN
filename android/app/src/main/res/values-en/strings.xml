@@ -102,6 +102,16 @@
     <string name="settings_autoconnect_subtitle">Connect to the active server as soon as the app opens</string>
     <string name="settings_subrefresh_title">Auto-refresh subscription</string>
     <string name="settings_subrefresh_subtitle">Re-pull the server list from your latest subscription URL every 12 hours</string>
+    <string name="settings_excluded_apps_title">Apps bypassing VPN</string>
+    <string name="settings_excluded_apps_hint">Selected apps reach the internet directly, skipping the tunnel. Useful for banking apps (which block VPN exits) and Telegram (its anti-DPI works better over a direct connection).</string>
+    <string name="settings_excluded_apps_none">None — all traffic through VPN</string>
+    <string name="settings_excluded_apps_count">Excluded apps: %1$d</string>
+    <string name="excluded_apps_title">Apps bypassing VPN</string>
+    <string name="excluded_apps_hint">Changes apply on the next connection.</string>
+    <string name="excluded_apps_search">Search by name or package</string>
+    <string name="excluded_apps_search_clear">Clear search</string>
+    <string name="excluded_apps_empty">Nothing matches</string>
+    <string name="back">Back</string>
     <string name="settings_alwayson_title">Always-on VPN (kill-switch)</string>
     <string name="settings_alwayson_subtitle">In Android\'s system settings, enable “Always-on VPN” and “Block connections without VPN”. KaproVPN will then auto-start on boot and block all traffic if the tunnel drops — no leaks to your real IP.</string>
     <string name="settings_alwayson_open">Open system VPN settings</string>

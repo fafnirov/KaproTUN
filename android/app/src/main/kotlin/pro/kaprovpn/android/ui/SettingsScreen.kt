@@ -17,6 +17,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Shield
@@ -57,7 +59,10 @@ import pro.kaprovpn.android.vpn.XrayBridge
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(modifier: Modifier = Modifier) {
+fun SettingsScreen(
+    modifier: Modifier = Modifier,
+    onOpenExcludedApps: () -> Unit = {},
+) {
     val settings by AppRepository.settings.collectAsState()
     val coreVersion = remember { XrayBridge.coreVersion() }
 
@@ -116,6 +121,27 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                     subtitle = stringResource(R.string.settings_subrefresh_subtitle),
                     checked = settings.subscriptionAutorefresh,
                     onCheckedChange = { AppRepository.setSubscriptionAutorefresh(it) },
+                )
+            }
+
+            // ── Per-app split tunneling ──
+            // Card-as-link: shows the current excluded count and opens
+            // ExcludedAppsScreen on tap. We don't list the apps inline —
+            // browsing apps is its own screen with search + icons.
+            SectionCard(
+                icon = Icons.Filled.Apps,
+                title = stringResource(R.string.settings_excluded_apps_title),
+                hint = stringResource(R.string.settings_excluded_apps_hint),
+            ) {
+                ChevronRow(
+                    title = if (settings.excludedPackages.isEmpty())
+                        stringResource(R.string.settings_excluded_apps_none)
+                    else
+                        stringResource(
+                            R.string.settings_excluded_apps_count,
+                            settings.excludedPackages.size,
+                        ),
+                    onClick = onOpenExcludedApps,
                 )
             }
 
@@ -265,5 +291,33 @@ private fun ToggleRow(
         }
         Spacer(Modifier.width(12.dp))
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/** Row that acts as a link into a nested screen — title on the left, > on
+ *  the right. We use this instead of a button for parity with iOS-style
+ *  "deep" preferences rows. */
+@Composable
+private fun ChevronRow(
+    title: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.weight(1f),
+        )
+        Icon(
+            imageVector = Icons.Filled.ChevronRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

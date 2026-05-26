@@ -320,6 +320,27 @@ class KaproVpnService : VpnService() {
             Log.w(TAG, "addDisallowedApplication failed", e)
         }
 
+        // Per-app split tunneling. Skip our own package (it's already added
+        // above) and silently skip uninstalled / unknown packages — happens
+        // when the user excluded an app and then uninstalled it before
+        // reconnecting. NameNotFoundException would refuse to establish()
+        // the whole TUN otherwise.
+        val excluded = AppRepository.excludedPackages() - packageName
+        var excludedApplied = 0
+        for (pkg in excluded) {
+            try {
+                builder.addDisallowedApplication(pkg)
+                excludedApplied++
+            } catch (_: android.content.pm.PackageManager.NameNotFoundException) {
+                Log.w(TAG, "excluded package not installed, skipping: $pkg")
+            } catch (e: Throwable) {
+                Log.w(TAG, "addDisallowedApplication($pkg) failed", e)
+            }
+        }
+        if (excludedApplied > 0) {
+            Log.i(TAG, "per-app split: $excludedApplied package(s) bypass the VPN")
+        }
+
         return builder.establish()
             ?: throw IllegalStateException("VpnService.Builder.establish() вернул null")
     }

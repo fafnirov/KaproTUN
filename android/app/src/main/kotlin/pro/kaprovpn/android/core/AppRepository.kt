@@ -148,6 +148,18 @@ object AppRepository {
         updateSettings { it.copy(subscriptionAutorefresh = enabled) }
     }
 
+    /** Per-app VPN: packages that bypass the tunnel. Order is preserved on
+     *  disk for stable diffs; callers usually treat the result as a Set. */
+    fun excludedPackages(): Set<String> =
+        _settings.value.excludedPackages.toSet()
+
+    fun setExcludedPackages(packages: Collection<String>) {
+        // dedupe + sort so settings.json is deterministic regardless of
+        // which order the UI passed packages in.
+        val normalized = packages.toSortedSet().toList()
+        updateSettings { it.copy(excludedPackages = normalized) }
+    }
+
     /**
      * Применить мутацию к настройкам + сохранить + опубликовать в Flow.
      * Single-shot — каждая мутация перезаписывает settings.json целиком,
