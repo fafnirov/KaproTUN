@@ -18,6 +18,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -370,10 +372,16 @@ private fun OnboardingEmptyState(
     onAddShareUrl: () -> Unit,
 ) {
     val context = LocalContext.current
+    // verticalScroll so the last card stays reachable on short screens (and
+    // so we can leave bottom padding under the floating "Добавить" button
+    // without clipping content). 96dp = ExtendedFAB height + comfortable
+    // gap so the FAB never overlaps the third onboarding card.
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 16.dp),
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 24.dp)
+            .padding(top = 16.dp, bottom = 96.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Spacer(Modifier.size(8.dp))
