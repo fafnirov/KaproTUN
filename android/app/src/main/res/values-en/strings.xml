@@ -22,6 +22,8 @@
     <string name="home_connecting">CONNECTING…</string>
     <string name="home_footer">%1$d RU sites bypass the VPN · DNS: %2$s</string>
     <string name="home_config_error">Config generation failed: %1$s</string>
+    <string name="home_traffic_up">↑ %1$s · %2$s/s</string>
+    <string name="home_traffic_down">↓ %1$s · %2$s/s</string>
 
     <!-- Connection state -->
     <string name="state_idle">disconnected</string>

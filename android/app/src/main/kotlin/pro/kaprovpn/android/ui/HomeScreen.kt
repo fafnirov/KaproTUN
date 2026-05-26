@@ -19,11 +19,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -62,6 +64,36 @@ fun HomeScreen(
     val isBusy = xrayState is XrayBridge.State.Starting || xrayState is XrayBridge.State.Stopping
     var lastError by remember { mutableStateOf<String?>(null) }
 
+    // Bandwidth-стата опрашивается раз в секунду пока Connected.
+    // totalUp/Down — счётчик с момента старта сессии (xray accumulates
+    // его внутри); upRate/downRate — delta за последнюю секунду.
+    // На disconnect LaunchedEffect ребекаф'ится (key=xrayState),
+    // переменные ресетятся.
+    var totalUp by remember { mutableStateOf(0L) }
+    var totalDown by remember { mutableStateOf(0L) }
+    var upRate by remember { mutableStateOf(0L) }
+    var downRate by remember { mutableStateOf(0L) }
+
+    LaunchedEffect(xrayState) {
+        if (xrayState !is XrayBridge.State.Connected) {
+            totalUp = 0; totalDown = 0; upRate = 0; downRate = 0
+            return@LaunchedEffect
+        }
+        var prevUp = XrayBridge.queryStats("proxy", "uplink")
+        var prevDown = XrayBridge.queryStats("proxy", "downlink")
+        while (true) {
+            delay(1000L)
+            val nowUp = XrayBridge.queryStats("proxy", "uplink")
+            val nowDown = XrayBridge.queryStats("proxy", "downlink")
+            upRate = (nowUp - prevUp).coerceAtLeast(0)
+            downRate = (nowDown - prevDown).coerceAtLeast(0)
+            totalUp = nowUp
+            totalDown = nowDown
+            prevUp = nowUp
+            prevDown = nowDown
+        }
+    }
+
     Scaffold(
         modifier = modifier,
         topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) },
@@ -95,6 +127,21 @@ fun HomeScreen(
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
+
+            if (isConnected) {
+                Text(
+                    text = stringResource(R.string.home_traffic_up,
+                        formatBytes(totalUp), formatBytes(upRate)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = stringResource(R.string.home_traffic_down,
+                        formatBytes(totalDown), formatBytes(downRate)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
             lastError?.let { err ->
                 Text("⚠ $err",
@@ -225,4 +272,15 @@ private fun stateLabel(s: XrayBridge.State): String = when (s) {
     XrayBridge.State.Connected -> stringResource(R.string.state_connected)
     XrayBridge.State.Stopping -> stringResource(R.string.state_disconnecting)
     is XrayBridge.State.Failed -> stringResource(R.string.state_error, s.reason)
+}
+
+/** Форматирование байт в human-readable. KB/MB/GB c одним знаком после
+ *  точки. Локаль-aware форматтер использует системные separators (точка
+ *  vs запятая) — но для compactности форсим точку. */
+private fun formatBytes(bytes: Long): String = when {
+    bytes < 1024L -> "$bytes B"
+    bytes < 1024L * 1024 -> "%.1f KB".format(java.util.Locale.US, bytes / 1024.0)
+    bytes < 1024L * 1024 * 1024 -> "%.1f MB".format(java.util.Locale.US,
+        bytes / (1024.0 * 1024))
+    else -> "%.2f GB".format(java.util.Locale.US, bytes / (1024.0 * 1024 * 1024))
 }

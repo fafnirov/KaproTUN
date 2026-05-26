@@ -22,6 +22,8 @@
     <string name="home_connecting">ПОДКЛЮЧЕНИЕ…</string>
     <string name="home_footer">%1$d RU-сайтов идут напрямую · DNS: %2$s</string>
     <string name="home_config_error">Ошибка генерации конфига: %1$s</string>
+    <string name="home_traffic_up">↑ %1$s · %2$s/с</string>
+    <string name="home_traffic_down">↓ %1$s · %2$s/с</string>
 
     <!-- Connection state -->
     <string name="state_idle">не подключено</string>
