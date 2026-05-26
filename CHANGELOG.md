@@ -14,7 +14,7 @@ Android и Desktop версии нумеруются отдельно — это
 
 # Android
 
-## v0.1.0 (предстоящий) — первый публичный Android-клиент
+## v0.1.0 — первый публичный Android-клиент (26 мая 2026)
 
 Первый Android-релиз KaproVPN. Нативный Kotlin+Compose поверх Xray-core
 (через libv2ray) + системного VpnService + hev-socks5-tunnel как

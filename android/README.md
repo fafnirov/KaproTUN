@@ -12,8 +12,8 @@ network_routes, killswitch, autostart) сюда не идёт.
 
 ## Статус
 
-🚧 **v0.1.0-dev** — pre-release, тестируется на эмуляторе. Готовится к
-первому signed-релизу для раздачи знакомым / в Telegram.
+✅ **v0.1.0** — первый публичный signed-релиз. Подписанные ABI-APK
+доступны в [GitHub Releases](https://github.com/fafnirov/KaproVPN/releases/tag/android-v0.1.0).
 
 ## Что умеет
 

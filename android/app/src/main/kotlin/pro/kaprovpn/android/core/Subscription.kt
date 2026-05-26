@@ -36,7 +36,7 @@ object Subscription {
     )
 
     private const val USER_AGENT =
-        "KaproVPN-Android/0.1.0-dev (Android; +https://github.com/fafnirov/KaproVPN)"
+        "KaproVPN-Android/0.1.0 (Android; +https://github.com/fafnirov/KaproVPN)"
 
     private const val CONNECT_TIMEOUT_MS = 10_000
     private const val READ_TIMEOUT_MS = 20_000
