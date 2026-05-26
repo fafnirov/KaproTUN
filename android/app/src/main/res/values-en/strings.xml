@@ -106,4 +106,10 @@
     <string name="vpn_notification_connecting">KaproVPN — connecting…</string>
     <string name="vpn_notification_connected">KaproVPN — connected</string>
     <string name="vpn_notification_disconnect">Disconnect</string>
+
+    <!-- Quick Settings tile -->
+    <string name="tile_subtitle_idle">%1$s · tap to connect</string>
+    <string name="tile_subtitle_starting">connecting…</string>
+    <string name="tile_subtitle_failed">error — open the app</string>
+    <string name="tile_subtitle_no_config">add a server first</string>
 </resources>

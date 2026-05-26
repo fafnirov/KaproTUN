@@ -46,6 +46,23 @@
             </intent-filter>
         </receiver>
 
+        <!-- Quick Settings tile — пользователь добавляет её через системный
+             UI шторки (edit tiles → drag KaproVPN). После этого один тап
+             toggle'ит VPN. -->
+        <service
+            android:name=".vpn.VpnTileService"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVE_TILE"
+                android:value="true" />
+        </service>
+
         <service
             android:name=".vpn.KaproVpnService"
             android:exported="false"

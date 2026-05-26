@@ -106,4 +106,10 @@
     <string name="vpn_notification_connecting">KaproVPN — подключение…</string>
     <string name="vpn_notification_connected">KaproVPN — подключено</string>
     <string name="vpn_notification_disconnect">Отключить</string>
+
+    <!-- Quick Settings tile -->
+    <string name="tile_subtitle_idle">%1$s · нажми чтобы подключить</string>
+    <string name="tile_subtitle_starting">подключение…</string>
+    <string name="tile_subtitle_failed">ошибка — открой приложение</string>
+    <string name="tile_subtitle_no_config">сначала добавь сервер</string>
 </resources>
