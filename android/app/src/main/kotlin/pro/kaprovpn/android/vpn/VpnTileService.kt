@@ -126,7 +126,18 @@ class VpnTileService : TileService() {
         val state = XrayBridge.state.value
         val activeConfig = AppRepository.activeConfig()
 
-        tile.icon = Icon.createWithResource(this, R.mipmap.ic_launcher)
+        // Icon follows the connection state: grey-K for idle, yellow-K
+        // (animated by Tile.STATE_UNAVAILABLE itself is impossible — we use
+        // the connecting drawable as a static "in-progress" hint), orange-K
+        // for connected. System still tints based on Tile.state, but the
+        // silhouette difference gives users an at-a-glance read.
+        val iconRes = when {
+            state is XrayBridge.State.Connected -> R.drawable.tile_connected
+            state is XrayBridge.State.Starting ||
+                state is XrayBridge.State.Stopping -> R.drawable.tile_connecting
+            else -> R.drawable.tile_idle
+        }
+        tile.icon = Icon.createWithResource(this, iconRes)
         tile.label = getString(R.string.app_name)
         tile.state = when {
             activeConfig == null -> Tile.STATE_UNAVAILABLE

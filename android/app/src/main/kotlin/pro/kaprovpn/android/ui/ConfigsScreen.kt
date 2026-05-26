@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,6 +54,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -375,6 +377,17 @@ private fun OnboardingEmptyState(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Spacer(Modifier.size(8.dp))
+        // Hero illustration — the orange split-route graphic from art/.
+        // Mirrors what the Direct-sites / VPN bypass logic actually does, so
+        // it doubles as visual shorthand for the feature. Sized to span the
+        // full content width; height is intrinsic (PNG is ~3:1).
+        Image(
+            painter = painterResource(id = R.drawable.hero_split_routing),
+            contentDescription = null,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+        )
         Text(
             stringResource(R.string.configs_empty_title),
             style = MaterialTheme.typography.headlineSmall,

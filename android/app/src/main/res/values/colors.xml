@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#F59E0B</color>
+    <!-- Background of the adaptive launcher icon. The foreground bitmap
+         carries an orange K-with-ring on transparent, so we want the
+         background to be a deep neutral so the orange reads cleanly on any
+         launcher mask (circle/squircle/square). #0E0E0E is the same near-
+         black we use behind the Home screen. -->
+    <color name="ic_launcher_background">#0E0E0E</color>
 </resources>

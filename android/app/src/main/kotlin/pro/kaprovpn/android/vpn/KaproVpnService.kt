@@ -383,7 +383,13 @@ class KaproVpnService : VpnService() {
         }
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            // setSmallIcon REQUIRES a single-colour alpha-only drawable
+            // (Android tints it from the channel/theme). The K-silhouette in
+            // ic_stat_notification is produced from tray_idle-source.png by
+            // scripts/generate_android_assets.py — colour stripped, alpha
+            // preserved. Using the full @mipmap/ic_launcher here would show
+            // as a flat grey square on Android 5+.
+            .setSmallIcon(R.drawable.ic_stat_notification)
             .setContentTitle(getString(titleRes))
             .setContentText(text)
             .setOngoing(true)
