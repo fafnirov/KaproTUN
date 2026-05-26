@@ -8,9 +8,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import pro.kaprovpn.android.core.AppRepository
 import pro.kaprovpn.android.core.DnsOption
 import pro.kaprovpn.android.ui.theme.KaproVpnTheme
 import pro.kaprovpn.android.vpn.KaproVpnService
+import pro.kaprovpn.android.vpn.XrayBridge
 
 class MainActivity : ComponentActivity() {
 
@@ -81,5 +83,29 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+        // Только при холодном старте — savedInstanceState == null значит
+        // Activity не пересоздаётся (rotation / back-to-foreground после
+        // process kill). Иначе пользователь словил бы reconnect на каждом
+        // повороте экрана.
+        if (savedInstanceState == null) maybeAutoconnect()
+    }
+
+    /**
+     * Если у пользователя включено «Автоподключение при запуске» и есть
+     * активный конфиг — стартуем туннель сразу. Skip:
+     *   - если toggle off,
+     *   - если active config не задан (новая установка),
+     *   - если VPN уже подключён (race с Always-on или предыдущим запуском).
+     *
+     * Permission flow — общий [connectWith], system-диалог покажется только
+     * при первом autoconnect после установки.
+     */
+    private fun maybeAutoconnect() {
+        val settings = AppRepository.settings.value
+        if (!settings.autoconnectOnLaunch) return
+        if (XrayBridge.state.value is XrayBridge.State.Connected) return
+        val built = AppRepository.buildActiveConfigJson() ?: return
+        val (json, name) = built
+        connectWith(json, name, AppRepository.dnsOption())
     }
 }

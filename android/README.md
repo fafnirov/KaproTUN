@@ -239,6 +239,20 @@ cd android
 debug-key'ем. Установится только на чистый телефон, апдейт поверх
 release с другой подписью не пройдёт.
 
+**Phase 13 — Autoconnect on launch + boot (готово):**
+- Toggle «Автоподключение при запуске» из Phase 5 наконец завязан
+  на действия:
+  * **App launch** — `MainActivity.onCreate` (только если
+    `savedInstanceState == null`, т.е. cold start) зовёт
+    `connectWith()` если toggle on, активный конфиг есть и VPN
+    ещё не подключён ✓
+  * **Device boot** — `vpn.BootReceiver` ловит `BOOT_COMPLETED`,
+    стартует сервис через null-intent path (Phase 10 reuse).
+    Skip если VPN-permission revoked или активного конфига нет ✓
+- `RECEIVE_BOOT_COMPLETED` permission + receiver-блок в манифесте ✓
+- Безопасно сосуществует с Always-on VPN: race решается через
+  `XrayBridge.state` check + идемпотентность foreground-сервиса ✓
+
 ## Требования
 
 - Android Studio Ladybug (2024.2) или новее
