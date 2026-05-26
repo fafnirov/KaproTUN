@@ -56,6 +56,9 @@
     <string name="configs_add">Добавить</string>
     <string name="configs_delete">Удалить</string>
     <string name="configs_share">Поделиться</string>
+    <string name="configs_edit">Редактировать</string>
+    <string name="edit_dialog_title">Редактировать сервер</string>
+    <string name="edit_dialog_save">Сохранить</string>
     <string name="configs_active_marker">Активный</string>
     <string name="share_title">Поделиться сервером</string>
     <string name="share_qr_content_desc">QR-код с share-URL</string>

@@ -90,6 +90,41 @@ object AppRepository {
         if (_settings.value.activeConfigName == name) {
             updateSettings { it.copy(activeConfigName = null) }
         }
+        // Очищаем pings для удалённого имени.
+        _pings.update { it - name }
+    }
+
+    /**
+     * Атомарная замена конфига `oldName` на [newConfig]. Используется
+     * Edit-диалогом в [ui.ConfigsScreen]. Семантика:
+     *   - если `oldName == newConfig.name` → in-place update (URL/protocol
+     *     обновились, имя то же);
+     *   - если `oldName != newConfig.name` → старая запись удаляется, новая
+     *     добавляется, active reference переезжает если затронут;
+     *   - конфликт: если в списке УЖЕ есть запись с newConfig.name (а это
+     *     не oldName) — она перезаписывается. Лучше потерять дубликат, чем
+     *     допустить два сервера с одинаковым именем в списке.
+     *   - ping cache для oldName очищается (новое имя — новый замер).
+     *
+     * Все три мутации (configs / active / pings) идут одним блоком, чтобы UI
+     * не увидел промежуточное состояние с дублирующимися именами или повисшим
+     * old name в active.
+     */
+    fun updateConfig(oldName: String, newConfig: ProxyConfig) {
+        // Убираем и старое имя (если оно меняется), и любой существующий
+        // дубликат под новым именем — потом добавляем единственную запись.
+        val withoutBoth = _configs.value
+            .filterNot { it.name == oldName || it.name == newConfig.name }
+        val updated = withoutBoth + newConfig
+        _configs.value = updated
+        Storage.saveConfigs(ctx, updated)
+
+        if (_settings.value.activeConfigName == oldName && oldName != newConfig.name) {
+            updateSettings { it.copy(activeConfigName = newConfig.name) }
+        }
+        if (oldName != newConfig.name) {
+            _pings.update { it - oldName }
+        }
     }
 
     fun setActiveConfig(name: String?) {

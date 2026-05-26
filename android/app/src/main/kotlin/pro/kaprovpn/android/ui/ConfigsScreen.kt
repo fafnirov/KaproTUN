@@ -101,6 +101,10 @@ fun ConfigsScreen(
     // Non-null когда открыт ShareConfigDialog для какого-то конфига.
     // Один state, потому что одновременно открыт только один диалог.
     var shareDialogConfig by remember { mutableStateOf<ProxyConfig?>(null) }
+    // Non-null когда открыт Edit-вариант AddConfigDialog. Храним
+    // оригинальный config (а не имя) — нужен и для pre-fill, и для
+    // вычисления oldName при save.
+    var editDialogConfig by remember { mutableStateOf<ProxyConfig?>(null) }
     val snackbarHost = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -209,6 +213,7 @@ fun ConfigsScreen(
                         ActiveServerHero(
                             config = activeConfig,
                             ping = pings[activeConfig.name] ?: AppRepository.PingState.NotMeasured,
+                            onEdit = { editDialogConfig = activeConfig },
                             onShare = { shareDialogConfig = activeConfig },
                             onDelete = { AppRepository.removeConfig(activeConfig.name) },
                         )
@@ -233,6 +238,7 @@ fun ConfigsScreen(
                         config = cfg,
                         ping = pings[cfg.name] ?: AppRepository.PingState.NotMeasured,
                         onSelect = { AppRepository.setActiveConfig(cfg.name) },
+                        onEdit = { editDialogConfig = cfg },
                         onShare = { shareDialogConfig = cfg },
                         onDelete = { AppRepository.removeConfig(cfg.name) },
                     )
@@ -276,6 +282,21 @@ fun ConfigsScreen(
             onDismiss = { shareDialogConfig = null },
         )
     }
+
+    editDialogConfig?.let { existing ->
+        val oldName = existing.name
+        AddConfigDialog(
+            initialUrl = existing.rawUrl,
+            initialName = existing.name,
+            titleRes = R.string.edit_dialog_title,
+            saveRes = R.string.edit_dialog_save,
+            onDismiss = { editDialogConfig = null },
+            onSave = { updated ->
+                AppRepository.updateConfig(oldName, updated)
+                editDialogConfig = null
+            },
+        )
+    }
 }
 
 /**
@@ -286,6 +307,7 @@ fun ConfigsScreen(
 private fun ActiveServerHero(
     config: ProxyConfig,
     ping: AppRepository.PingState,
+    onEdit: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -316,6 +338,18 @@ private fun ActiveServerHero(
                     fontWeight = FontWeight.Bold,
                 )
                 Spacer(Modifier.weight(1f))
+                IconButton(
+                    onClick = onEdit,
+                    modifier = Modifier.size(24.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.Edit,
+                        contentDescription = stringResource(R.string.configs_edit),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
                 IconButton(
                     onClick = onShare,
                     modifier = Modifier.size(24.dp),
@@ -368,6 +402,7 @@ private fun CompactConfigRow(
     config: ProxyConfig,
     ping: AppRepository.PingState,
     onSelect: () -> Unit,
+    onEdit: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -402,6 +437,14 @@ private fun CompactConfigRow(
         }
         PingBadge(ping)
         Spacer(Modifier.width(4.dp))
+        IconButton(onClick = onEdit, modifier = Modifier.size(32.dp)) {
+            Icon(
+                Icons.Filled.Edit,
+                contentDescription = stringResource(R.string.configs_edit),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
         IconButton(onClick = onShare, modifier = Modifier.size(32.dp)) {
             Icon(
                 Icons.Filled.Share,
@@ -551,20 +594,24 @@ private fun OnboardingPathCard(
 @Composable
 private fun AddConfigDialog(
     initialUrl: String = "",
+    initialName: String = "",
+    @androidx.annotation.StringRes titleRes: Int = R.string.add_dialog_title,
+    @androidx.annotation.StringRes saveRes: Int = R.string.add_dialog_save,
     onDismiss: () -> Unit,
     onSave: (ProxyConfig) -> Unit,
 ) {
     // `key = initialUrl` чтобы при reopen с другим pre-fill state TextField'а
     // обновлялся. Без этого второй вызов с свежим QR показал бы старое
-    // содержимое из памяти.
-    var urlInput by remember(initialUrl) { mutableStateOf(initialUrl) }
-    var customName by remember(initialUrl) { mutableStateOf("") }
-    var error by remember(initialUrl) { mutableStateOf<String?>(null) }
+    // содержимое из памяти. Аналогично для initialName в edit-mode.
+    val seed = "$initialUrl|$initialName"
+    var urlInput by remember(seed) { mutableStateOf(initialUrl) }
+    var customName by remember(seed) { mutableStateOf(initialName) }
+    var error by remember(seed) { mutableStateOf<String?>(null) }
     val context = LocalContext.current
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(stringResource(R.string.add_dialog_title)) },
+        title = { Text(stringResource(titleRes)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
@@ -600,7 +647,7 @@ private fun AddConfigDialog(
                 } catch (e: Throwable) {
                     error = context.getString(R.string.add_dialog_generic_error, e.message ?: "")
                 }
-            }) { Text(stringResource(R.string.add_dialog_save)) }
+            }) { Text(stringResource(saveRes)) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {

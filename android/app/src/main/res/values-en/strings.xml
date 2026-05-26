@@ -56,6 +56,9 @@
     <string name="configs_add">Add</string>
     <string name="configs_delete">Delete</string>
     <string name="configs_share">Share</string>
+    <string name="configs_edit">Edit</string>
+    <string name="edit_dialog_title">Edit server</string>
+    <string name="edit_dialog_save">Save</string>
     <string name="configs_active_marker">Active</string>
     <string name="share_title">Share server</string>
     <string name="share_qr_content_desc">QR code with share-URL</string>
