@@ -112,6 +112,10 @@
     <string name="excluded_apps_search_clear">Clear search</string>
     <string name="excluded_apps_empty">Nothing matches</string>
     <string name="back">Back</string>
+    <string name="notif_perm_title">Notifications permission</string>
+    <string name="notif_perm_body">KaproVPN shows the connection state in a notification and exposes a one-tap “Disconnect” button there. Without this permission, Android 13+ may deprioritize our background service and kill it under memory pressure — the VPN would drop at the worst possible moment.\n\nYou selected “Don\'t ask again”, so the only way to grant it now is from the system app info screen.</string>
+    <string name="notif_perm_open_settings">Open app settings</string>
+    <string name="notif_perm_connect_anyway">Connect without notifications</string>
     <string name="settings_alwayson_title">Always-on VPN (kill-switch)</string>
     <string name="settings_alwayson_subtitle">In Android\'s system settings, enable “Always-on VPN” and “Block connections without VPN”. KaproVPN will then auto-start on boot and block all traffic if the tunnel drops — no leaks to your real IP.</string>
     <string name="settings_alwayson_open">Open system VPN settings</string>

@@ -112,6 +112,10 @@
     <string name="excluded_apps_search_clear">Очистить поиск</string>
     <string name="excluded_apps_empty">Ничего не найдено</string>
     <string name="back">Назад</string>
+    <string name="notif_perm_title">Разрешение на уведомления</string>
+    <string name="notif_perm_body">KaproVPN показывает текущее состояние подключения в уведомлении и держит там кнопку «Отключить». Без этого разрешения Android 13+ может приоритизировать наш фоновый сервис ниже и убить его при нехватке памяти — VPN порвётся в самый неудобный момент.\n\nТы выбрал «не спрашивать снова», поэтому выдать разрешение можно только в системных настройках приложения.</string>
+    <string name="notif_perm_open_settings">Открыть настройки приложения</string>
+    <string name="notif_perm_connect_anyway">Подключиться без уведомлений</string>
     <string name="settings_alwayson_title">Always-on VPN (kill-switch)</string>
     <string name="settings_alwayson_subtitle">В системных настройках Android включи «Always-on VPN» и «Block connections without VPN». Тогда KaproVPN будет автостартовать на загрузке и блокировать весь трафик если туннель упал — никаких leak\'ов на реальный IP.</string>
     <string name="settings_alwayson_open">Открыть системные настройки VPN</string>
