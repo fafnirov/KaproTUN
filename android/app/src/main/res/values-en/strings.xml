@@ -31,8 +31,14 @@
     <string name="state_error">error: %1$s</string>
 
     <!-- Configs screen -->
-    <string name="configs_empty_title">No servers yet</string>
-    <string name="configs_empty_hint">Tap “Add” in the bottom-right and paste a share-URL from your VPN provider (vless:// / vmess:// / trojan:// / ss://).</string>
+    <string name="configs_empty_title">Welcome!</string>
+    <string name="configs_empty_hint">To start using KaproVPN, add a server. Pick a path:</string>
+    <string name="onboarding_path_subscription_title">📥 I have a subscription URL</string>
+    <string name="onboarding_path_subscription_subtitle">Import every server from the provider in one tap</string>
+    <string name="onboarding_path_share_title">🔗 I have a share-URL</string>
+    <string name="onboarding_path_share_subtitle">vless:// / vmess:// / trojan:// / ss:// — add a single server manually</string>
+    <string name="onboarding_path_noprovider_title">🤷 I don\'t know where to get a config</string>
+    <string name="onboarding_path_noprovider_subtitle">Open kaprovpn.pro with instructions and partner providers</string>
     <string name="configs_add">Add</string>
     <string name="configs_delete">Delete</string>
     <string name="configs_active_marker">Active</string>

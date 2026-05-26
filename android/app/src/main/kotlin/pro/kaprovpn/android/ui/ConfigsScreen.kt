@@ -1,5 +1,7 @@
 package pro.kaprovpn.android.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -110,7 +112,11 @@ fun ConfigsScreen(modifier: Modifier = Modifier) {
         snackbarHost = { SnackbarHost(snackbarHost) },
     ) { innerPadding ->
         if (configs.isEmpty()) {
-            EmptyConfigsState(modifier = Modifier.padding(innerPadding))
+            OnboardingEmptyState(
+                modifier = Modifier.padding(innerPadding),
+                onAddShareUrl = { showAddDialog = true },
+                onImportSubscription = { showSubDialog = true },
+            )
         } else {
             LazyColumn(
                 modifier = Modifier
@@ -247,25 +253,93 @@ private fun PingBadge(state: AppRepository.PingState) {
     }
 }
 
+/**
+ * Onboarding-стиль empty state — 3 пути для нового пользователя:
+ * subscription URL, single share-URL, или landing site если провайдера
+ * вообще нет. Аналог `kapro_vpn/gui/onboarding.py` с десктопа. Скрывается
+ * как только в списке появляется хотя бы один конфиг.
+ */
 @Composable
-private fun EmptyConfigsState(modifier: Modifier = Modifier) {
+private fun OnboardingEmptyState(
+    modifier: Modifier = Modifier,
+    onImportSubscription: () -> Unit,
+    onAddShareUrl: () -> Unit,
+) {
+    val context = LocalContext.current
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(32.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .padding(horizontal = 24.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(stringResource(R.string.configs_empty_title),
-            style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.size(8.dp))
+        Text(
+            stringResource(R.string.configs_empty_title),
+            style = MaterialTheme.typography.headlineSmall,
+        )
         Text(
             stringResource(R.string.configs_empty_hint),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Spacer(Modifier.size(8.dp))
+
+        OnboardingPathCard(
+            title = stringResource(R.string.onboarding_path_subscription_title),
+            subtitle = stringResource(R.string.onboarding_path_subscription_subtitle),
+            onClick = onImportSubscription,
+        )
+        OnboardingPathCard(
+            title = stringResource(R.string.onboarding_path_share_title),
+            subtitle = stringResource(R.string.onboarding_path_share_subtitle),
+            onClick = onAddShareUrl,
+        )
+        OnboardingPathCard(
+            title = stringResource(R.string.onboarding_path_noprovider_title),
+            subtitle = stringResource(R.string.onboarding_path_noprovider_subtitle),
+            onClick = {
+                runCatching {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(LANDING_URL))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(intent)
+                }
+            },
+        )
     }
 }
+
+@Composable
+private fun OnboardingPathCard(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() },
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** Landing-страница c инструкциями и partner-провайдерами.
+ *  Совпадает с `SETUP_GUIDE_URL` из десктопного `gui/onboarding.py`. */
+private const val LANDING_URL = "https://kaprovpn.pro/"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

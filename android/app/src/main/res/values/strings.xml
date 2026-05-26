@@ -31,8 +31,14 @@
     <string name="state_error">ошибка: %1$s</string>
 
     <!-- Configs screen -->
-    <string name="configs_empty_title">Серверов пока нет</string>
-    <string name="configs_empty_hint">Нажми «Добавить» внизу справа и вставь share-URL от твоего VPN-провайдера (vless:// / vmess:// / trojan:// / ss://).</string>
+    <string name="configs_empty_title">Добро пожаловать!</string>
+    <string name="configs_empty_hint">Чтобы начать пользоваться KaproVPN, добавь сервер. Выбери способ:</string>
+    <string name="onboarding_path_subscription_title">📥 У меня есть subscription URL</string>
+    <string name="onboarding_path_subscription_subtitle">Импортирую все сервера от провайдера одним кликом</string>
+    <string name="onboarding_path_share_title">🔗 У меня есть share-URL</string>
+    <string name="onboarding_path_share_subtitle">vless:// / vmess:// / trojan:// / ss:// — добавлю один сервер вручную</string>
+    <string name="onboarding_path_noprovider_title">🤷 Я не знаю где взять конфиг</string>
+    <string name="onboarding_path_noprovider_subtitle">Открою сайт kaprovpn.pro с инструкциями и партнёрскими провайдерами</string>
     <string name="configs_add">Добавить</string>
     <string name="configs_delete">Удалить</string>
     <string name="configs_active_marker">Активный</string>
