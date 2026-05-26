@@ -4,6 +4,7 @@ import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -58,21 +59,24 @@ fun AppNav(
                 onAddFirstConfig = { selectedTab = Tab.Configs },
             )
             Tab.Configs -> ConfigsScreen(modifier = modifier)
+            Tab.Logs -> LogsScreen(modifier = modifier)
             Tab.Settings -> SettingsScreen(modifier = modifier)
         }
     }
 }
 
-/** Три вкладки. labelRes — индирекция через R.string чтобы получить
- *  локализованную строку через stringResource в Composable-контексте. */
+/** Четыре вкладки. labelRes — индирекция через R.string чтобы получить
+ *  локализованную строку через stringResource в Composable-контексте.
+ *  Порядок в [ALL] определяет порядок в NavigationBar. */
 sealed class Tab(@StringRes val labelRes: Int, val icon: ImageVector) {
     object Home : Tab(R.string.tab_home, Icons.Filled.Home)
     object Configs : Tab(R.string.tab_configs, Icons.AutoMirrored.Filled.List)
+    object Logs : Tab(R.string.tab_logs, Icons.Filled.BugReport)
     object Settings : Tab(R.string.tab_settings, Icons.Filled.Settings)
 
     companion object {
         // lazy — static-init order для nested object'ов не гарантирован.
         // См. Phase 5 polish commit для деталей.
-        val ALL: List<Tab> by lazy { listOf(Home, Configs, Settings) }
+        val ALL: List<Tab> by lazy { listOf(Home, Configs, Logs, Settings) }
     }
 }

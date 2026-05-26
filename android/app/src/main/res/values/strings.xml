@@ -10,7 +10,12 @@
     <!-- Bottom nav -->
     <string name="tab_home">Главная</string>
     <string name="tab_configs">Серверы</string>
+    <string name="tab_logs">Логи</string>
     <string name="tab_settings">Настройки</string>
+
+    <!-- Logs screen -->
+    <string name="logs_clear">Очистить</string>
+    <string name="logs_empty">Логов пока нет. Подключись к серверу — xray-core начнёт писать сюда диагностику.</string>
 
     <!-- Home screen -->
     <string name="home_active_server">Активный сервер</string>

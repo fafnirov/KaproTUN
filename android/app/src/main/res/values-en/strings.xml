@@ -10,7 +10,12 @@
     <!-- Bottom nav -->
     <string name="tab_home">Home</string>
     <string name="tab_configs">Servers</string>
+    <string name="tab_logs">Logs</string>
     <string name="tab_settings">Settings</string>
+
+    <!-- Logs screen -->
+    <string name="logs_clear">Clear</string>
+    <string name="logs_empty">No logs yet. Connect to a server — xray-core will start writing diagnostics here.</string>
 
     <!-- Home screen -->
     <string name="home_active_server">Active server</string>
