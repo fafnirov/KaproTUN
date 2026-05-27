@@ -135,6 +135,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "subscription_auto_refresh": True,  # background re-fetch every 12h
     "dns_option": "system",  # see core/dns_options.py — system|adguard|cloudflare|quad9
     "public_ip_probe": True,  # fetch & show "Ваш IP: X (страна)" after connect
+    "ipv6_leak_protection": True,  # block global-unicast IPv6 outbound in TUN mode
 }
 
 

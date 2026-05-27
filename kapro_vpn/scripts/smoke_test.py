@@ -100,7 +100,7 @@ def _import_core() -> None:
     from kapro_vpn.core import (  # noqa: F401
         controller, parser, xray_config, storage, paths,
         subscription, geoip_ru, killswitch, i18n, system_proxy,
-        ip_probe, dns_options, secrets_store,
+        ip_probe, dns_options, secrets_store, ipv6_block,
     )
 
 
@@ -332,6 +332,52 @@ def _probe_restores_getaddrinfo() -> None:
 
 check("probe restores socket.getaddrinfo after running",
       _probe_restores_getaddrinfo)
+
+
+# ---------------------------------------------------------------------------
+# Test 5.5 — IPv6 leak block (v1.11.0) — basic invariants
+# ---------------------------------------------------------------------------
+# Doesn't actually shell out to netsh — that needs admin and Windows.
+# Just checks the module's public surface is sane and the no-op paths
+# don't raise on Linux/macOS where the feature isn't supported yet.
+
+section("IPv6 leak block — module sanity")
+
+from kapro_vpn.core import ipv6_block as _ipv6_block
+
+
+def _ipv6_block_silent_on_unsupported() -> None:
+    # On the CI runner (ubuntu-latest) is_supported() returns False;
+    # install/remove/is_active must all be silent no-ops, never raise.
+    # On Windows dev box is_supported() is True but install/remove will
+    # fail without admin — we don't check rc, we just check no-raise.
+    try:
+        _ipv6_block.is_supported()
+        _ipv6_block.remove()
+        _ipv6_block.is_active()
+    except Exception as e:
+        raise AssertionError(
+            f"ipv6_block surface methods must never raise: {type(e).__name__}: {e}"
+        )
+
+
+def _ipv6_block_uses_global_unicast_only() -> None:
+    # Regression guard for the design choice: we block 2000::/3 ONLY,
+    # not link-local / multicast / loopback. If someone changes the
+    # constant to ::/0 or ipv6 (= all v6) they'd break LAN IPv6 devices
+    # (NAS, AirPlay, printers on link-local). Fail fast in CI.
+    if _ipv6_block._IPV6_GLOBAL_UNICAST != "2000::/3":
+        raise AssertionError(
+            f"IPv6 block range must be 2000::/3 (global unicast only) — "
+            f"got {_ipv6_block._IPV6_GLOBAL_UNICAST!r}. Broader ranges "
+            f"would break LAN IPv6."
+        )
+
+
+check("ipv6_block surface no-raise on every platform",
+      _ipv6_block_silent_on_unsupported)
+check("ipv6_block targets 2000::/3 only (LAN-preserving)",
+      _ipv6_block_uses_global_unicast_only)
 
 
 # ---------------------------------------------------------------------------

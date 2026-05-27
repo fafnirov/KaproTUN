@@ -8,8 +8,8 @@ import time
 from typing import Callable, Optional
 
 from . import (
-    admin, dns_options, geoip_ru, killswitch, paths, storage, system_proxy,
-    xray_config,
+    admin, dns_options, geoip_ru, ipv6_block, killswitch, paths, storage,
+    system_proxy, xray_config,
 )
 from .parser import ProxyConfig
 from .xray_process import XrayProcess
@@ -140,6 +140,14 @@ class ConnectionManager:
             killswitch.remove()
         except Exception:
             pass
+        # Same idempotent teardown for the IPv6-leak block (v1.11.0).
+        # Order doesn't matter relative to killswitch — both are
+        # independent firewall rules with non-overlapping scopes
+        # (kill-switch = all-IP outbound, ipv6_block = global v6 only).
+        try:
+            ipv6_block.remove()
+        except Exception:
+            pass
         self._active = None
 
     def is_connected(self) -> bool:
@@ -240,6 +248,11 @@ class ConnectionManager:
         # _connect_http: firewall block must exist before any traffic
         # is routed, so a mid-setup crash can't leak.
         self._maybe_arm_killswitch()
+        # IPv6-leak protection — only relevant in TUN mode (HTTP-mode
+        # is browser-only, browsers obey the system HTTP-proxy on v4 +
+        # v6 alike, no separate v6 leak path). Same pre-tunnel timing
+        # as kill-switch: rule must exist before any traffic flows.
+        self._maybe_arm_ipv6_block()
 
         # Step 4: launch tun2socks — it creates the TUN device and forwards
         # all packets to xray's SOCKS5 inbound at port+1.
@@ -475,6 +488,32 @@ class ConnectionManager:
         else:
             self._log("[!] Не удалось установить firewall-правила kill-switch "
                       "— продолжаю без него")
+
+    def _maybe_arm_ipv6_block(self) -> None:
+        """If user enabled IPv6-leak protection in settings, install the
+        global-unicast block via Windows Firewall. TUN-only — in HTTP
+        mode the v6 stack isn't tunnelled either way; that's a known
+        HTTP-mode limitation we document, not something to silently
+        plug here (would surprise the user).
+
+        Same silent-skip conditions as _maybe_arm_killswitch: setting
+        off, non-Windows, no admin. Not raising on failure — protection
+        is defence-in-depth, the v4 tunnel works fine without it.
+        """
+        if not self.settings.get("ipv6_leak_protection", True):
+            return
+        if not ipv6_block.is_supported():
+            self._log("[!] IPv6-leak protection пока работает только на Windows")
+            return
+        if not admin.is_admin():
+            self._log("[!] IPv6-leak protection требует админа — пропускаю")
+            return
+        if ipv6_block.install():
+            self._log("[*] IPv6-leak protection активирована "
+                      "(блок outbound к 2000::/3)")
+        else:
+            self._log("[!] Не удалось установить IPv6-block firewall-правило "
+                      "— v6-трафик может утечь мимо туннеля")
 
     def _atexit_cleanup(self) -> None:
         try:

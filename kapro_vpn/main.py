@@ -9,7 +9,7 @@ import sys
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from .core import autostart, i18n, killswitch, storage, system_proxy
+from .core import autostart, i18n, ipv6_block, killswitch, storage, system_proxy
 from .gui import icons
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
@@ -159,6 +159,17 @@ def main() -> int:
     try:
         if killswitch.is_active():
             killswitch.remove()
+    except Exception:
+        pass
+
+    # Same defensive sweep for the v1.11.0 IPv6 leak protection rule.
+    # If a previous run crashed mid-session, our 2000::/3 outbound block
+    # is still active, the user has no IPv6 internet at all. Wipe it on
+    # next launch — we'll re-arm at the next TUN-mode connect if the
+    # setting's still on.
+    try:
+        if ipv6_block.is_active():
+            ipv6_block.remove()
     except Exception:
         pass
 

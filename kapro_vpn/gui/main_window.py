@@ -372,6 +372,31 @@ class SettingsPage(QWidget):
         kill_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(kill_hint)
 
+        # --- IPv6 leak protection (v1.11.0) ---
+        # TUN tunnels IPv4 only. On IPv6-enabled hosts (most RU residential
+        # ISPs hand out public v6), apps with AAAA records leak through
+        # the real ISP. Default ON because the user is almost always
+        # surprised when we explain it ("я думал VPN покрывает всё").
+        self.ipv6_check = QCheckBox(
+            "Защита от IPv6 leak — блокировать v6-трафик в TUN"
+        )
+        self.ipv6_check.setChecked(
+            bool(manager.settings.get("ipv6_leak_protection", True))
+        )
+        self.ipv6_check.toggled.connect(self._on_ipv6_leak_changed)
+        outer.addWidget(self.ipv6_check)
+        ipv6_hint = QLabel(
+            "TUN-режим туннелирует только IPv4. Если у вашего провайдера "
+            "включён IPv6 (Билайн, МТС, Ростелеком обычно дают), v6-трафик "
+            "идёт мимо туннеля и провайдер видит куда вы заходите. Это "
+            "правило блокирует outbound IPv6 к публичным адресам через "
+            "Windows Firewall — локальная сеть (fe80::) и mDNS не трогаются."
+        )
+        ipv6_hint.setObjectName("dim")
+        ipv6_hint.setWordWrap(True)
+        ipv6_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(ipv6_hint)
+
         # --- Public IP probe toggle (v1.10.0) ---
         # We dial one third-party endpoint (ipinfo.io) after connect to
         # show "Ваш IP: X (страна)" in the UI as visible proof the
@@ -609,6 +634,10 @@ class SettingsPage(QWidget):
 
     def _on_kill_switch_changed(self, checked: bool) -> None:
         self._manager.update_settings(kill_switch=checked)
+        self.settings_changed.emit()
+
+    def _on_ipv6_leak_changed(self, checked: bool) -> None:
+        self._manager.update_settings(ipv6_leak_protection=checked)
         self.settings_changed.emit()
 
     def _on_ip_probe_changed(self, checked: bool) -> None:
