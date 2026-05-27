@@ -134,6 +134,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "language": "auto",      # "ru" / "en" / "auto" (detect from QLocale.system())
     "subscription_auto_refresh": True,  # background re-fetch every 12h
     "dns_option": "system",  # see core/dns_options.py — system|adguard|cloudflare|quad9
+    "public_ip_probe": True,  # fetch & show "Ваш IP: X (страна)" after connect
 }
 
 

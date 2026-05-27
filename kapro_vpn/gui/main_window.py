@@ -94,6 +94,18 @@ class HomePage(QWidget):
         self.status_label = StatusLabel()
         layout.addWidget(self.status_label)
 
+        # Public IP / country reveal — shown ~2 seconds after a successful
+        # connect, hidden when idle or connecting. Empty when the probe
+        # fails (so we don't show a misleading "fetching..." that might
+        # never finish). v1.10.0.
+        self.public_ip_label = QLabel("")
+        self.public_ip_label.setAlignment(Qt.AlignCenter)
+        self.public_ip_label.setTextFormat(Qt.RichText)
+        self.public_ip_label.setObjectName("dim")
+        self.public_ip_label.setVisible(False)
+        layout.addSpacing(2)
+        layout.addWidget(self.public_ip_label)
+
         # Traffic stats — only visible while connected. RichText so we can
         # tint the two values without nested widgets.
         self.traffic_label = QLabel("")
@@ -131,6 +143,31 @@ class HomePage(QWidget):
             self.traffic_label.clear()
             self.sparkline.setVisible(False)
             self.sparkline.reset()
+            # Public IP banner only makes sense while connected; clear
+            # immediately on disconnect/connecting so the user doesn't
+            # briefly see a stale IP from the previous session.
+            self.public_ip_label.clear()
+            self.public_ip_label.setVisible(False)
+
+    def set_public_ip(self, ip: str, country_name: str, city: Optional[str] = None) -> None:
+        """Render the just-fetched public IP. Called from MainWindow after
+        the async probe finishes. Pass empty ip to clear/hide.
+        """
+        if not ip:
+            self.public_ip_label.clear()
+            self.public_ip_label.setVisible(False)
+            return
+        # Single line: "Ваш IP: 1.2.3.4 · Нидерланды (Amsterdam)". City
+        # is the optional bit since ipinfo free tier sometimes omits it.
+        place = country_name if country_name else "—"
+        if city:
+            place = f"{country_name} · {city}" if country_name else city
+        self.public_ip_label.setText(
+            f"<span style='color:#71717a'>Ваш IP: </span>"
+            f"<span style='color:#fafafa'>{ip}</span>"
+            f"<span style='color:#71717a'>  ·  {place}</span>"
+        )
+        self.public_ip_label.setVisible(True)
 
     def set_traffic(self, up_rate: float, down_rate: float,
                     up_total: int, down_total: int) -> None:
@@ -334,6 +371,29 @@ class SettingsPage(QWidget):
         kill_hint.setWordWrap(True)
         kill_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(kill_hint)
+
+        # --- Public IP probe toggle (v1.10.0) ---
+        # We dial one third-party endpoint (ipinfo.io) after connect to
+        # show "Ваш IP: X (страна)" in the UI as visible proof the
+        # tunnel works. Some users prefer zero "phone home"-looking
+        # calls — let them opt out.
+        self.ip_probe_check = QCheckBox(
+            "Показывать публичный IP после подключения"
+        )
+        self.ip_probe_check.setChecked(
+            bool(manager.settings.get("public_ip_probe", True))
+        )
+        self.ip_probe_check.toggled.connect(self._on_ip_probe_changed)
+        outer.addWidget(self.ip_probe_check)
+        ip_probe_hint = QLabel(
+            "Один запрос к ipinfo.io через VPN-туннель после connect. "
+            "Никаких user-ID, никакого логирования. Выключи если не хочешь "
+            "никаких 'phone-home' запросов в принципе."
+        )
+        ip_probe_hint.setObjectName("dim")
+        ip_probe_hint.setWordWrap(True)
+        ip_probe_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(ip_probe_hint)
 
         # --- DNS server choice ---
         # Some subscription providers don't filter ads at the DNS layer, so
@@ -551,6 +611,10 @@ class SettingsPage(QWidget):
         self._manager.update_settings(kill_switch=checked)
         self.settings_changed.emit()
 
+    def _on_ip_probe_changed(self, checked: bool) -> None:
+        self._manager.update_settings(public_ip_probe=checked)
+        self.settings_changed.emit()
+
     def _on_dns_option_changed(self, key: str, checked: bool) -> None:
         # Both old and new radios fire toggled() — we only care about the
         # one being newly selected (checked=True). Saved immediately;
@@ -668,6 +732,41 @@ class _ConnectWorker(QThread):
             self.failed.emit(str(e))
         except Exception as e:
             self.failed.emit(f"Неожиданная ошибка: {type(e).__name__}: {e}")
+
+
+class _IpProbeWorker(QThread):
+    """Async fetch of public IP/country after successful connect.
+
+    Triggered ~2 sec after _on_connect_success (gives xray time to fully
+    bring its inbounds up — too early and the probe goes through the
+    tunnel before it's actually serving traffic). Off the GUI thread so
+    a 5-second timeout doesn't freeze the UI.
+
+    On success emits resolved(ip, country_name, city). On any failure —
+    silent: emits empty strings, the UI hides the label. We never modal-
+    error on this; it's a nice-to-have, not critical path.
+    """
+
+    resolved = Signal(str, str, str)  # ip, country_name, city
+
+    def __init__(self, socks_proxy: Optional[str], locale: str, parent=None):
+        super().__init__(parent)
+        self._socks_proxy = socks_proxy
+        self._locale = locale
+
+    def run(self) -> None:
+        from ..core import ip_probe
+        try:
+            info = ip_probe.fetch_public_ip(
+                socks_proxy=self._socks_proxy,
+                locale=self._locale,
+            )
+        except Exception:
+            info = None
+        if info is None:
+            self.resolved.emit("", "", "")
+            return
+        self.resolved.emit(info.ip, info.country_name, info.city or "")
 
 
 class LogsPage(QWidget):
@@ -1131,6 +1230,41 @@ class MainWindow(QMainWindow):
         )
         show_toast(self, f"Подключено к «{self._active_config.name}»", kind="success")
         self._refresh_home()
+        # v1.10.0: confirm to the user that the tunnel is actually working
+        # by fetching the public IP as seen from outside and showing it
+        # under the status line. Delayed 2s so xray has time to bring its
+        # inbounds fully up; if too early the probe times out and the
+        # user sees no IP, which is worse than waiting a beat.
+        if self.manager.settings.get("public_ip_probe", True):
+            QTimer.singleShot(2000, self._kick_ip_probe)
+
+    def _kick_ip_probe(self) -> None:
+        """Start the async public-IP fetch. Routes through SOCKS5 in
+        HTTP-proxy mode (otherwise the probe would see the local IP);
+        in TUN mode the system route table already tunnels everything,
+        no proxy override needed.
+        """
+        # If the user disconnected in the 2s between connect-success
+        # and this firing, bail — showing the IP for a now-dead session
+        # would be misleading.
+        if not self.manager.is_connected():
+            return
+        socks_proxy = None
+        if self.manager.current_mode() == MODE_HTTP_PROXY:
+            host = str(self.manager.settings.get("listen_host", "127.0.0.1"))
+            port = int(self.manager.settings.get("listen_port", 2080))
+            socks_proxy = f"{host}:{port + 1}"  # SOCKS5 inbound is port+1
+        from ..core.i18n import current_locale
+        self._ip_probe = _IpProbeWorker(socks_proxy, current_locale(), parent=self)
+        self._ip_probe.resolved.connect(self._on_ip_probe_resolved)
+        self._ip_probe.start()
+
+    def _on_ip_probe_resolved(self, ip: str, country_name: str, city: str) -> None:
+        # Don't paint stale data: if the user disconnected while the
+        # probe was in flight, just drop the result on the floor.
+        if not self.manager.is_connected():
+            return
+        self.home_page.set_public_ip(ip, country_name, city)
 
     def _on_connect_failed(self, msg: str) -> None:
         self._connecting = False

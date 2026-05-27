@@ -100,6 +100,7 @@ def _import_core() -> None:
     from kapro_vpn.core import (  # noqa: F401
         controller, parser, xray_config, storage, paths,
         subscription, geoip_ru, killswitch, i18n, system_proxy,
+        ip_probe, dns_options, secrets_store,
     )
 
 
@@ -275,7 +276,47 @@ for opt in dns_options.OPTIONS:
 
 
 # ---------------------------------------------------------------------------
-# Test 5 — Installer flow transitions
+# Test 5 — IP probe graceful failure (v1.10.0)
+# ---------------------------------------------------------------------------
+# fetch_public_ip MUST return None (not raise) on any network error, so
+# the GUI worker thread can safely swallow the result and hide the IP
+# label. Test against a guaranteed-dead SOCKS5 endpoint (an unbound
+# high port on localhost) — that simulates the post-connect race where
+# the probe fires before xray's SOCKS5 inbound is fully up, or the
+# CI runner where there's no network at all.
+
+section("IP probe — graceful failure on bad endpoint")
+
+from kapro_vpn.core import ip_probe as _ip_probe
+
+
+def _probe_returns_none_on_dead_socks() -> None:
+    # 127.0.0.1:1 — well-known "nothing listens here" port. Probe must
+    # not raise; must return None within timeout.
+    result = _ip_probe.fetch_public_ip(socks_proxy="127.0.0.1:1", timeout=2.0)
+    if result is not None:
+        raise AssertionError(
+            f"expected None on dead SOCKS, got {result!r}"
+        )
+
+
+def _probe_locale_table_has_common_countries() -> None:
+    # If someone strips _RU_COUNTRY_NAMES we'd silently fall back to
+    # raw ISO codes in UI ("NL" instead of "Нидерланды"). Cheap guard
+    # that the table still covers the common VPN-server countries.
+    for code in ("NL", "DE", "US", "GB"):
+        if code not in _ip_probe._RU_COUNTRY_NAMES:
+            raise AssertionError(f"missing RU name for {code}")
+
+
+check("fetch_public_ip returns None on dead SOCKS",
+      _probe_returns_none_on_dead_socks)
+check("RU country table covers common VPN locales",
+      _probe_locale_table_has_common_countries)
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — Installer flow transitions
 # ---------------------------------------------------------------------------
 # Catches regressions like "click does nothing because we addWidget but
 # forgot setCurrentWidget" — exactly the v1.8.1 uninstall-button bug.
