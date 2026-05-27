@@ -549,9 +549,13 @@ class SettingsPage(QWidget):
         theme_row.addWidget(self.theme_combo)
         outer.addLayout(theme_row)
         theme_hint = QLabel(
-            "Изменение применится после перезапуска KaproVPN."
+            "Применяется сразу. Если несколько мелких элементов "
+            "(круглая кнопка, график) остались в старой палитре — "
+            "перезапусти приложение, остальные обновятся."
             if _i18n.current_locale() == "ru"
-            else "Changes take effect after KaproVPN restarts."
+            else "Applied instantly. If a few small widgets (round "
+                 "button, graph) stay in the old palette, restart "
+                 "KaproVPN to refresh them."
         )
         theme_hint.setObjectName("dim")
         theme_hint.setWordWrap(True)
@@ -699,12 +703,29 @@ class SettingsPage(QWidget):
         self.settings_changed.emit()
 
     def _on_theme_changed(self, _index: int) -> None:
-        """Persist theme choice. Applied at next launch via main.py's
-        get_qss(settings.theme) — see _on_language_changed for why
-        we don't re-style live (chasing every widget's local setStyleSheet
-        is fragile; restart is one extra click).
+        """Persist theme + apply it live to the running app.
+
+        v1.13.0 saved the choice but required a restart to see it.
+        User feedback: "выбрал светлую — никакой белезны нет, тёмная
+        осталась". That's correct because we just stored to settings.
+        v1.13.1 also calls `setStyleSheet` on the QApplication so the
+        global QSS picks up the new palette immediately. Custom-painted
+        widgets (Sparkline, CircleConnectButton) that read module-level
+        DARK constants still need a restart to fully refresh — the hint
+        below tells the user that's a known limitation.
         """
-        self._manager.update_settings(theme=self.theme_combo.currentData())
+        new_theme = self.theme_combo.currentData()
+        self._manager.update_settings(theme=new_theme)
+        # Live re-style. QApplication is a singleton — instance() returns
+        # ours. Setting the stylesheet recomputes layout for every widget
+        # currently using that sheet, so the whole window re-paints with
+        # the new palette in one frame.
+        from PySide6.QtWidgets import QApplication
+        from ..core import storage  # noqa: F401 — pyflakes false positive
+        from .styles import get_qss
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(get_qss(str(new_theme)))
 
     def _on_language_changed(self, _index: int) -> None:
         """Persist language choice. Takes effect on next launch — we don't
