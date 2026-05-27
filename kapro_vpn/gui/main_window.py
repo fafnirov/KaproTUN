@@ -48,6 +48,7 @@ from .add_page import AddConfigPage
 from .onboarding import OnboardingPage
 from .subscription_autorefresh import SubscriptionAutoRefresh
 from .config_dialog import AddConfigDialog
+from .world_map import WorldMapWidget
 from .configs_picker import ConfigsPickerDialog
 from .installer_dialog import ensure_geoip_ru_cached, ensure_tun2socks_installed, ensure_xray_installed
 from .sites_dialog import SitesDialog
@@ -106,6 +107,19 @@ class HomePage(QWidget):
         layout.addSpacing(2)
         layout.addWidget(self.public_ip_label)
 
+        # World map with a pin on the active VPN country (v1.14.0).
+        # Centered, hidden until the IP probe resolves a known country
+        # code. Theme follows the user's choice — getter reads settings
+        # at paint time so it auto-updates on theme switch.
+        self.world_map = WorldMapWidget()
+        self.world_map.setVisible(False)
+        map_row = QHBoxLayout()
+        map_row.addStretch(1)
+        map_row.addWidget(self.world_map)
+        map_row.addStretch(1)
+        layout.addSpacing(4)
+        layout.addLayout(map_row)
+
         # Traffic stats — only visible while connected. RichText so we can
         # tint the two values without nested widgets.
         self.traffic_label = QLabel("")
@@ -143,19 +157,33 @@ class HomePage(QWidget):
             self.traffic_label.clear()
             self.sparkline.setVisible(False)
             self.sparkline.reset()
-            # Public IP banner only makes sense while connected; clear
-            # immediately on disconnect/connecting so the user doesn't
-            # briefly see a stale IP from the previous session.
+            # Public IP banner + map only make sense while connected;
+            # clear immediately on disconnect/connecting so the user
+            # doesn't briefly see stale data from the previous session.
             self.public_ip_label.clear()
             self.public_ip_label.setVisible(False)
+            self.world_map.set_country(None)
+            self.world_map.setVisible(False)
 
-    def set_public_ip(self, ip: str, country_name: str, city: Optional[str] = None) -> None:
-        """Render the just-fetched public IP. Called from MainWindow after
-        the async probe finishes. Pass empty ip to clear/hide.
+    def set_public_ip(
+        self,
+        ip: str,
+        country_name: str,
+        city: Optional[str] = None,
+        country_code: str = "",
+    ) -> None:
+        """Render the just-fetched public IP + plant a map pin.
+
+        v1.14.0: country_code added so the WorldMapWidget can place
+        the pin. Empty/unknown code → map stays hidden but IP label
+        still shows (graceful degradation when the IP-probe fallback
+        returned a hit without country info — e.g. ipify-only path).
         """
         if not ip:
             self.public_ip_label.clear()
             self.public_ip_label.setVisible(False)
+            self.world_map.set_country(None)
+            self.world_map.setVisible(False)
             return
         # Single line: "Ваш IP: 1.2.3.4 · Нидерланды (Amsterdam)". City
         # is the optional bit since ipinfo free tier sometimes omits it.
@@ -168,6 +196,15 @@ class HomePage(QWidget):
             f"<span style='color:#71717a'>  ·  {place}</span>"
         )
         self.public_ip_label.setVisible(True)
+        # Map gets shown only when we have a known country — silent
+        # hide when the probe fallback gave IP-only (httpbin.org).
+        from .world_map import COUNTRY_COORDS
+        if country_code and country_code.upper() in COUNTRY_COORDS:
+            self.world_map.set_country(country_code)
+            self.world_map.setVisible(True)
+        else:
+            self.world_map.set_country(None)
+            self.world_map.setVisible(False)
 
     def set_traffic(self, up_rate: float, down_rate: float,
                     up_total: int, down_total: int) -> None:
@@ -721,11 +758,15 @@ class SettingsPage(QWidget):
         # currently using that sheet, so the whole window re-paints with
         # the new palette in one frame.
         from PySide6.QtWidgets import QApplication
-        from ..core import storage  # noqa: F401 — pyflakes false positive
         from .styles import get_qss
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(get_qss(str(new_theme)))
+        # Notify MainWindow so it can update() custom-painted widgets
+        # (WorldMapWidget — Sparkline / CircleConnectButton are next).
+        # Stylesheet change does not trigger paintEvent on QPainter-
+        # drawn widgets, so we have to push it manually.
+        self.settings_changed.emit()
 
     def _on_language_changed(self, _index: int) -> None:
         """Persist language choice. Takes effect on next launch — we don't
@@ -847,8 +888,12 @@ class _IpProbeWorker(QThread):
     to logs_page.append.
     """
 
-    resolved = Signal(str, str, str)  # ip, country_name, city
-    diag = Signal(str)                 # one line per significant step
+    # v1.14.0: 4th field — country_code (ISO 3166-1 alpha-2) — needed by
+    # the new WorldMapWidget to place the pin. The localized
+    # country_name is for human display; the code is for the lookup
+    # table COUNTRY_COORDS in world_map.py.
+    resolved = Signal(str, str, str, str)  # ip, country_name, city, country_code
+    diag = Signal(str)                       # one line per significant step
 
     def __init__(self, socks_proxy: Optional[str], locale: str, parent=None):
         super().__init__(parent)
@@ -871,9 +916,11 @@ class _IpProbeWorker(QThread):
             self.diag.emit(f"[ip-probe] worker exception: {type(e).__name__}: {e}")
             info = None
         if info is None:
-            self.resolved.emit("", "", "")
+            self.resolved.emit("", "", "", "")
             return
-        self.resolved.emit(info.ip, info.country_name, info.city or "")
+        self.resolved.emit(
+            info.ip, info.country_name, info.city or "", info.country_code,
+        )
 
 
 class LogsPage(QWidget):
@@ -971,6 +1018,16 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.home_page = HomePage()
+        # World-map needs to know the current theme on every paint —
+        # hand it a closure that reads settings live, so a theme switch
+        # immediately reflects in the next map paint (no explicit
+        # refresh wiring per widget).
+        # Custom-painted widgets (read palette per paint) need a getter
+        # that returns the live theme setting. One closure, multiple
+        # widgets — keeps theme propagation one-line per widget.
+        _theme = lambda: str(self.manager.settings.get("theme", "auto"))
+        self.home_page.world_map.set_theme_getter(_theme)
+        self.home_page.sparkline.set_theme_getter(_theme)
         self.settings_page = SettingsPage(self.manager)
         self.logs_page = LogsPage()
         self.add_page = AddConfigPage()
@@ -1033,6 +1090,10 @@ class MainWindow(QMainWindow):
         self.settings_page.sites_clicked.connect(self._on_edit_sites)
         self.settings_page.logs_clicked.connect(lambda: self._goto("logs"))
         self.settings_page.subscription_clicked.connect(self._on_import_subscription)
+        # v1.14.0: nudge custom-painted widgets to repaint after any
+        # setting flip (esp. theme — stylesheet change doesn't trigger
+        # paintEvent on QPainter-drawn widgets, only on QSS-styled ones).
+        self.settings_page.settings_changed.connect(self._on_settings_changed)
         self.settings_page.check_updates_requested.connect(
             lambda: self._start_update_check(interactive=True)
         )
@@ -1369,12 +1430,14 @@ class MainWindow(QMainWindow):
         self._ip_probe.diag.connect(self.logs_page.append)
         self._ip_probe.start()
 
-    def _on_ip_probe_resolved(self, ip: str, country_name: str, city: str) -> None:
+    def _on_ip_probe_resolved(
+        self, ip: str, country_name: str, city: str, country_code: str,
+    ) -> None:
         # Don't paint stale data: if the user disconnected while the
         # probe was in flight, just drop the result on the floor.
         if not self.manager.is_connected():
             return
-        self.home_page.set_public_ip(ip, country_name, city)
+        self.home_page.set_public_ip(ip, country_name, city, country_code)
 
     def _on_connect_failed(self, msg: str) -> None:
         self._connecting = False
@@ -1599,6 +1662,20 @@ class MainWindow(QMainWindow):
         self._autopick_pinger.pinged.connect(on_pinged)
         self._autopick_pinger.finished.connect(on_finished)
         self._autopick_pinger.start()
+
+    def _on_settings_changed(self) -> None:
+        """Repaint custom-painted widgets after any setting change.
+
+        QSS-styled widgets re-style automatically when app.setStyleSheet
+        is called in SettingsPage._on_theme_changed; but our QPainter-
+        drawn widgets (WorldMapWidget, eventually Sparkline +
+        CircleConnectButton) read palette on each paintEvent — and
+        paintEvent isn't auto-triggered by a stylesheet change.
+        update() schedules one.
+        """
+        self.home_page.world_map.update()
+        self.home_page.sparkline.update()
+        self.home_page.circle.update()
 
     def _on_edit_sites(self) -> None:
         dlg = SitesDialog(self)

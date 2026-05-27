@@ -110,6 +110,7 @@ def _import_gui() -> None:
     from kapro_vpn.gui import (  # noqa: F401
         main_window, tray, widgets, onboarding,
         configs_picker, subscription_dialog, sites_dialog,
+        world_map,
     )
 
 
@@ -505,6 +506,67 @@ check("DARK and LIGHT sheets are distinct",        _qss_themes_differ)
 check("get_qss selector returns correct sheet",    _selector_picks_explicit_theme)
 check("both palettes keep brand amber accent",     _palettes_keep_brand_accent)
 check("widgets.py backcompat constants exported",  _backcompat_constants_still_export)
+
+
+# ---------------------------------------------------------------------------
+# Test 5.8 — World map widget (v1.14.0)
+# ---------------------------------------------------------------------------
+# COUNTRY_COORDS coverage check + a couple of invariants. Doesn't try
+# to instantiate the widget headless — needs QApplication, and the
+# installer-flow section above already sets one up but it's later in
+# the file. Module-level checks only.
+
+section("World map — coords + projection sanity")
+
+from kapro_vpn.gui import world_map as _world_map
+
+
+def _world_map_covers_common_vpn_countries() -> None:
+    # Reflection of dns_options.py country names — the typical VPN
+    # locations we display in the IP probe. If someone removes one
+    # of these from COUNTRY_COORDS, that country's pin silently
+    # disappears and the map looks broken to whoever's connected
+    # through it. Regression guard.
+    required = {"NL", "DE", "FI", "US", "GB", "FR", "RU", "JP", "SG"}
+    missing = required - set(_world_map.COUNTRY_COORDS.keys())
+    if missing:
+        raise AssertionError(
+            f"COUNTRY_COORDS missing common VPN locations: {sorted(missing)}"
+        )
+
+
+def _world_map_projection_bounds() -> None:
+    # Equirectangular projection must land any (lat, lon) inside [0,w] x [0,h].
+    # Smoke checks the extreme corners — if someone breaks the projection
+    # math (flipped sign, off-by-180), this catches it immediately.
+    for lat, lon, expect_x, expect_y in [
+        (90, -180, 0, 0),       # top-left  (north pole, antimeridian west)
+        (-90, 180, 100, 50),    # bottom-right (south pole, antimeridian east)
+        (0, 0, 50, 25),         # center (Gulf of Guinea)
+    ]:
+        pt = _world_map._project(lat, lon, 100, 50)
+        if abs(pt.x() - expect_x) > 0.5 or abs(pt.y() - expect_y) > 0.5:
+            raise AssertionError(
+                f"projection broken for ({lat},{lon}): "
+                f"got ({pt.x()},{pt.y()}), expected ({expect_x},{expect_y})"
+            )
+
+
+def _world_map_continent_polygons_nonempty() -> None:
+    # If the polygon list is empty or malformed, the map renders as
+    # pure background — visible regression with no obvious error.
+    if not _world_map._CONTINENT_POLYGONS:
+        raise AssertionError("no continent polygons defined")
+    for i, poly in enumerate(_world_map._CONTINENT_POLYGONS):
+        if len(poly) < 3:
+            raise AssertionError(
+                f"continent #{i} has only {len(poly)} vertices — needs 3+ for a polygon"
+            )
+
+
+check("world map: common VPN countries have coords",  _world_map_covers_common_vpn_countries)
+check("world map: equirectangular projection sane",   _world_map_projection_bounds)
+check("world map: continent polygons non-trivial",    _world_map_continent_polygons_nonempty)
 
 
 # ---------------------------------------------------------------------------

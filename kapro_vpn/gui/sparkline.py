@@ -28,6 +28,13 @@ class TrafficSparkline(QWidget):
         self.setMinimumWidth(180)
         self._up: deque[float] = deque(maxlen=self.HISTORY)
         self._down: deque[float] = deque(maxlen=self.HISTORY)
+        # v1.14.0: theme-aware. Main window sets a getter that reads
+        # settings.theme live; default 'auto' until then so the widget
+        # still paints sanely if used in isolation.
+        self._theme_getter = lambda: "auto"
+
+    def set_theme_getter(self, getter) -> None:
+        self._theme_getter = getter
 
     def add_sample(self, up_bps: float, down_bps: float) -> None:
         self._up.append(max(0.0, up_bps))
@@ -69,14 +76,22 @@ class TrafficSparkline(QWidget):
                     path.lineTo(pt)
             return path
 
-        # Download line — primary amber
-        pen_down = QPen(QColor(styles.ACCENT), 1.6)
+        # v1.14.0: read palette per paint so theme switch immediately
+        # picks up new colors. TEXT_DIM differs between dark (#71717a)
+        # and light (#78716c) — the latter sits better on the warm
+        # off-white background.
+        palette = styles.get_active_palette(self._theme_getter())
+
+        # Download line — primary amber (same in both themes — brand)
+        accent = QColor(palette.ACCENT)
+        pen_down = QPen(accent, 1.6)
         pen_down.setJoinStyle(Qt.RoundJoin)
         p.setPen(pen_down)
-        p.drawPath(line(self._down, QColor(styles.ACCENT)))
+        p.drawPath(line(self._down, accent))
 
-        # Upload line — dimmer / muted
-        pen_up = QPen(QColor(styles.TEXT_DIM), 1.2)
+        # Upload line — dimmer / muted, theme-tinted
+        text_dim = QColor(palette.TEXT_DIM)
+        pen_up = QPen(text_dim, 1.2)
         pen_up.setStyle(Qt.DashLine)
         p.setPen(pen_up)
-        p.drawPath(line(self._up, QColor(styles.TEXT_DIM)))
+        p.drawPath(line(self._up, text_dim))
