@@ -382,6 +382,8 @@ def build_config(
             "type": "field",
             "outboundTag": "proxy",
             "domain": [
+                "domain:myip.com",       # v1.10.4 primary probe endpoint
+                "domain:httpbin.org",    # v1.10.4 fallback
                 "domain:ipinfo.io",
                 "domain:ipify.org",
                 "domain:ifconfig.co",

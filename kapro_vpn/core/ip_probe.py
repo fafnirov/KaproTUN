@@ -126,18 +126,55 @@ class PublicIp:
 
 
 # Probe-endpoint registry. We try these in order; first one that returns
-# a parseable IP wins. Multiple endpoints needed because v1.10.1 user
-# discovered AdGuard DNS classifies `ipinfo.io` as a tracking domain
-# and NXDOMAINs it — our own ad-block feature killed our own probe.
+# a parseable IP wins.
 #
-# Order matters: ipinfo.io first because it gives full geo (country +
-# city) in one shot. Fallbacks are IP-only or country-only — better
-# than no info at all, and crucially they're "boring IP services"
-# rather than "analytics endpoints" so they're rarely in blocklists.
+# v1.10.4 rearrangement after user logs showed AdGuard DNS NXDOMAIN'ing
+# ALL three of our v1.10.3 domain-based endpoints (ipinfo.io, ipify.org,
+# ifconfig.co — all classed by AdGuard as "analytics/tracking"). The
+# fallback chain was useless when every link in it was blocked.
 #
-# Each entry: (url, parser_callable). Parser takes the parsed JSON,
-# returns (ip, country_code, city) tuple or raises on bad data.
-def _parse_ipinfo(data: dict) -> tuple[str, str, Optional[str]]:
+# I briefly considered Cloudflare's 1.1.1.1/cdn-cgi/trace (IP-literal,
+# AdGuard-proof), but `_ALWAYS_BYPASS` in controller.py routes 1.1.1.1
+# DIRECT at the OS layer (for DNS-leak protection) — any HTTPS to
+# 1.1.1.1 would skip the VPN entirely and report the user's REAL IP,
+# defeating the whole point.
+#
+# Picked api.myip.com (a simple JSON IP service, not in mainstream
+# adblock lists) as new primary — gives both IP and country in one shot.
+# httpbin.org/ip as IP-only fallback (Postman-affiliated testing service,
+# popular among devs, unlikely to be flagged as a tracker). Old
+# AdGuard-blocked endpoints kept for users on System/Cloudflare/Quad9
+# DNS who don't have that blocking layer.
+#
+# Each entry: (url, handler). Handler takes the `requests.Response`,
+# returns (ip, country_code, city) or raises on bad data.
+def _handle_api_myip(r) -> tuple[str, str, Optional[str]]:
+    """api.myip.com response: {"ip":"1.2.3.4","country":"United States","cc":"US"}"""
+    data = r.json()
+    ip = str(data.get("ip") or "").strip()
+    if not ip:
+        raise ValueError("no ip field")
+    code = str(data.get("cc") or "").strip().upper()
+    return ip, code, None  # endpoint doesn't carry city
+
+
+def _handle_httpbin(r) -> tuple[str, str, Optional[str]]:
+    """httpbin.org/ip response: {"origin": "1.2.3.4"}
+
+    When sitting behind a proxy chain, `origin` can be a comma-separated
+    list ("1.2.3.4, 5.6.7.8") — take the first which is the outermost-
+    visible IP.
+    """
+    data = r.json()
+    raw = str(data.get("origin") or "").strip()
+    if not raw:
+        raise ValueError("no origin field")
+    ip = raw.split(",", 1)[0].strip()
+    return ip, "", None
+
+
+def _handle_ipinfo(r) -> tuple[str, str, Optional[str]]:
+    data = r.json()
     ip = str(data.get("ip") or "").strip()
     if not ip:
         raise ValueError("no ip field")
@@ -146,32 +183,37 @@ def _parse_ipinfo(data: dict) -> tuple[str, str, Optional[str]]:
     return ip, code, city
 
 
-def _parse_ipify(data: dict) -> tuple[str, str, Optional[str]]:
+def _handle_ipify(r) -> tuple[str, str, Optional[str]]:
     # IP-only service. We get the IP, but country is empty — UI will
-    # show just "Ваш IP: X.X.X.X" without the country suffix. Still
-    # better than the label staying hidden.
+    # show just "Ваш IP: X.X.X.X" without the country suffix.
+    data = r.json()
     ip = str(data.get("ip") or "").strip()
     if not ip:
         raise ValueError("no ip field")
     return ip, "", None
 
 
-def _parse_ifconfig_co(data: dict) -> tuple[str, str, Optional[str]]:
+def _handle_ifconfig_co(r) -> tuple[str, str, Optional[str]]:
+    data = r.json()
     ip = str(data.get("ip") or "").strip()
     if not ip:
         raise ValueError("no ip field")
-    # ifconfig.co returns full country name ("Netherlands") in `country`
-    # and 2-letter code in `country_iso`. We want the code for our
-    # localization table lookup.
     code = str(data.get("country_iso") or "").strip().upper()
     city = str(data.get("city") or "").strip() or None
     return ip, code, city
 
 
 _PROBE_ENDPOINTS: list[tuple[str, callable]] = [
-    ("https://ipinfo.io/json",         _parse_ipinfo),
-    ("https://api.ipify.org?format=json", _parse_ipify),
-    ("https://ifconfig.co/json",       _parse_ifconfig_co),
+    # NEW (v1.10.4): not-typically-blocked endpoints first. Both give IP;
+    # api.myip.com adds country code in one shot.
+    ("https://api.myip.com",                  _handle_api_myip),
+    ("https://httpbin.org/ip",                _handle_httpbin),
+    # Old fallbacks. AdGuard typically blocks all three of these but
+    # they work fine for users on System/Cloudflare/Quad9 DNS where
+    # there's no domain-level adblock layer.
+    ("https://ipinfo.io/json",                _handle_ipinfo),
+    ("https://api.ipify.org?format=json",     _handle_ipify),
+    ("https://ifconfig.co/json",              _handle_ifconfig_co),
 ]
 
 
@@ -261,7 +303,7 @@ def _probe_with_fallback(
     # Beeline-Moscow v6 instead of the VPN's v4 — that's the bug
     # this context manager fixes.
     with _force_ipv4():
-        for url, parser in _PROBE_ENDPOINTS:
+        for url, handler in _PROBE_ENDPOINTS:
             host = url.split("//", 1)[-1].split("/", 1)[0]
             try:
                 r = requests.get(
@@ -292,17 +334,10 @@ def _probe_with_fallback(
                 continue
 
             try:
-                data = r.json()
-            except ValueError:
-                last_error = f"{host}: non-JSON response"
-                _say(f"[ip-probe] {host}: non-JSON response, trying next")
-                continue
-
-            try:
-                ip, code, city = parser(data)
+                ip, code, city = handler(r)
             except Exception as e:
-                last_error = f"{host}: parser failed: {e}"
-                _say(f"[ip-probe] {host}: parser failed: {e}, trying next")
+                last_error = f"{host}: handler failed: {type(e).__name__}: {e}"
+                _say(f"[ip-probe] {host}: handler failed: {type(e).__name__}: {e}, trying next")
                 continue
 
             # Success. country_code may be empty (ipify is IP-only) — that's
