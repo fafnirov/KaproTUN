@@ -371,6 +371,24 @@ def build_config(
     # Cloudflare (fast, no filter), Quad9 (security only, no ads), System
     # (no change). User who wants ad-block picks AdGuard, gets ad-block.
     if dns_opt.key == "adguard":
+        # First — allow-list our own public-IP probe endpoints. v1.10.1
+        # user discovered AdGuard's blocklist NXDOMAIN's ipinfo.io
+        # (classed as a tracker). At the DNS layer we can't fight that —
+        # the resolver answers before xray sees the packet. But at the
+        # xray routing layer we can force them to "proxy" outbound BEFORE
+        # the geosite:category-ads-all block kicks in. Rule order matters
+        # — first match wins.
+        rules.append({
+            "type": "field",
+            "outboundTag": "proxy",
+            "domain": [
+                "domain:ipinfo.io",
+                "domain:ipify.org",
+                "domain:ifconfig.co",
+                "domain:ifconfig.me",
+                "domain:icanhazip.com",
+            ],
+        })
         rules.append({
             "type": "field",
             "outboundTag": "block",

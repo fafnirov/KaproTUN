@@ -90,6 +90,56 @@ class PublicIp:
     city: Optional[str] = None # may be missing on the free ipinfo.io tier
 
 
+# Probe-endpoint registry. We try these in order; first one that returns
+# a parseable IP wins. Multiple endpoints needed because v1.10.1 user
+# discovered AdGuard DNS classifies `ipinfo.io` as a tracking domain
+# and NXDOMAINs it — our own ad-block feature killed our own probe.
+#
+# Order matters: ipinfo.io first because it gives full geo (country +
+# city) in one shot. Fallbacks are IP-only or country-only — better
+# than no info at all, and crucially they're "boring IP services"
+# rather than "analytics endpoints" so they're rarely in blocklists.
+#
+# Each entry: (url, parser_callable). Parser takes the parsed JSON,
+# returns (ip, country_code, city) tuple or raises on bad data.
+def _parse_ipinfo(data: dict) -> tuple[str, str, Optional[str]]:
+    ip = str(data.get("ip") or "").strip()
+    if not ip:
+        raise ValueError("no ip field")
+    code = str(data.get("country") or "").strip().upper()
+    city = str(data.get("city") or "").strip() or None
+    return ip, code, city
+
+
+def _parse_ipify(data: dict) -> tuple[str, str, Optional[str]]:
+    # IP-only service. We get the IP, but country is empty — UI will
+    # show just "Ваш IP: X.X.X.X" without the country suffix. Still
+    # better than the label staying hidden.
+    ip = str(data.get("ip") or "").strip()
+    if not ip:
+        raise ValueError("no ip field")
+    return ip, "", None
+
+
+def _parse_ifconfig_co(data: dict) -> tuple[str, str, Optional[str]]:
+    ip = str(data.get("ip") or "").strip()
+    if not ip:
+        raise ValueError("no ip field")
+    # ifconfig.co returns full country name ("Netherlands") in `country`
+    # and 2-letter code in `country_iso`. We want the code for our
+    # localization table lookup.
+    code = str(data.get("country_iso") or "").strip().upper()
+    city = str(data.get("city") or "").strip() or None
+    return ip, code, city
+
+
+_PROBE_ENDPOINTS: list[tuple[str, callable]] = [
+    ("https://ipinfo.io/json",         _parse_ipinfo),
+    ("https://api.ipify.org?format=json", _parse_ipify),
+    ("https://ifconfig.co/json",       _parse_ifconfig_co),
+]
+
+
 def _country_display(code: str, fallback: str, locale: str) -> str:
     """Map ISO code → display name. Russian table when locale=='ru',
     otherwise return whatever ipinfo.io gave us in `country` (English).
@@ -149,44 +199,61 @@ def fetch_public_ip(
     else:
         _say("[ip-probe] starting direct (TUN mode — kernel routes through tunnel)")
 
-    try:
-        r = requests.get(
-            "https://ipinfo.io/json",
-            timeout=timeout,
-            proxies=proxies,
-            headers={"User-Agent": "KaproVPN/ip-probe"},
-        )
-    except requests.exceptions.Timeout:
-        _say(f"[ip-probe] timeout after {timeout}s — VPN server slow or ipinfo.io blocked")
-        return None
-    except requests.exceptions.ConnectionError as e:
-        # PySocks missing on bundled .exe surfaces here as
-        # InvalidSchema or ConnectionError with "Missing dependencies
-        # for SOCKS support" in the message — easy to spot in logs.
-        _say(f"[ip-probe] connection failed: {e}")
-        return None
-    except Exception as e:
-        _say(f"[ip-probe] unexpected error: {type(e).__name__}: {e}")
-        return None
+    # Try each endpoint in order until one succeeds. Per-endpoint
+    # timeout is shorter than the total budget so a single dead
+    # endpoint doesn't eat the whole probe window.
+    per_endpoint_timeout = max(2.0, timeout / len(_PROBE_ENDPOINTS))
 
-    if r.status_code != 200:
-        _say(f"[ip-probe] HTTP {r.status_code} from ipinfo.io")
-        return None
+    last_error = "no endpoints tried"
+    for url, parser in _PROBE_ENDPOINTS:
+        host = url.split("//", 1)[-1].split("/", 1)[0]
+        try:
+            r = requests.get(
+                url,
+                timeout=per_endpoint_timeout,
+                proxies=proxies,
+                headers={"User-Agent": "KaproVPN/ip-probe"},
+            )
+        except requests.exceptions.Timeout:
+            last_error = f"{host}: timeout after {per_endpoint_timeout:.1f}s"
+            _say(f"[ip-probe] {host}: timeout, trying next endpoint")
+            continue
+        except requests.exceptions.ConnectionError as e:
+            # AdGuard DNS NXDOMAIN'ing the endpoint shows up here as
+            # NameResolutionError → ConnectionError. PySocks-missing
+            # on bundled .exe also lands here.
+            last_error = f"{host}: connection failed: {e}"
+            _say(f"[ip-probe] {host}: connection failed (likely blocked/no-DNS), trying next")
+            continue
+        except Exception as e:
+            last_error = f"{host}: {type(e).__name__}: {e}"
+            _say(f"[ip-probe] {host}: {type(e).__name__}, trying next")
+            continue
 
-    try:
-        data = r.json()
-    except ValueError:
-        _say("[ip-probe] ipinfo.io returned non-JSON")
-        return None
+        if r.status_code != 200:
+            last_error = f"{host}: HTTP {r.status_code}"
+            _say(f"[ip-probe] {host}: HTTP {r.status_code}, trying next")
+            continue
 
-    ip = str(data.get("ip") or "").strip()
-    if not ip:
-        _say("[ip-probe] ipinfo.io response had no 'ip' field")
-        return None
+        try:
+            data = r.json()
+        except ValueError:
+            last_error = f"{host}: non-JSON response"
+            _say(f"[ip-probe] {host}: non-JSON response, trying next")
+            continue
 
-    code = str(data.get("country") or "").strip().upper()
-    city = str(data.get("city") or "").strip() or None
-    name = _country_display(code, fallback=code, locale=locale)
-    _say(f"[ip-probe] OK: {ip} {code or '??'} {city or ''}".rstrip())
+        try:
+            ip, code, city = parser(data)
+        except Exception as e:
+            last_error = f"{host}: parser failed: {e}"
+            _say(f"[ip-probe] {host}: parser failed: {e}, trying next")
+            continue
 
-    return PublicIp(ip=ip, country_code=code, country_name=name, city=city)
+        # Success. country_code may be empty (ipify is IP-only) — that's
+        # fine, the UI just shows the IP without country suffix.
+        name = _country_display(code, fallback=code, locale=locale)
+        _say(f"[ip-probe] OK via {host}: {ip} {code or '(no country)'} {city or ''}".rstrip())
+        return PublicIp(ip=ip, country_code=code, country_name=name, city=city)
+
+    _say(f"[ip-probe] all endpoints failed. Last error: {last_error}")
+    return None
