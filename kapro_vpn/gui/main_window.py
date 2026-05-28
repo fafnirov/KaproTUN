@@ -50,6 +50,7 @@ from .subscription_autorefresh import SubscriptionAutoRefresh
 from .config_dialog import AddConfigDialog
 from .stats_page import StatsPage
 from .world_map import WorldMapWidget
+from . import window_resize
 from .configs_picker import ConfigsPickerDialog
 from .installer_dialog import ensure_geoip_ru_cached, ensure_tun2socks_installed, ensure_xray_installed
 from .sites_dialog import SitesDialog
@@ -1022,16 +1023,28 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("KaproVPN")
         self.setWindowIcon(icons.app_icon())
-        # 480 px gives Russian labels enough breathing room — at 420 the
+        # v1.16.1: resizable. Default 480×870 (the long-standing fixed
+        # size that everything's been laid out for), restored from
+        # settings if the user resized it before. Minimum 480×780 —
+        # bandwidth chart is 420 wide so we need 420 + 24+24 margins =
+        # 468 minimum, rounded up to 480 with a tiny safety buffer.
+        # Height 780 fits the Stats page's live+24h blocks tightly;
+        # smaller would clip the chart. No max — let the user go as
+        # big as their monitor.
+        #
+        # 480px gives Russian labels enough breathing room — at 420 the
         # radio-button text and a few hints were getting clipped.
-        # v1.14.5: 820 → 870 to restore the connect button to a larger
-        # 220×220 (was 190 in v1.14.4) — at 190 the "ПОДКЛЮЧЕНИЕ…"
-        # state text didn't fit and clipped on the left, and the
-        # button no longer visually dominated the page the way the
-        # AmneziaVPN-style design wants. Extra 50 px gives room for
-        # the bigger button plus a wider gap between it and the
-        # status text below.
-        self.setFixedSize(480, 870)
+        # v1.14.5: 820 → 870 default H to restore the connect button
+        # to a larger 220×220 with proper spacing.
+        self.setMinimumSize(480, 780)
+        saved_size = self.manager.settings.get("window_size", [480, 870])
+        try:
+            w, h = int(saved_size[0]), int(saved_size[1])
+        except (TypeError, ValueError, IndexError):
+            w, h = 480, 870
+        # Clamp restored size to the minimum so a corrupted settings
+        # file can't shrink us below usable.
+        self.resize(max(w, 480), max(h, 780))
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowMinimizeButtonHint)
 
         self.manager = ConnectionManager(on_log=self.log_received.emit)
@@ -1115,6 +1128,21 @@ class MainWindow(QMainWindow):
 
         self.nav = NavBar()
         root.addWidget(self.nav)
+
+        # v1.16.1: QSizeGrip fallback for macOS / Linux frameless resize.
+        # On Windows we already get all 8 edges via WM_NCHITTEST so this
+        # branch is skipped — the grip would otherwise sit awkwardly
+        # under the nav-bar row competing with native edge-drag.
+        if sys.platform != "win32":
+            grip = window_resize.install_size_grip(self)
+            grip.setParent(self)
+            grip.raise_()  # stay on top of the nav-bar
+            # Anchor to bottom-right via a moveEvent shim — addWidget'ing
+            # into the existing nav-bar row would shift the bottom nav
+            # icons. Reposition in resizeEvent below.
+            self._size_grip = grip
+        else:
+            self._size_grip = None
 
         # System tray (gracefully no-op if user's DE doesn't expose one)
         self.tray = TrayManager(self)
@@ -1935,6 +1963,41 @@ class MainWindow(QMainWindow):
             self._do_disconnect()
         self._do_connect()
         self._refresh_home()
+
+    # --- frameless resize support (v1.16.1) -------------------------------
+
+    def nativeEvent(self, eventType, message):  # noqa: N802
+        """Forward WM_NCHITTEST to window_resize so Windows treats the 6 px
+        border around our client area as a native resize zone.
+
+        Returns the Qt-required (handled: bool, result: int) tuple. For
+        non-Windows / non-NCHITTEST events the helper says "not handled"
+        and we fall through to the base implementation (which routes
+        the message to the regular event filter chain).
+        """
+        handled, result = window_resize.handle_native_event(self, eventType, message)
+        if handled:
+            return True, result
+        return super().nativeEvent(eventType, message)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        """Persist the new size to settings on every resize + reposition
+        the macOS/Linux size grip.
+
+        Cheap — just writes a small JSON file. The manager.update_settings
+        call ends up at storage.save_settings which atomic-writes a temp
+        file + rename, so a crash mid-resize can't corrupt the file.
+        Throttling could be added later if it shows up in profiles, but
+        even fast drag-resize fires the event ~30 Hz max which is fine.
+        """
+        super().resizeEvent(event)
+        sz = event.size()
+        self.manager.update_settings(window_size=[sz.width(), sz.height()])
+        # macOS/Linux QSizeGrip needs manual repositioning since we
+        # don't put it in a layout (would shift nav-bar icons).
+        if self._size_grip is not None:
+            g = self._size_grip
+            g.move(sz.width() - g.width(), sz.height() - g.height())
 
     # --- shutdown ---------------------------------------------------------
 

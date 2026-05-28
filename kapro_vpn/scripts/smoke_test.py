@@ -462,6 +462,82 @@ check("webrtc_block targets STUN ports only (DNS/QUIC safe)",
 
 
 # ---------------------------------------------------------------------------
+# Test 5.8 — Frameless window resize (v1.16.1)
+# ---------------------------------------------------------------------------
+# WM_NCHITTEST mapping is the trickiest part of frameless resize:
+# wrong border math means dead zones or click-stealing. We can test
+# the hit-test geometry without a real Windows MSG by calling the
+# pure-Python windows_hit_test() against a dummy widget at known
+# screen coordinates.
+
+section("Frameless window resize — hit-test geometry")
+
+
+def _hit_test_corners_and_edges() -> None:
+    """Pure-function hit-test — no QApplication needed."""
+    from kapro_vpn.gui import window_resize as _wr
+
+    W, H = 400, 300  # widget dimensions
+
+    # Centre of widget → HTCLIENT (Qt handles it as a normal mouse event).
+    if _wr.hit_test_local(200, 150, W, H) != _wr._HTCLIENT:
+        raise AssertionError(
+            f"centre of widget should be HTCLIENT, got "
+            f"{_wr.hit_test_local(200, 150, W, H)}"
+        )
+    # Each corner — within the 6 px border in both axes.
+    if _wr.hit_test_local(0, 0, W, H) != _wr._HTTOPLEFT:
+        raise AssertionError("(0,0) local should be HTTOPLEFT")
+    if _wr.hit_test_local(W - 1, 0, W, H) != _wr._HTTOPRIGHT:
+        raise AssertionError("top-right pixel should be HTTOPRIGHT")
+    if _wr.hit_test_local(0, H - 1, W, H) != _wr._HTBOTTOMLEFT:
+        raise AssertionError("bottom-left pixel should be HTBOTTOMLEFT")
+    if _wr.hit_test_local(W - 1, H - 1, W, H) != _wr._HTBOTTOMRIGHT:
+        raise AssertionError("bottom-right pixel should be HTBOTTOMRIGHT")
+    # Mid-edges — within the border on only one axis.
+    if _wr.hit_test_local(2, 150, W, H) != _wr._HTLEFT:
+        raise AssertionError("left-edge midpoint should be HTLEFT")
+    if _wr.hit_test_local(W - 2, 150, W, H) != _wr._HTRIGHT:
+        raise AssertionError("right-edge midpoint should be HTRIGHT")
+    if _wr.hit_test_local(200, 2, W, H) != _wr._HTTOP:
+        raise AssertionError("top-edge midpoint should be HTTOP")
+    if _wr.hit_test_local(200, H - 2, W, H) != _wr._HTBOTTOM:
+        raise AssertionError("bottom-edge midpoint should be HTBOTTOM")
+    # Just inside the border — the off-by-one zone that the OPEN
+    # inner interval guards. Click at exactly border-distance from
+    # the edge should NOT be a resize zone.
+    if _wr.hit_test_local(6, 150, W, H) != _wr._HTCLIENT:
+        raise AssertionError(
+            "x=6 (== border width) should be HTCLIENT — off-by-one regression"
+        )
+
+
+def _hit_test_handles_negative_screen_coords() -> None:
+    """Multi-monitor virtual screen sticks the second monitor at negative
+    X, so lParam unpacking must treat the values as SIGNED 16-bit. If
+    someone refactors _parse_nchittest_pos to use unsigned, a -100
+    becomes 65436 and breaks the hit test for users with a left-of-
+    primary monitor.
+    """
+    from kapro_vpn.gui import window_resize as _wr
+    # Pack (-100, -50) into an lParam the way Windows does.
+    lparam = ((-50 & 0xFFFF) << 16) | (-100 & 0xFFFF)
+    x, y = _wr._parse_nchittest_pos(lparam)
+    if (x, y) != (-100, -50):
+        raise AssertionError(
+            f"negative screen coords lost sign: got ({x}, {y}), "
+            f"expected (-100, -50). Multi-monitor users will see broken "
+            f"hit-test."
+        )
+
+
+check("window resize: corners and edges hit-test correctly",
+      _hit_test_corners_and_edges)
+check("window resize: signed lParam parse (multi-monitor safe)",
+      _hit_test_handles_negative_screen_coords)
+
+
+# ---------------------------------------------------------------------------
 # Test 5.6 — Configs-picker search filter (v1.12.0)
 # ---------------------------------------------------------------------------
 # The matcher is a pure static method on the dialog class — no Qt needed

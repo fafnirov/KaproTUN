@@ -138,6 +138,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "ipv6_leak_protection": True,  # block global-unicast IPv6 outbound in TUN mode
     "webrtc_leak_protection": True,  # block STUN UDP (3478/5349/19302/19305-19308) so browsers can't leak real IP via WebRTC
     "theme": "auto",  # "auto" (follow OS) / "dark" / "light" — see gui/styles.py
+    "window_size": [480, 870],  # [w, h] — restored on launch, saved on close
 }
 
 
