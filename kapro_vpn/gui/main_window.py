@@ -143,7 +143,17 @@ class HomePage(QWidget):
         layout.addSpacing(4)
         layout.addWidget(self.sparkline)
 
-        layout.addStretch(1)
+        # v1.14.6: bottom stretch replaced with a small fixed gap so
+        # the map sits right above "Прямые сайты". Previously the
+        # stretch ate ~100 px of empty space when sparkline + traffic
+        # rows were hidden (most of the time — xray Stats API often
+        # returns nothing on TUN-mode connections). Result: a huge
+        # void between the map and "Прямые сайты", which the user
+        # rightly called out. Free vertical space now all goes to the
+        # top stretch (line 83) between the title and the connect
+        # circle — pushes the circle down to vertical centre and the
+        # status/IP/map block hugs the "Прямые сайты" line below.
+        layout.addSpacing(24)
 
         # Info row about split routing
         self._info_label = QLabel()
