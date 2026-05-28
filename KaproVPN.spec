@@ -62,6 +62,11 @@ a = Analysis(
         # platform backend (psutil._psutil_windows) is loaded via C ext
         # and the analyzer needs the hint to bundle the compiled .pyd.
         'psutil',
+        # cryptography (v1.16.12) — AES-256-GCM for config encryption on
+        # macOS/Linux. secrets_store imports it lazily inside functions;
+        # naming it here guarantees PyInstaller's cryptography hook pulls
+        # in the Rust backend (_rust). Harmless on Windows (DPAPI path).
+        'cryptography.hazmat.primitives.ciphers.aead',
     ],
     hookspath=[],
     hooksconfig={},

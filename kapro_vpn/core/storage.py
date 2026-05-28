@@ -5,8 +5,10 @@ current user account can read it). load_configs() transparently handles
 both encrypted and legacy plaintext files — opening an old pre-1.8.0
 file still works, and the next save flips it to encrypted form.
 
-On mac/Linux configs stay plaintext (file permissions only — same as
-~/.ssh/config). DPAPI replacement on those platforms is future work.
+On macOS/Linux (v1.16.12+) configs are AES-256-GCM encrypted with a key
+held in the OS keystore (Keychain / Secret Service) — see secrets_store.
+Where no keystore is available (headless Linux) they fall back to
+plaintext, protected by file permissions only, same as ~/.ssh/config.
 
 What's NOT encrypted: sites.json (just domain names — not secret), and
 settings.json (mostly preferences, but subscription_url IS a secret —

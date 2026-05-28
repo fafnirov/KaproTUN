@@ -1440,6 +1440,94 @@ _paths.sites_file = _orig_sites_file
 
 
 # ---------------------------------------------------------------------------
+# Test 12 — config encryption: AES-GCM crypto layer (v1.16.12)
+# ---------------------------------------------------------------------------
+# macOS/Linux at-rest encryption uses AES-256-GCM with a key from the OS
+# keystore. The keystore can't be exercised on the headless CI runner, but
+# the *crypto* layer is keystore-free and must be correct everywhere:
+# round-trip, random nonce, tamper detection, and the magic-prefix dispatch
+# in the public encrypt/decrypt/looks_encrypted API.
+
+section("Config encryption — AES-GCM crypto layer")
+
+from kapro_vpn.core import secrets_store as _ss
+
+_KEY = b"\x11" * 32          # fixed 32-byte AES-256 test key
+_PLAIN = b'[{"name":"\xd1\x82\xd0\xb5\xd1\x81\xd1\x82","raw_url":"vless://x"}]'
+
+
+def _aesgcm_round_trip() -> None:
+    blob = _ss._encrypt_with_key(_KEY, _PLAIN)
+    if _ss._decrypt_with_key(_KEY, blob) != _PLAIN:
+        raise AssertionError("AES-GCM round-trip mismatch")
+
+
+def _aesgcm_random_nonce() -> None:
+    # Two encryptions of the same plaintext must differ (random nonce) yet
+    # both decrypt back to the original.
+    a = _ss._encrypt_with_key(_KEY, _PLAIN)
+    b = _ss._encrypt_with_key(_KEY, _PLAIN)
+    if a == b:
+        raise AssertionError("nonce not random — identical ciphertexts")
+    if _ss._decrypt_with_key(_KEY, a) != _PLAIN or _ss._decrypt_with_key(_KEY, b) != _PLAIN:
+        raise AssertionError("decrypt failed for one of the variants")
+
+
+def _aesgcm_tamper_detected() -> None:
+    blob = bytearray(_ss._encrypt_with_key(_KEY, _PLAIN))
+    blob[-1] ^= 0xFF            # flip a tag byte
+    try:
+        _ss._decrypt_with_key(_KEY, bytes(blob))
+    except Exception:
+        return                  # good — GCM caught the tamper
+    raise AssertionError("tampered ciphertext decrypted without error")
+
+
+def _looks_encrypted_dispatch() -> None:
+    if not _ss.looks_encrypted(_ss.AESGCM_MAGIC + b"x"):
+        raise AssertionError("AESGCM magic not recognised")
+    if not _ss.looks_encrypted(_ss.DPAPI_MAGIC + b"x"):
+        raise AssertionError("DPAPI magic not recognised")
+    if _ss.looks_encrypted(b'[{"name":"plain"}]'):
+        raise AssertionError("plaintext misclassified as encrypted")
+
+
+def _public_decrypt_dispatch() -> None:
+    # decrypt() pulls the DEK from the keystore; inject a fixed key so the
+    # dispatch path is exercised without a real keystore.
+    orig = _ss._get_dek
+    _ss._get_dek = lambda: _KEY
+    try:
+        full = _ss.AESGCM_MAGIC + _ss._encrypt_with_key(_KEY, _PLAIN)
+        if _ss.decrypt(full) != _PLAIN:
+            raise AssertionError("public decrypt() of AESGCM blob failed")
+    finally:
+        _ss._get_dek = orig
+
+
+check("AES-GCM round-trip",            _aesgcm_round_trip)
+check("AES-GCM random nonce",          _aesgcm_random_nonce)
+check("AES-GCM tamper detected",       _aesgcm_tamper_detected)
+check("looks_encrypted dispatch",      _looks_encrypted_dispatch)
+check("public decrypt() dispatch",     _public_decrypt_dispatch)
+
+
+def _dpapi_round_trip() -> None:
+    # Windows-only: the multi-backend refactor must not break DPAPI.
+    # Skipped on the Linux CI runner.
+    if sys.platform != "win32":
+        return
+    blob = _ss.encrypt(_PLAIN)
+    if not blob.startswith(_ss.DPAPI_MAGIC):
+        raise AssertionError("Windows encrypt() didn't use DPAPI magic")
+    if _ss.decrypt(blob) != _PLAIN:
+        raise AssertionError("DPAPI round-trip mismatch")
+
+
+check("DPAPI round-trip (win32 only)", _dpapi_round_trip)
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 
