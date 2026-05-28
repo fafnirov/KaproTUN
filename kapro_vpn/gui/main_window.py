@@ -1037,7 +1037,12 @@ class MainWindow(QMainWindow):
         # v1.14.5: 820 → 870 default H to restore the connect button
         # to a larger 220×220 with proper spacing.
         self.setMinimumSize(480, 780)
-        saved_size = self.manager.settings.get("window_size", [480, 870])
+        # Restore the persisted window size BEFORE building the manager
+        # (which we don't have yet — going to storage directly).
+        # storage.load_settings is the canonical reader; manager just
+        # caches the same dict on .settings later.
+        saved_settings = storage.load_settings()
+        saved_size = saved_settings.get("window_size", [480, 870])
         try:
             w, h = int(saved_size[0]), int(saved_size[1])
         except (TypeError, ValueError, IndexError):
@@ -1989,15 +1994,21 @@ class MainWindow(QMainWindow):
         file + rename, so a crash mid-resize can't corrupt the file.
         Throttling could be added later if it shows up in profiles, but
         even fast drag-resize fires the event ~30 Hz max which is fine.
+
+        Guards: Qt may fire resizeEvent during __init__ before our
+        manager and _size_grip attributes exist (e.g. the implicit
+        resize when setMinimumSize is called). hasattr/getattr handle
+        the early-init case without raising.
         """
         super().resizeEvent(event)
         sz = event.size()
-        self.manager.update_settings(window_size=[sz.width(), sz.height()])
+        if hasattr(self, "manager"):
+            self.manager.update_settings(window_size=[sz.width(), sz.height()])
         # macOS/Linux QSizeGrip needs manual repositioning since we
         # don't put it in a layout (would shift nav-bar icons).
-        if self._size_grip is not None:
-            g = self._size_grip
-            g.move(sz.width() - g.width(), sz.height() - g.height())
+        grip = getattr(self, "_size_grip", None)
+        if grip is not None:
+            grip.move(sz.width() - grip.width(), sz.height() - grip.height())
 
     # --- shutdown ---------------------------------------------------------
 
