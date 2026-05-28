@@ -43,11 +43,21 @@ class CircleConnectButton(QPushButton):
     burst/pulse chain via QPropertyAnimation.finished hand-off.
     """
 
-    BURST_PEAK = 130.0
+    # v1.14.2: blur radii cut by ~3× from v1.14.1 values (130/90/80/30
+    # → 60/40/30/12). QGraphicsDropShadowEffect renders the blur into
+    # the widget's parent QPainter pass, so a large radius extended the
+    # halo 80-130 px in every direction — through the "Подключено" /
+    # "Ваш IP" lines BELOW the button and over the world-map's top edge.
+    # The user saw a diagonal "ray" through the map: that's actually the
+    # circular outer edge of the giant blur intersecting the rectangular
+    # map area, looking like a tangent line. Shrinking the radii keeps
+    # the attention-grabbing pulse animation but stops it from bleeding
+    # into neighbouring widgets.
+    BURST_PEAK = 60.0
     BURST_DURATION_MS = 400
-    PULSE_LOW = 30.0
-    PULSE_HIGH = 90.0
-    CONNECTED_GLOW = 80.0
+    PULSE_LOW = 12.0
+    PULSE_HIGH = 40.0
+    CONNECTED_GLOW = 30.0
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__("ВКЛЮЧИТЬ", parent)
