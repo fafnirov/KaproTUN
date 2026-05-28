@@ -101,7 +101,7 @@ def _import_core() -> None:
         controller, parser, xray_config, storage, paths,
         subscription, geoip_ru, killswitch, i18n, system_proxy,
         ip_probe, dns_options, secrets_store, ipv6_block,
-        bandwidth_history, webrtc_block, leak_test,
+        bandwidth_history, webrtc_block, leak_test, crash_handler,
     )
 
 
@@ -1525,6 +1525,104 @@ def _dpapi_round_trip() -> None:
 
 
 check("DPAPI round-trip (win32 only)", _dpapi_round_trip)
+
+
+# ---------------------------------------------------------------------------
+# Test 13 — startup reliability: atomic writes + crash handler (v1.16.13)
+# ---------------------------------------------------------------------------
+# Atomic writes kill the partial-write corruption that caused v1.16.11.
+# The crash handler must log + recover without ever raising itself.
+
+section("Startup reliability — atomic write + crash handler")
+
+from kapro_vpn.core import crash_handler as _ch
+
+_rel_tmp = _Path(_tempfile.mkdtemp(prefix="kapro-smoke-rel-"))
+
+
+def _atomic_round_trip() -> None:
+    target = _rel_tmp / "configs.json"
+    _storage._atomic_write_bytes(target, b'[{"name":"x"}]')
+    if target.read_bytes() != b'[{"name":"x"}]':
+        raise AssertionError("atomic write content mismatch")
+    # overwrite must also be atomic and leave no .tmp behind
+    _storage._atomic_write_bytes(target, b'[]')
+    if target.read_bytes() != b'[]':
+        raise AssertionError("atomic overwrite mismatch")
+    if (_rel_tmp / "configs.json.tmp").exists():
+        raise AssertionError("temp file not cleaned up after write")
+
+
+def _crash_log_written() -> None:
+    orig = _paths.logs_dir
+    _paths.logs_dir = lambda: _rel_tmp
+    try:
+        try:
+            raise ValueError("smoke-boom")
+        except ValueError as e:
+            p = _ch.write_crash_log(e)
+        if p is None or not p.is_file():
+            raise AssertionError("crash log not written")
+        text = p.read_text(encoding="utf-8")
+        if "ValueError" not in text or "smoke-boom" not in text:
+            raise AssertionError("crash log missing traceback content")
+    finally:
+        _paths.logs_dir = orig
+
+
+def _quarantine_moves_settings() -> None:
+    orig = _paths.settings_file
+    sett = _rel_tmp / "settings.json"
+    sett.write_bytes(b'{"x":1}')
+    _paths.settings_file = lambda: sett
+    try:
+        if _ch._quarantine_settings() is not True:
+            raise AssertionError("quarantine should return True when file exists")
+        if sett.exists():
+            raise AssertionError("settings.json should have been moved")
+        if not list(_rel_tmp.glob("settings.bad-*.json")):
+            raise AssertionError("no quarantined settings.bad-* file found")
+        if _ch._quarantine_settings() is not False:
+            raise AssertionError("quarantine should return False when nothing to move")
+    finally:
+        _paths.settings_file = orig
+
+
+def _crash_dialog_builds() -> None:
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+    box, buttons = _ch._build_message_box("Err: x", "traceback…", _rel_tmp / "crash-x.log")
+    if set(buttons) != {"reset", "logs", "close"}:
+        raise AssertionError(f"unexpected dialog buttons: {set(buttons)}")
+    box.deleteLater()
+
+
+def _main_safe_mode_wiring() -> None:
+    # An unhandled startup exception must be caught, logged, and turned
+    # into exit code 1 — never propagated as a raw traceback.
+    from kapro_vpn import main as _main
+    orig_run, orig_dialog, orig_logs = _main._run_app, _ch._show_dialog, _paths.logs_dir
+    _main._run_app = lambda: (_ for _ in ()).throw(RuntimeError("smoke-startup-boom"))
+    _ch._show_dialog = lambda exc, log: "close"   # don't pop a real dialog
+    _paths.logs_dir = lambda: _rel_tmp
+    try:
+        rc = _main.main()
+        if rc != 1:
+            raise AssertionError(f"expected exit code 1 from crashed startup, got {rc}")
+        if not list(_rel_tmp.glob("crash-*.log")):
+            raise AssertionError("startup crash was not logged")
+    finally:
+        _main._run_app, _ch._show_dialog, _paths.logs_dir = orig_run, orig_dialog, orig_logs
+
+
+check("atomic write: round-trip + no .tmp leftover", _atomic_round_trip)
+check("crash_handler: writes crash log",             _crash_log_written)
+check("crash_handler: quarantine settings",          _quarantine_moves_settings)
+check("crash_handler: dialog builds (3 buttons)",    _crash_dialog_builds)
+check("main(): startup crash -> logged + exit 1",    _main_safe_mode_wiring)
 
 
 # ---------------------------------------------------------------------------

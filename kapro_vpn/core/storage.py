@@ -18,11 +18,36 @@ configs.json blob for users who care).
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from . import paths, secrets_store
 from .parser import ProxyConfig
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write `data` to `path` atomically: write a sibling .tmp, then
+    os.replace it over the target (atomic on the same filesystem on both
+    Windows and POSIX).
+
+    A crash or power loss mid-write leaves the original file intact rather
+    than a truncated/half-written one — which is exactly the corruption
+    that produced the v1.16.11 startup crash (a stray byte read back as
+    invalid UTF-8). On any failure the partial .tmp is removed and the
+    error re-raised, so the original is never replaced by garbage.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _read_configs_bytes() -> bytes:
@@ -57,7 +82,7 @@ def _write_configs_bytes(data: bytes) -> None:
             data = secrets_store.encrypt(data)
         except Exception:
             pass  # silently fall back to plaintext
-    f.write_bytes(data)
+    _atomic_write_bytes(f, data)
 
 
 # --- saved proxy configs --------------------------------------------------
@@ -111,9 +136,9 @@ def load_sites() -> list[str]:
 
 def save_sites(sites: list[str]) -> None:
     cleaned = sorted({s.strip().lower() for s in sites if s.strip()})
-    paths.sites_file().write_text(
-        json.dumps({"sites": cleaned}, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    _atomic_write_bytes(
+        paths.sites_file(),
+        json.dumps({"sites": cleaned}, indent=2, ensure_ascii=False).encode("utf-8"),
     )
 
 
@@ -167,7 +192,7 @@ def load_settings() -> dict[str, Any]:
 
 
 def save_settings(settings: dict[str, Any]) -> None:
-    paths.settings_file().write_text(
-        json.dumps(settings, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+    _atomic_write_bytes(
+        paths.settings_file(),
+        json.dumps(settings, indent=2, ensure_ascii=False).encode("utf-8"),
     )

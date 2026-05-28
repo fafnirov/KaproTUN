@@ -108,7 +108,7 @@ def _clear_stale_system_proxy() -> None:
         pass
 
 
-def main() -> int:
+def _run_app() -> int:
     # Let Ctrl+C in the terminal kill the app cleanly
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
@@ -216,6 +216,25 @@ def main() -> int:
     QTimer.singleShot(600 if not start_minimized else 0, reveal)
 
     return app.exec()
+
+
+def main() -> int:
+    """Entry point with a startup safety net.
+
+    Any unhandled exception during startup is caught and routed to a
+    friendly crash dialog + log (see core.crash_handler) instead of the
+    raw PyInstaller traceback popup. Without this, a startup crash is
+    effectively unrecoverable for the user: it happens before the in-app
+    auto-updater runs, so a broken build can't fix itself.
+
+    KeyboardInterrupt and SystemExit are BaseException, not Exception, so
+    they pass through untouched (Ctrl+C and explicit sys.exit still work).
+    """
+    try:
+        return _run_app()
+    except Exception as exc:
+        from .core import crash_handler
+        return crash_handler.handle_startup_crash(exc)
 
 
 if __name__ == "__main__":

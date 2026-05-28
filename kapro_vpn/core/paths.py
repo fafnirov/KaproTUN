@@ -95,6 +95,13 @@ def runtime_config_file() -> Path:
     return app_data_dir() / "xray-runtime.json"
 
 
+def logs_dir() -> Path:
+    """Folder for diagnostic logs (startup crash dumps, etc.)."""
+    path = app_data_dir() / "logs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def log_file() -> Path:
     return app_data_dir() / "xray.log"
 
