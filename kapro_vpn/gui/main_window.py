@@ -453,6 +453,35 @@ class SettingsPage(QWidget):
         ipv6_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(ipv6_hint)
 
+        # --- WebRTC leak protection (v1.16.0) ---
+        # Browser WebRTC API uses STUN over UDP to discover the user's
+        # public IP — and any JavaScript on the page can read it,
+        # bypassing the VPN. HTTP-proxy mode is the most exposed
+        # (system proxy only catches TCP); TUN mode is technically safe
+        # but defence-in-depth is cheap. Default ON for both.
+        self.webrtc_check = QCheckBox(
+            "Защита от WebRTC leak — блокировать STUN UDP-трафик"
+        )
+        self.webrtc_check.setChecked(
+            bool(manager.settings.get("webrtc_leak_protection", True))
+        )
+        self.webrtc_check.toggled.connect(self._on_webrtc_leak_changed)
+        outer.addWidget(self.webrtc_check)
+        webrtc_hint = QLabel(
+            "Браузер через WebRTC может узнать ваш реальный IP, "
+            "запросив STUN-сервер (это используется в видеозвонках). "
+            "Любой JavaScript на странице может прочитать этот IP. "
+            "Правило блокирует outbound UDP к STUN-портам (3478, 5349, "
+            "19302, 19305-19308) через Windows Firewall. "
+            "⚠ Может сломать видеозвонки в браузере (Google Meet, "
+            "Discord-web, Jitsi). Десктопные приложения (Zoom, Teams, "
+            "Discord native) — не страдают, у них свой STUN."
+        )
+        webrtc_hint.setObjectName("dim")
+        webrtc_hint.setWordWrap(True)
+        webrtc_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(webrtc_hint)
+
         # --- Public IP probe toggle (v1.10.0) ---
         # We dial one third-party endpoint (ipinfo.io) after connect to
         # show "Ваш IP: X (страна)" in the UI as visible proof the
@@ -737,6 +766,10 @@ class SettingsPage(QWidget):
 
     def _on_ipv6_leak_changed(self, checked: bool) -> None:
         self._manager.update_settings(ipv6_leak_protection=checked)
+        self.settings_changed.emit()
+
+    def _on_webrtc_leak_changed(self, checked: bool) -> None:
+        self._manager.update_settings(webrtc_leak_protection=checked)
         self.settings_changed.emit()
 
     def _on_ip_probe_changed(self, checked: bool) -> None:

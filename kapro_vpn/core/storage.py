@@ -136,6 +136,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "dns_option": "system",  # see core/dns_options.py — system|adguard|cloudflare|quad9
     "public_ip_probe": True,  # fetch & show "Ваш IP: X (страна)" after connect
     "ipv6_leak_protection": True,  # block global-unicast IPv6 outbound in TUN mode
+    "webrtc_leak_protection": True,  # block STUN UDP (3478/5349/19302/19305-19308) so browsers can't leak real IP via WebRTC
     "theme": "auto",  # "auto" (follow OS) / "dark" / "light" — see gui/styles.py
 }
 

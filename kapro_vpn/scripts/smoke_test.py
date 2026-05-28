@@ -101,7 +101,7 @@ def _import_core() -> None:
         controller, parser, xray_config, storage, paths,
         subscription, geoip_ru, killswitch, i18n, system_proxy,
         ip_probe, dns_options, secrets_store, ipv6_block,
-        bandwidth_history,
+        bandwidth_history, webrtc_block,
     )
 
 
@@ -380,6 +380,85 @@ check("ipv6_block surface no-raise on every platform",
       _ipv6_block_silent_on_unsupported)
 check("ipv6_block targets 2000::/3 only (LAN-preserving)",
       _ipv6_block_uses_global_unicast_only)
+
+
+# ---------------------------------------------------------------------------
+# Test 5.7 — WebRTC leak block (v1.16.0)
+# ---------------------------------------------------------------------------
+# Same surface-shape contract as ipv6_block: every public function must
+# return cleanly on every platform (no raises). Plus a port-list sanity:
+# we want STUN ports only — NOT random UDP ports that would break DNS
+# (53), QUIC (443), VoIP, or anything else.
+
+section("WebRTC leak block — module sanity")
+
+from kapro_vpn.core import webrtc_block as _webrtc_block
+
+
+def _webrtc_block_silent_on_unsupported() -> None:
+    """install/remove/is_active/is_supported must NEVER raise on macOS or
+    Linux. The desktop client doesn't ship a non-Windows WebRTC block
+    yet, but the call sites still exist and need to noop cleanly.
+    """
+    try:
+        _webrtc_block.is_supported()
+        _webrtc_block.remove()  # delete-rule which doesn't exist must be a noop
+        _webrtc_block.is_active()
+    except Exception as e:
+        raise AssertionError(
+            f"webrtc_block surface methods must never raise: {type(e).__name__}: {e}"
+        ) from e
+
+
+def _webrtc_block_targets_stun_ports_only() -> None:
+    """STUN ports only — DNS (53), QUIC (443), normal UDP services must
+    stay reachable. If someone widens the port list to a catch-all
+    range like '1-65535', the regression bricks every UDP-using app.
+    """
+    ports = _webrtc_block._STUN_PORTS
+    # Must contain the canonical RFC 5389 STUN port + Google's range.
+    for required in ("3478", "5349", "19302"):
+        if required not in ports:
+            raise AssertionError(
+                f"webrtc_block STUN port list missing {required}: {ports!r}"
+            )
+    # Build the set of every individual port the rule would block.
+    # netsh format is comma-separated singles + ranges (M-N), so we
+    # need to expand ranges to check coverage. Substring matching
+    # (the first cut of this test) false-positives on "53" inside
+    # "5349" — explicit parse is correct.
+    blocked: set[int] = set()
+    for token in ports.split(","):
+        token = token.strip()
+        if "-" in token:
+            lo, hi = token.split("-", 1)
+            for p in range(int(lo), int(hi) + 1):
+                blocked.add(p)
+        else:
+            blocked.add(int(token))
+    # Common service ports that must NEVER be in the blocked set.
+    # If any of these slip in we'd break the OS in painful ways.
+    for forbidden in (53, 67, 68, 80, 123, 137, 138, 443, 500, 4500):
+        if forbidden in blocked:
+            raise AssertionError(
+                f"webrtc_block port list includes protected port "
+                f"{forbidden} — would break critical UDP service. "
+                f"Full blocked set: {sorted(blocked)}"
+            )
+    # Sanity ceiling: total blocked ports shouldn't be more than ~20
+    # — STUN's range is tight, anything wider suggests a typo.
+    if len(blocked) > 20:
+        raise AssertionError(
+            f"webrtc_block now blocks {len(blocked)} ports — STUN range "
+            f"shouldn't need more than ~10. Catch-all regression? "
+            f"Set: {sorted(blocked)}"
+        )
+
+
+check("webrtc_block surface no-raise on every platform",
+      _webrtc_block_silent_on_unsupported)
+check("webrtc_block targets STUN ports only (DNS/QUIC safe)",
+      _webrtc_block_targets_stun_ports_only)
 
 
 # ---------------------------------------------------------------------------

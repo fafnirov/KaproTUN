@@ -9,7 +9,7 @@ import sys
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from .core import autostart, i18n, ipv6_block, killswitch, storage, system_proxy
+from .core import autostart, i18n, ipv6_block, killswitch, storage, system_proxy, webrtc_block
 from .gui import icons
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
@@ -174,6 +174,17 @@ def main() -> int:
     try:
         if ipv6_block.is_active():
             ipv6_block.remove()
+    except Exception:
+        pass
+
+    # v1.16.0: same orphan-rule sweep for the WebRTC STUN-block.
+    # Without this, a crash mid-session leaves the user's browser
+    # WebRTC permanently broken (Discord-web, Google Meet, etc.)
+    # until they manually run `netsh advfirewall firewall delete rule
+    # name="KaproVPN-webrtc-block-stun"`. Nobody does that.
+    try:
+        if webrtc_block.is_active():
+            webrtc_block.remove()
     except Exception:
         pass
 

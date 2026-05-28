@@ -8,7 +8,7 @@ import time
 from typing import Callable, Optional
 
 from . import (
-    admin, dns_options, geoip_ru, ipv6_block, killswitch, paths, storage,
+    admin, dns_options, geoip_ru, ipv6_block, killswitch, paths, storage, webrtc_block,
     system_proxy, xray_config,
 )
 from .parser import ProxyConfig
@@ -148,6 +148,14 @@ class ConnectionManager:
             ipv6_block.remove()
         except Exception:
             pass
+        # v1.16.0: webrtc_block lives in the same firewall-rule family.
+        # Independent scope from ipv6_block (v6 unicast vs UDP STUN
+        # ports), no ordering concerns — both just need to be torn
+        # down before we tell the user we're disconnected.
+        try:
+            webrtc_block.remove()
+        except Exception:
+            pass
         self._active = None
 
     def is_connected(self) -> bool:
@@ -176,6 +184,11 @@ class ConnectionManager:
         # touch system proxy — so if proxy-set fails, the firewall is
         # already in place and a partially-broken setup can't leak.
         self._maybe_arm_killswitch()
+        # v1.16.0: WebRTC leak protection. Especially critical in
+        # HTTP-proxy mode because system proxy only catches TCP —
+        # browser WebRTC STUN packets are UDP and would go straight
+        # out the real NIC, exposing the real IP to any JavaScript.
+        self._maybe_arm_webrtc_block()
         if self.settings.get("auto_set_system_proxy", True):
             self._saved_proxy_state = system_proxy.get_state()
             try:
@@ -253,6 +266,12 @@ class ConnectionManager:
         # v6 alike, no separate v6 leak path). Same pre-tunnel timing
         # as kill-switch: rule must exist before any traffic flows.
         self._maybe_arm_ipv6_block()
+        # v1.16.0: WebRTC leak protection. In TUN mode it's defence-in-
+        # depth (STUN UDP is already tunnelled), but cheap and harmless
+        # to add — protects against the case where the user accidentally
+        # carved out a TUN-bypass route, or against malware running
+        # outside the tunnel.
+        self._maybe_arm_webrtc_block()
 
         # Step 4: launch tun2socks — it creates the TUN device and forwards
         # all packets to xray's SOCKS5 inbound at port+1.
@@ -514,6 +533,36 @@ class ConnectionManager:
         else:
             self._log("[!] Не удалось установить IPv6-block firewall-правило "
                       "— v6-трафик может утечь мимо туннеля")
+
+    def _maybe_arm_webrtc_block(self) -> None:
+        """If user enabled WebRTC-leak protection, install the STUN-block
+        firewall rule. Both HTTP and TUN modes call this — leak vector
+        is identical (browser opens UDP socket to STUN server, server
+        echoes back real IP, JavaScript reads it via RTCPeerConnection).
+
+        Same silent-skip conditions as the other firewall arming:
+        setting off, non-Windows platform, no admin privileges. Logged
+        but never raised — protection is defence-in-depth, the tunnel
+        works fine without it.
+        """
+        if not self.settings.get("webrtc_leak_protection", True):
+            return
+        if not webrtc_block.is_supported():
+            self._log("[!] WebRTC-leak protection пока работает только на Windows")
+            return
+        if not admin.is_admin():
+            # In HTTP-proxy mode we usually aren't admin (don't need it
+            # for system_proxy on Windows). Don't spam this — log once
+            # at info level so the user knows why protection is off.
+            self._log("[!] WebRTC-leak protection требует админа — пропускаю "
+                      "(перейди в TUN-режим для админ-прав)")
+            return
+        if webrtc_block.install():
+            self._log("[*] WebRTC-leak protection активирована "
+                      "(блок UDP к STUN-портам 3478/5349/19302/19305-19308)")
+        else:
+            self._log("[!] Не удалось установить WebRTC-block firewall-правило "
+                      "— браузер может узнать реальный IP через STUN")
 
     def _atexit_cleanup(self) -> None:
         try:
