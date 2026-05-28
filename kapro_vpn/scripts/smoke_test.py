@@ -231,22 +231,52 @@ def _make_dns_check(opt_key: str):
                 f"expected {opt.doh_servers}"
             )
 
-        # And the plain IPs of that service must be in a direct-route rule,
-        # otherwise an app doing its own DoH-over-443 directly to those IPs
-        # would tunnel through the VPN unnecessarily.
-        wanted = {f"{ip}/32" for ip in opt.bypass_ips}
-        found_in_direct = False
-        for rule in full["routing"]["rules"]:
-            if rule.get("outboundTag") != "direct":
-                continue
-            ips = set(rule.get("ip", []))
-            if wanted.issubset(ips):
-                found_in_direct = True
-                break
-        if not found_in_direct:
+        # v1.16.6: when a non-system DNS option is active, ALL :53
+        # queries (TCP + UDP) must be hijacked to the dns-out outbound,
+        # which xray then re-resolves via the chosen upstream over the
+        # VPN tunnel. This was the missing piece — v1.16.5's leak test
+        # caught the ISP seeing every domain query because :53 was
+        # routed direct (bypass_ips rule). New design: tunnel them.
+        hijack_rule = next(
+            (r for r in full["routing"]["rules"]
+             if r.get("outboundTag") == "dns-out"
+             and r.get("port") == "53"),
+            None,
+        )
+        if hijack_rule is None:
             raise AssertionError(
-                f"{opt_key}: bypass_ips {sorted(wanted)} not found in any "
-                f"direct-outbound routing rule"
+                f"{opt_key}: missing :53 → dns-out hijack rule. "
+                f"Without it, the system resolver's DNS queries go "
+                f"out the VPN exit unmodified and the ISP can sniff "
+                f"the destination resolver's IP."
+            )
+        if "tcp,udp" not in (hijack_rule.get("network") or ""):
+            raise AssertionError(
+                f"{opt_key}: hijack rule should cover BOTH tcp and udp "
+                f":53; got network={hijack_rule.get('network')!r}"
+            )
+
+        # dns-out outbound must exist with protocol=dns and address
+        # set to the chosen provider's plain IPv4 (xray DNS outbound
+        # doesn't support DoH transport — that's why we hijack at the
+        # routing layer and re-resolve via plain DNS through the VPN
+        # tunnel; encryption comes from the VPN, not from the DNS hop).
+        dns_out = next(
+            (o for o in full["outbounds"] if o.get("tag") == "dns-out"),
+            None,
+        )
+        if dns_out is None:
+            raise AssertionError(f"{opt_key}: dns-out outbound missing")
+        if dns_out.get("protocol") != "dns":
+            raise AssertionError(
+                f"{opt_key}: dns-out protocol must be 'dns', got "
+                f"{dns_out.get('protocol')!r}"
+            )
+        upstream = dns_out.get("settings", {}).get("address")
+        if upstream not in opt.plain_servers:
+            raise AssertionError(
+                f"{opt_key}: dns-out address {upstream!r} is not in "
+                f"the option's plain_servers {opt.plain_servers}"
             )
 
         # v1.9.1: AdGuard option (and ONLY adguard) must add a block-rule

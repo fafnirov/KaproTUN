@@ -322,40 +322,60 @@ def build_config(
         {"type": "field", "outboundTag": "block",
          "ip": ["224.0.0.0/4", "255.255.255.255/32"]},
         {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"},
-        # DNS-leak hardening: queries to common public DNS resolvers
-        # ALSO get force-routed direct, even if some other rule below
-        # might match them. The controller already adds OS-level
-        # host-routes for these via the real gateway, but if anything
-        # slips through (e.g. an app doing DNS over TCP/853 which the
-        # kernel routes differently), this rule makes sure xray drops
-        # it to direct rather than tunnelling — keeping the DNS query
-        # off our VPN provider's view of the user's browsing.
-        {"type": "field", "outboundTag": "direct", "ip": [
+    ]
+    # v1.16.6: DNS handling fork by user's chosen DNS option.
+    #
+    # The v1.8.0 "DNS-leak hardening" forced ALL :53 traffic to the
+    # `direct` outbound — bypassing the VPN tunnel entirely. The
+    # original intent: prevent the VPN provider from logging the
+    # user's DNS queries. The unintended consequence: the user's
+    # REAL ISP sees every domain queried in plaintext, because the
+    # query goes straight out the physical NIC to the ISP-handed
+    # DNS resolver (MGTS, Beeline, etc).
+    #
+    # The user's v1.16.5 leak-test report made this concrete: VPN
+    # exit was Netherlands, but bash.ws logged Moscow ISP resolvers
+    # asking for the test subdomains. Privacy fail.
+    #
+    # New behaviour:
+    #   - DNS option == system → keep the old "direct :53" route.
+    #     User asked for system DNS, we don't second-guess.
+    #   - DNS option != system → route :53 to a dedicated xray "dns"
+    #     outbound that intercepts every query and re-resolves it
+    #     through the chosen provider (AdGuard/Cloudflare/Quad9).
+    #     Transport of the upstream query goes through `proxy` (the
+    #     VPN), so the ISP sees only encrypted VPN bytes — not the
+    #     domain names being asked for.
+    if dns_opt.plain_servers:
+        # Non-system: hijack :53 to dns-out outbound. This MUST come
+        # before any IP-based rules — those would steal the query
+        # before it reaches the hijack.
+        rules.append({
+            "type": "field",
+            "outboundTag": "dns-out",
+            "network": "tcp,udp",
+            "port": "53",
+        })
+    else:
+        # System DNS: legacy behaviour, send :53 direct so the user
+        # can keep their Pi-hole / corporate / locally-configured
+        # DNS chain working. ISP sees queries — that's the trade-
+        # off the user accepted by leaving the default.
+        rules.append({"type": "field", "outboundTag": "direct",
+                      "network": "udp", "port": "53"})
+        rules.append({"type": "field", "outboundTag": "direct",
+                      "network": "tcp", "port": "53"})
+        # Belt-and-braces: queries to common public resolvers also
+        # go direct in system mode, in case some app hardcoded one.
+        # In non-system mode we deliberately DON'T add this — we WANT
+        # those tunnelled so MGTS can't sniff them.
+        rules.append({"type": "field", "outboundTag": "direct", "ip": [
             "1.1.1.1/32", "1.0.0.1/32",      # Cloudflare
             "8.8.8.8/32", "8.8.4.4/32",      # Google
             "9.9.9.9/32",                     # Quad9
             "77.88.8.8/32", "77.88.8.1/32",  # Yandex
             "77.88.8.88/32", "77.88.8.7/32", # Yandex safe/family
-        ]},
-        # And by port: anything to UDP 53 / TCP 53 should NEVER tunnel
-        # unless it's already direct via the IP rule above. Catches DNS
-        # to less-common resolvers without us hard-coding their IPs.
-        {"type": "field", "outboundTag": "direct",
-         "network": "udp", "port": "53"},
-        {"type": "field", "outboundTag": "direct",
-         "network": "tcp", "port": "53"},
-    ]
-    # User-chosen DNS service — its plain IPs should never tunnel through
-    # the VPN (otherwise DoH-over-443 from apps that don't use xray's own
-    # resolver takes an unnecessary VPN-server round-trip and the DNS
-    # provider sees the VPN server's IP, not the user's). Skipped when
-    # dns_option == "system" because bypass_ips is empty in that case.
-    if dns_opt.bypass_ips:
-        rules.append({
-            "type": "field",
-            "outboundTag": "direct",
-            "ip": [f"{ip}/32" for ip in dns_opt.bypass_ips],
-        })
+        ]})
 
     # AdGuard-only ad/tracker block via xray routing. v1.9.0 only added DNS
     # override, but browsers (Chrome's "Secure DNS" → Cloudflare 1.1.1.1 by
@@ -481,6 +501,22 @@ def build_config(
             proxy_outbound,
             {"tag": "direct", "protocol": "freedom"},
             {"tag": "block", "protocol": "blackhole"},
+            # v1.16.6: dns-out — intercepts queries from the :53 hijack
+            # rule above (only present when dns_option != system).
+            # protocol="dns" makes xray forward the query to the
+            # chosen plain upstream resolver. Transport uses outbounds[0]
+            # (proxy/VPN) so the ISP can't sniff the request content.
+            # For "system" we don't add this outbound at all — the
+            # :53 rules above keep going through "direct" as before.
+            *([{
+                "tag": "dns-out",
+                "protocol": "dns",
+                "settings": {
+                    "address": dns_opt.plain_servers[0],
+                    "port": 53,
+                    "network": "tcp,udp",
+                },
+            }] if dns_opt.plain_servers else []),
         ],
         "routing": {
             "domainStrategy": "IPIfNonMatch",
