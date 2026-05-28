@@ -239,14 +239,17 @@ class NavBar(QWidget):
     settings_clicked = Signal()
     add_clicked = Signal()
 
-    # ︎ forces text-presentation form for any character that has an
-    # emoji variant. House/chart/gear all have one; "+" doesn't, but
-    # it's harmless on chars without an emoji form.
-    HOME_GLYPH = "⌂︎"        # ⌂ HOUSE
-    STATS_GLYPH = "📊︎"        # 📊 BAR CHART — keep text-style so it's
-                                # monochrome to match the other nav icons
-    SETTINGS_GLYPH = "⚙︎"    # ⚙ GEAR
-    ADD_GLYPH = "+"                    # plain ASCII plus
+    # v1.15.1 — switched STATS glyph from 📊 (emoji, rendered colored
+    # and at a different metrics by Segoe UI Emoji regardless of the
+    # U+FE0E text-variation selector) to ▤ U+25A4 (SQUARE WITH
+    # HORIZONTAL FILL — a box-drawing char from the same family as
+    # ⌂ and ⚙, rendered monochrome and at matching cap-height by
+    # Segoe UI Symbol). Visually reads as a horizontal bar-chart,
+    # which fits the "Статистика" tab semantics.
+    HOME_GLYPH = "⌂"      # U+2302 HOUSE
+    STATS_GLYPH = "▤"     # U+25A4 SQUARE WITH HORIZONTAL FILL — bar-chart-ish
+    SETTINGS_GLYPH = "⚙"  # U+2699 GEAR
+    ADD_GLYPH = "+"       # plain ASCII plus, scales better than ＋
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
