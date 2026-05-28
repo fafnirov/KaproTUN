@@ -1134,20 +1134,15 @@ class MainWindow(QMainWindow):
         self.nav = NavBar()
         root.addWidget(self.nav)
 
-        # v1.16.1: QSizeGrip fallback for macOS / Linux frameless resize.
-        # On Windows we already get all 8 edges via WM_NCHITTEST so this
-        # branch is skipped — the grip would otherwise sit awkwardly
-        # under the nav-bar row competing with native edge-drag.
-        if sys.platform != "win32":
-            grip = window_resize.install_size_grip(self)
-            grip.setParent(self)
-            grip.raise_()  # stay on top of the nav-bar
-            # Anchor to bottom-right via a moveEvent shim — addWidget'ing
-            # into the existing nav-bar row would shift the bottom nav
-            # icons. Reposition in resizeEvent below.
-            self._size_grip = grip
-        else:
-            self._size_grip = None
+        # v1.16.3: 8 transparent resize-handles around the window edges.
+        # Same approach as Telegram Desktop / AmneziaVPN / every other
+        # frameless Qt app — Qt strips the non-client area on
+        # FramelessWindowHint so WM_NCHITTEST never fires (the v1.16.1
+        # attempt). These child widgets sit on top of the layout
+        # (raised in reposition()) and capture mouse events directly,
+        # which works identically on Windows, macOS, and Linux.
+        self._resize_handles = window_resize.ResizeHandles(self)
+        self._resize_handles.install()
 
         # System tray (gracefully no-op if user's DE doesn't expose one)
         self.tray = TrayManager(self)
@@ -1969,46 +1964,27 @@ class MainWindow(QMainWindow):
         self._do_connect()
         self._refresh_home()
 
-    # --- frameless resize support (v1.16.1) -------------------------------
-
-    def nativeEvent(self, eventType, message):  # noqa: N802
-        """Forward WM_NCHITTEST to window_resize so Windows treats the 6 px
-        border around our client area as a native resize zone.
-
-        Returns the Qt-required (handled: bool, result: int) tuple. For
-        non-Windows / non-NCHITTEST events the helper says "not handled"
-        and we fall through to the base implementation (which routes
-        the message to the regular event filter chain).
-        """
-        handled, result = window_resize.handle_native_event(self, eventType, message)
-        if handled:
-            return True, result
-        return super().nativeEvent(eventType, message)
+    # --- frameless resize support (v1.16.3) -------------------------------
 
     def resizeEvent(self, event) -> None:  # noqa: N802
-        """Persist the new size to settings on every resize + reposition
-        the macOS/Linux size grip.
+        """Persist size to settings + reposition the 8 edge resize-handles.
 
-        Cheap — just writes a small JSON file. The manager.update_settings
-        call ends up at storage.save_settings which atomic-writes a temp
-        file + rename, so a crash mid-resize can't corrupt the file.
-        Throttling could be added later if it shows up in profiles, but
-        even fast drag-resize fires the event ~30 Hz max which is fine.
+        Guards: Qt may fire resizeEvent during __init__ before manager
+        or _resize_handles exist (e.g. the implicit resize fired by
+        setMinimumSize). hasattr/getattr keeps early-init firing
+        from crashing here.
 
-        Guards: Qt may fire resizeEvent during __init__ before our
-        manager and _size_grip attributes exist (e.g. the implicit
-        resize when setMinimumSize is called). hasattr/getattr handle
-        the early-init case without raising.
+        Persistence is cheap — storage.save_settings does an atomic
+        temp-write + rename, so a crash mid-resize can't corrupt the
+        settings file even at fast drag rates.
         """
         super().resizeEvent(event)
         sz = event.size()
         if hasattr(self, "manager"):
             self.manager.update_settings(window_size=[sz.width(), sz.height()])
-        # macOS/Linux QSizeGrip needs manual repositioning since we
-        # don't put it in a layout (would shift nav-bar icons).
-        grip = getattr(self, "_size_grip", None)
-        if grip is not None:
-            grip.move(sz.width() - grip.width(), sz.height() - grip.height())
+        handles = getattr(self, "_resize_handles", None)
+        if handles is not None:
+            handles.reposition()
 
     # --- shutdown ---------------------------------------------------------
 

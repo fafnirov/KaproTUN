@@ -479,62 +479,92 @@ def _hit_test_corners_and_edges() -> None:
 
     W, H = 400, 300  # widget dimensions
 
-    # Centre of widget → HTCLIENT (Qt handles it as a normal mouse event).
-    if _wr.hit_test_local(200, 150, W, H) != _wr._HTCLIENT:
+    # Centre → CLIENT (no resize, Qt handles as normal mouse event).
+    if _wr.hit_test_local(200, 150, W, H) != "CLIENT":
         raise AssertionError(
-            f"centre of widget should be HTCLIENT, got "
-            f"{_wr.hit_test_local(200, 150, W, H)}"
+            f"centre should be CLIENT, got "
+            f"{_wr.hit_test_local(200, 150, W, H)!r}"
         )
     # Each corner — within the 6 px border in both axes.
-    if _wr.hit_test_local(0, 0, W, H) != _wr._HTTOPLEFT:
-        raise AssertionError("(0,0) local should be HTTOPLEFT")
-    if _wr.hit_test_local(W - 1, 0, W, H) != _wr._HTTOPRIGHT:
-        raise AssertionError("top-right pixel should be HTTOPRIGHT")
-    if _wr.hit_test_local(0, H - 1, W, H) != _wr._HTBOTTOMLEFT:
-        raise AssertionError("bottom-left pixel should be HTBOTTOMLEFT")
-    if _wr.hit_test_local(W - 1, H - 1, W, H) != _wr._HTBOTTOMRIGHT:
-        raise AssertionError("bottom-right pixel should be HTBOTTOMRIGHT")
+    for (x, y, expected) in (
+        (0,     0,     "TL"),
+        (W - 1, 0,     "TR"),
+        (0,     H - 1, "BL"),
+        (W - 1, H - 1, "BR"),
+    ):
+        got = _wr.hit_test_local(x, y, W, H)
+        if got != expected:
+            raise AssertionError(
+                f"corner ({x},{y}) should be {expected!r}, got {got!r}"
+            )
     # Mid-edges — within the border on only one axis.
-    if _wr.hit_test_local(2, 150, W, H) != _wr._HTLEFT:
-        raise AssertionError("left-edge midpoint should be HTLEFT")
-    if _wr.hit_test_local(W - 2, 150, W, H) != _wr._HTRIGHT:
-        raise AssertionError("right-edge midpoint should be HTRIGHT")
-    if _wr.hit_test_local(200, 2, W, H) != _wr._HTTOP:
-        raise AssertionError("top-edge midpoint should be HTTOP")
-    if _wr.hit_test_local(200, H - 2, W, H) != _wr._HTBOTTOM:
-        raise AssertionError("bottom-edge midpoint should be HTBOTTOM")
-    # Just inside the border — the off-by-one zone that the OPEN
-    # inner interval guards. Click at exactly border-distance from
-    # the edge should NOT be a resize zone.
-    if _wr.hit_test_local(6, 150, W, H) != _wr._HTCLIENT:
+    for (x, y, expected) in (
+        (2,     150, "L"),
+        (W - 2, 150, "R"),
+        (200,   2,   "T"),
+        (200,   H - 2, "B"),
+    ):
+        got = _wr.hit_test_local(x, y, W, H)
+        if got != expected:
+            raise AssertionError(
+                f"mid-edge ({x},{y}) should be {expected!r}, got {got!r}"
+            )
+    # Just inside the border — off-by-one zone. Click at exactly
+    # border-distance from edge should NOT be a resize zone (the
+    # open inner interval in the math).
+    if _wr.hit_test_local(6, 150, W, H) != "CLIENT":
         raise AssertionError(
-            "x=6 (== border width) should be HTCLIENT — off-by-one regression"
+            "x=6 (== border width) should be CLIENT — off-by-one regression"
         )
 
 
-def _hit_test_handles_negative_screen_coords() -> None:
-    """Multi-monitor virtual screen sticks the second monitor at negative
-    X, so lParam unpacking must treat the values as SIGNED 16-bit. If
-    someone refactors _parse_nchittest_pos to use unsigned, a -100
-    becomes 65436 and breaks the hit test for users with a left-of-
-    primary monitor.
+def _resize_handles_install_and_reposition() -> None:
+    """Install 8 handles on a real widget, then verify reposition()
+    moves them to expected geometry after a resize. Catches regressions
+    where someone breaks the corner/edge layout math.
     """
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QWidget
+    if QApplication.instance() is None:
+        QApplication([])
     from kapro_vpn.gui import window_resize as _wr
-    # Pack (-100, -50) into an lParam the way Windows does.
-    lparam = ((-50 & 0xFFFF) << 16) | (-100 & 0xFFFF)
-    x, y = _wr._parse_nchittest_pos(lparam)
-    if (x, y) != (-100, -50):
+
+    w = QWidget()
+    w.resize(400, 300)
+    handles = _wr.ResizeHandles(w)
+    handles.install()
+    # 8 handles created and parented.
+    if len(handles._handles) != 8:
         raise AssertionError(
-            f"negative screen coords lost sign: got ({x}, {y}), "
-            f"expected (-100, -50). Multi-monitor users will see broken "
-            f"hit-test."
+            f"expected 8 resize handles, got {len(handles._handles)}"
+        )
+    # BR corner should be at the bottom-right.
+    br = handles._by_key["BR"]
+    if br.x() != 400 - _wr.RESIZE_BORDER:
+        raise AssertionError(
+            f"BR handle X wrong: {br.x()} vs expected "
+            f"{400 - _wr.RESIZE_BORDER}"
+        )
+    if br.y() != 300 - _wr.RESIZE_BORDER:
+        raise AssertionError(
+            f"BR handle Y wrong: {br.y()} vs expected "
+            f"{300 - _wr.RESIZE_BORDER}"
+        )
+    # Resize widget → handles must follow.
+    w.resize(800, 600)
+    handles.reposition()
+    if br.x() != 800 - _wr.RESIZE_BORDER:
+        raise AssertionError(
+            f"BR did not follow resize: x={br.x()}, expected "
+            f"{800 - _wr.RESIZE_BORDER}"
         )
 
 
-check("window resize: corners and edges hit-test correctly",
+check("window resize: hit_test_local for 8 zones + client centre",
       _hit_test_corners_and_edges)
-check("window resize: signed lParam parse (multi-monitor safe)",
-      _hit_test_handles_negative_screen_coords)
+check("window resize: 8 handles install and follow resize",
+      _resize_handles_install_and_reposition)
 
 
 # ---------------------------------------------------------------------------
