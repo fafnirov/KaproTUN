@@ -834,6 +834,82 @@ check("Maintenance Reinstall button starts install flow",
 
 
 # ---------------------------------------------------------------------------
+# Test 7 — StatsPage live block (v1.15.2)
+# ---------------------------------------------------------------------------
+# The live block on the Stats page is fed by MainWindow._poll_traffic at
+# 1 Hz via on_live_sample(). on_live_disconnected() resets it when the
+# tunnel drops. Both must work headlessly + be idempotent — these are
+# the regression shapes:
+#   - on_live_sample raising (would crash _poll_traffic mid-poll)
+#   - on_live_disconnected thrashing labels when called repeatedly at
+#     1 Hz while idle (the _live_connected flag is what prevents this)
+#   - sparkline buffer growth bound (deque maxlen=60)
+
+section("StatsPage — live block API")
+
+
+def _stats_page_live_api() -> None:
+    _setup_qt_app()
+    from kapro_vpn.gui.stats_page import StatsPage
+
+    page = StatsPage()
+
+    # Default state: disconnected. _live_connected should be False.
+    if page._live_connected:
+        raise AssertionError(
+            "StatsPage should start in disconnected state, but "
+            "_live_connected was True"
+        )
+
+    # Push one sample → flips to connected and labels update.
+    page.on_live_sample(up_bps=1024.0, down_bps=4096.0,
+                        up_total=10_000, down_total=40_000)
+    if not page._live_connected:
+        raise AssertionError(
+            "on_live_sample should flip _live_connected to True"
+        )
+    if page._down_rate_label.text() in ("—", ""):
+        raise AssertionError(
+            f"down rate label not updated: {page._down_rate_label.text()!r}"
+        )
+
+    # Many more samples — sparkline buffer must stay bounded.
+    for i in range(120):
+        page.on_live_sample(up_bps=float(i), down_bps=float(i * 2),
+                            up_total=10_000 + i, down_total=40_000 + i)
+    n = len(page.live_sparkline._down)
+    if n > 60:
+        raise AssertionError(
+            f"live sparkline buffer should be capped at 60 (deque maxlen), "
+            f"got {n}"
+        )
+
+    # Disconnect → reset.
+    page.on_live_disconnected()
+    if page._live_connected:
+        raise AssertionError(
+            "on_live_disconnected should clear _live_connected"
+        )
+    if "—" not in page._down_rate_label.text():
+        raise AssertionError(
+            f"down rate label should reset to em-dash on disconnect, "
+            f"got {page._down_rate_label.text()!r}"
+        )
+    if len(page.live_sparkline._down) != 0:
+        raise AssertionError(
+            "live sparkline should be empty after disconnect"
+        )
+
+    # Idempotent — calling disconnect again while already idle must not
+    # raise and must not touch internal state (the early-return guard).
+    page.on_live_disconnected()
+    page.on_live_disconnected()
+
+
+check("StatsPage: live block sample+disconnect cycle", _stats_page_live_api)
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 

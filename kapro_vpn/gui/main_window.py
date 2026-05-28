@@ -1355,6 +1355,10 @@ class MainWindow(QMainWindow):
             self.home_page.set_state("idle")
             self.tray.set_state("idle", active_name)
             self._prev_traffic = None  # reset session counter when disconnected
+            # v1.15.2: reset live-block on Stats page so the sparkline
+            # empties and the "Не подключено" badge appears. Cheap no-op
+            # when already disconnected (page tracks its own flag).
+            self.stats_page.on_live_disconnected()
 
         self.home_page.set_config(self._active_config)
         self.tray.set_configs(self.configs, active_name, self._tray_pings)
@@ -1376,6 +1380,15 @@ class MainWindow(QMainWindow):
         up_rate, down_rate = sample.delta_rate(self._prev_traffic)
         self._prev_traffic = sample
         self.home_page.set_traffic(
+            up_rate, down_rate,
+            sample.uplink_bytes, sample.downlink_bytes,
+        )
+        # v1.15.2: same per-second sample feeds the Stats page live block.
+        # Cheap when Stats isn't visible — the widget just updates a few
+        # labels and appends to a deque(maxlen=60); no repaint happens
+        # until the widget is shown again (Qt skips paintEvent for hidden
+        # widgets).
+        self.stats_page.on_live_sample(
             up_rate, down_rate,
             sample.uplink_bytes, sample.downlink_bytes,
         )
