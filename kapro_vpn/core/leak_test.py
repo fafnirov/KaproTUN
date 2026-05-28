@@ -219,13 +219,16 @@ def probe_dns(timeout: float = 8.0) -> DnsResult:
     # 10-digit token, URL-safe enough as decimal digits.
     token = "".join(str(secrets.randbelow(10)) for _ in range(10))
 
-    # Step 1: trigger N resolutions. Doesn't matter if they fail —
-    # the act of asking the system resolver is what bash.ws records.
-    # The resolutions go through the system resolver (probably your
-    # ISP's), not through xray's DNS — that's intentional, the test
-    # exposes the system-level resolver chain.
+    # Step 1: trigger N resolutions of subdomains UNDER bash.ws.
+    # bash.ws is the authoritative resolver for its own zone — it
+    # logs every recursive resolver IP that comes asking. We use
+    # bash.ws (NOT dnsleaktest.com — that's a different site with
+    # a different authoritative DNS, was my v1.16.4 typo that
+    # silently returned empty resolver lists for everyone).
+    # The format must match what bash.ws/dnsleaktest.sh uses:
+    #   {i}.{ID}.bash.ws
     for i in range(1, 11):
-        host = f"{i}.{token}.dnsleaktest.com"
+        host = f"{i}.{token}.bash.ws"
         try:
             socket.gethostbyname(host)
         except socket.gaierror:
@@ -235,8 +238,10 @@ def probe_dns(timeout: float = 8.0) -> DnsResult:
         except OSError:
             pass
 
-    # Step 2: wait briefly for bash.ws to aggregate, then ask.
-    time.sleep(1.0)
+    # Step 2: wait for bash.ws to aggregate the resolver hits, then
+    # ask. 2 seconds — 1 sec was sometimes too tight under load and
+    # we'd get a half-empty list back.
+    time.sleep(2.0)
 
     try:
         r = requests.get(
