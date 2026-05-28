@@ -111,14 +111,19 @@ class HomePage(QWidget):
         # Centered, hidden until the IP probe resolves a known country
         # code. Theme follows the user's choice — getter reads settings
         # at paint time so it auto-updates on theme switch.
+        # v1.14.1: bumped the leading addSpacing from 4 to 14 so the
+        # map visually separates from the IP label above (user reported
+        # they looked merged together — no overlap, just no breathing
+        # room).
         self.world_map = WorldMapWidget()
         self.world_map.setVisible(False)
         map_row = QHBoxLayout()
         map_row.addStretch(1)
         map_row.addWidget(self.world_map)
         map_row.addStretch(1)
-        layout.addSpacing(4)
+        layout.addSpacing(14)
         layout.addLayout(map_row)
+        layout.addSpacing(8)
 
         # Traffic stats — only visible while connected. RichText so we can
         # tint the two values without nested widgets.

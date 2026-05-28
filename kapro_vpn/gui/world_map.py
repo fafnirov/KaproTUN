@@ -168,12 +168,23 @@ class WorldMapWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        # Background — same as surrounding page so the widget blends in
-        # rather than looking like an inset panel.
-        p.fillRect(self.rect(), QColor(palette.BG))
+        # v1.14.1: explicit card-style background + rounded border so the
+        # map reads as a separate panel from the status text above it.
+        # v1.14.0 used palette.BG which matched the surrounding page,
+        # making the boundary invisible — users saw the "Подключено" line
+        # and "Ваш IP" line as if they were sitting *on* the map, even
+        # though they were above it in the layout. Visual fix only,
+        # no functional change.
+        bg_rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setBrush(QBrush(QColor(palette.SURFACE)))
+        p.setPen(QPen(QColor(palette.BORDER), 1.0))
+        p.drawRoundedRect(bg_rect, 10, 10)
 
         # Continents — drawn as one combined path so they share the same
-        # brush fill and we make one paint call.
+        # brush fill and we make one paint call. Now drawn on top of the
+        # SURFACE-coloured card; outline uses the same BORDER color so
+        # land shapes pop off the panel without competing with the panel's
+        # own border.
         land_color = QColor(palette.SURFACE_HI)
         land_outline = QColor(palette.BORDER)
         land_path = QPainterPath()
