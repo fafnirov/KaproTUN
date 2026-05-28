@@ -133,6 +133,35 @@ def _project(lat: float, lon: float, width: int, height: int) -> QPointF:
     return QPointF(x, y)
 
 
+def country_code_from_flag(name: str) -> Optional[str]:
+    """Pull an ISO 3166 alpha-2 code out of a leading flag emoji.
+
+    Subscription configs typically come named like '🇳🇱 BMV1+ ·
+    VLESS XHTTP · ...'. The leading two characters are Regional
+    Indicator Symbols (U+1F1E6..U+1F1FF) — each maps to A..Z via
+    offset 0x1F1E6. Two letters → ISO code. v1.14.3 uses this as
+    a fallback for the world-map pin when the public-IP probe fails
+    entirely (e.g. AdGuard blocking every probe endpoint).
+
+    Returns None if the name doesn't start with a flag emoji or if
+    the code isn't in our COUNTRY_COORDS table (so callers don't
+    end up with a pin pointing nowhere).
+    """
+    if not name or len(name) < 2:
+        return None
+    base = 0x1F1E6
+    try:
+        c1 = ord(name[0])
+        c2 = ord(name[1])
+    except (TypeError, ValueError):
+        return None
+    if base <= c1 <= base + 25 and base <= c2 <= base + 25:
+        code = chr(c1 - base + ord("A")) + chr(c2 - base + ord("A"))
+        if code in COUNTRY_COORDS:
+            return code
+    return None
+
+
 class WorldMapWidget(QWidget):
     """Tiny world map. Call set_country('NL') to plant a pin.
 

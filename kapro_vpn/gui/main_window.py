@@ -1403,6 +1403,14 @@ class MainWindow(QMainWindow):
         )
         show_toast(self, f"Подключено к «{self._active_config.name}»", kind="success")
         self._refresh_home()
+        # v1.14.3: show country + map immediately based on the config
+        # name's flag emoji. No waiting for the 2-second probe — user
+        # sees something the instant connect lands. If the probe later
+        # succeeds with a real IP, set_public_ip overwrites with the
+        # more-accurate data; if probe fails (AdGuard blocking, etc.),
+        # this flag-based placeholder stays. Either way the map+country
+        # block never disappears mid-session.
+        self._prefill_country_from_config()
         # v1.10.0: confirm to the user that the tunnel is actually working
         # by fetching the public IP as seen from outside and showing it
         # under the status line. Delayed 2s so xray has time to bring its
@@ -1410,6 +1418,27 @@ class MainWindow(QMainWindow):
         # user sees no IP, which is worse than waiting a beat.
         if self.manager.settings.get("public_ip_probe", True):
             QTimer.singleShot(2000, self._kick_ip_probe)
+
+    def _prefill_country_from_config(self) -> None:
+        """Show country + map immediately on connect (v1.14.3).
+
+        Pulls the country code from the leading flag emoji of the
+        active config's name. No-op if the config name doesn't start
+        with a flag (e.g. user named it "MyServer"). The probe still
+        runs and overwrites with the real IP when it lands.
+        """
+        if self._active_config is None:
+            return
+        from .world_map import country_code_from_flag
+        from ..core.ip_probe import _RU_COUNTRY_NAMES
+        cc = country_code_from_flag(self._active_config.name)
+        if not cc:
+            return
+        country_name = _RU_COUNTRY_NAMES.get(cc, cc)
+        # "…" placeholder while probe is in flight — once probe returns
+        # we'll either replace with real IP, or replace with "—" if
+        # probe failed (in _on_ip_probe_resolved fallback path).
+        self.home_page.set_public_ip("…", country_name, "", cc)
 
     def _kick_ip_probe(self) -> None:
         """Start the async public-IP fetch. Routes through SOCKS5 in
@@ -1442,6 +1471,27 @@ class MainWindow(QMainWindow):
         # probe was in flight, just drop the result on the floor.
         if not self.manager.is_connected():
             return
+
+        # v1.14.3: if probe failed entirely (empty ip — happens when
+        # AdGuard / similar blocks every fallback endpoint we have),
+        # recover the country from the config name's leading flag
+        # emoji (e.g. "🇳🇱 BMV1+ ..." → "NL"). Better to show map +
+        # country than a completely empty block. IP gets a "—"
+        # placeholder; the country_name is looked up from the same
+        # localization table the probe would use.
+        if not ip and self._active_config:
+            from .world_map import country_code_from_flag
+            from ..core.ip_probe import _RU_COUNTRY_NAMES
+            fallback_cc = country_code_from_flag(self._active_config.name)
+            if fallback_cc:
+                fallback_country = _RU_COUNTRY_NAMES.get(
+                    fallback_cc, fallback_cc,
+                )
+                self.home_page.set_public_ip(
+                    "—", fallback_country, "", fallback_cc,
+                )
+                return
+
         self.home_page.set_public_ip(ip, country_name, city, country_code)
 
     def _on_connect_failed(self, msg: str) -> None:

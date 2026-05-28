@@ -569,6 +569,37 @@ check("world map: equirectangular projection sane",   _world_map_projection_boun
 check("world map: continent polygons non-trivial",    _world_map_continent_polygons_nonempty)
 
 
+def _flag_emoji_extracts_country_code() -> None:
+    # v1.14.3 fallback for the "probe failed entirely" case. Pulls
+    # ISO code from a leading flag emoji in the config name. If this
+    # ever breaks, the map+country block disappears whenever AdGuard
+    # blocks all our probe endpoints — exactly the regression v1.14.3
+    # was meant to fix.
+    fn = _world_map.country_code_from_flag
+    cases = [
+        ("🇳🇱 BMV1+ · VLESS XHTTP",      "NL"),
+        ("🇫🇮 Финляндия WI-FI",          "FI"),
+        ("🇩🇪 Germany — VLESS",          "DE"),
+        ("🇺🇸 USA East",                  "US"),
+        # No flag → None
+        ("Plain Server Name",            None),
+        ("",                              None),
+        # Flag emoji of a country NOT in COUNTRY_COORDS — returns None
+        # (we don't want a pin pointing nowhere).
+        ("🇦🇶 Antarctica",                None),
+    ]
+    for name, expected in cases:
+        got = fn(name)
+        if got != expected:
+            raise AssertionError(
+                f"country_code_from_flag({name!r}) = {got!r}, "
+                f"expected {expected!r}"
+            )
+
+
+check("world map: flag-emoji -> ISO code fallback",   _flag_emoji_extracts_country_code)
+
+
 # ---------------------------------------------------------------------------
 # Test 6 — Installer flow transitions
 # ---------------------------------------------------------------------------
