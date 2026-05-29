@@ -307,8 +307,15 @@ class SubscriptionDialog(QDialog):
             return
         # Persist the URL for next time, plus the provider's remaining-
         # traffic / expiry info so Settings can show it without re-fetching.
+        url = self.url_edit.text().strip()
         settings = storage.load_settings()
-        settings["subscription_url"] = self.url_edit.text().strip()
+        settings["subscription_url"] = url
+        # Track every distinct subscription URL we've imported from, so the
+        # picker's «Обновить» can re-fetch them all — not just the last one.
+        urls = [u for u in (settings.get("subscription_urls") or []) if u]
+        if url and url not in urls:
+            urls.append(url)
+        settings["subscription_urls"] = urls
         if self._result.userinfo is not None:
             settings["subscription_userinfo"] = self._result.userinfo.to_dict()
         storage.save_settings(settings)

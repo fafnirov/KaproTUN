@@ -1998,6 +1998,81 @@ def _picker_sort_and_rows() -> None:
 check("picker: sort speed/name/proto + row build", _picker_sort_and_rows)
 
 
+def _picker_subs_refresh_merge_and_url_list() -> None:
+    # v1.18.0: "🔄 Обновить" re-fetches all saved subscriptions and merges.
+    # Verify (a) the saved-URL list migrates from the legacy single URL and
+    # de-dupes, and (b) the merge adds new servers, refreshes existing ones
+    # by name (no duplicates), and never deletes.
+    import os as _os3
+    _os3.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_vpn.core import storage
+    from kapro_vpn.core.parser import ProxyConfig as PC
+    from kapro_vpn.gui.configs_picker import ConfigsPickerDialog
+
+    orig = (storage.save_configs, storage.save_settings,
+            storage.load_settings, QMessageBox.information)
+    saved = {"configs": None}
+    storage.save_configs = lambda cfgs: saved.__setitem__("configs", list(cfgs))
+    storage.save_settings = lambda s: None
+    QMessageBox.information = lambda *a, **k: None  # no modal hang offscreen
+    try:
+        existing = [
+            PC(name="🇩🇪 Германия", protocol="vless", raw_url="vless://x@127.0.0.1:1",
+               outbound={"server": "127.0.0.1", "server_port": 1}),
+            PC(name="🇳🇱 Нидерланды", protocol="trojan", raw_url="trojan://x@127.0.0.1:2",
+               outbound={"server": "127.0.0.1", "server_port": 2}),
+        ]
+        dlg = ConfigsPickerDialog(existing, current_name="🇩🇪 Германия")
+        if dlg._pinger is not None:
+            dlg._pinger.wait(3000)
+
+        # (a) URL-list: de-dupe preserving order …
+        storage.load_settings = lambda: {
+            "subscription_urls": ["u1", "u2", "u1"], "subscription_url": "x"}
+        if dlg._all_subscription_urls() != ["u1", "u2"]:
+            raise AssertionError("subscription_urls not deduped/ordered")
+        # … and migrate from the legacy single URL when the list is empty.
+        storage.load_settings = lambda: {
+            "subscription_urls": [], "subscription_url": "legacy"}
+        if dlg._all_subscription_urls() != ["legacy"]:
+            raise AssertionError("legacy single-URL migration failed")
+
+        # (b) merge: one same-name update + one brand-new server.
+        updated = PC(name="🇩🇪 Германия", protocol="vless", raw_url="vless://x@127.0.0.1:443",
+                     outbound={"server": "127.0.0.1", "server_port": 443})
+        brand_new = PC(name="🇫🇷 Франция", protocol="vless", raw_url="vless://x@127.0.0.1:3",
+                       outbound={"server": "127.0.0.1", "server_port": 3})
+        dlg._on_subs_refreshed({
+            "configs": [updated, brand_new], "userinfo": None,
+            "ok": 1, "errors": [], "total": 1,
+        })
+        if dlg._pinger is not None:
+            dlg._pinger.wait(3000)
+        names = [c.name for c in dlg._configs]
+        if names.count("🇩🇪 Германия") != 1:
+            raise AssertionError("update-by-name created a duplicate")
+        de = next(c for c in dlg._configs if c.name == "🇩🇪 Германия")
+        if de.outbound.get("server_port") != 443:
+            raise AssertionError("existing server not refreshed on merge")
+        if "🇫🇷 Франция" not in names:
+            raise AssertionError("new server not added on merge")
+        if "🇳🇱 Нидерланды" not in names:
+            raise AssertionError("merge deleted a server it must keep")
+        if saved["configs"] is None:
+            raise AssertionError("merge didn't persist via save_configs")
+        dlg.deleteLater()
+    finally:
+        (storage.save_configs, storage.save_settings,
+         storage.load_settings, QMessageBox.information) = orig
+
+
+check("picker: subscription refresh merge + URL-list migration",
+      _picker_subs_refresh_merge_and_url_list)
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------

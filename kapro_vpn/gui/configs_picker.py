@@ -79,6 +79,49 @@ class _PingerThread(QThread):
             return None
 
 
+class _SubsRefreshThread(QThread):
+    """Re-fetch every saved subscription URL off the UI thread.
+
+    Each URL goes through the same direct→DPI-fallback path the import
+    dialog uses. Per-URL failures are captured (not raised) so one dead
+    provider doesn't abort refreshing the others. Emits one aggregated
+    payload when all URLs have been tried.
+    """
+    done = Signal(object)  # dict: configs / userinfo / ok / errors / total
+
+    def __init__(self, urls: list[str], listen_port: int, parent=None):
+        super().__init__(parent)
+        self._urls = urls
+        self._listen_port = listen_port
+
+    def run(self) -> None:
+        from ..core.subscription import (
+            classify_fetch_error,
+            import_with_dpi_fallback,
+        )
+        configs: list[ProxyConfig] = []
+        userinfo = None
+        ok = 0
+        errors: list[tuple] = []  # (url, FetchError)
+        for url in self._urls:
+            try:
+                res = import_with_dpi_fallback(url, local_proxy_port=self._listen_port)
+                configs.extend(res.configs)
+                # Keep the most recent informative traffic/expiry summary.
+                if res.userinfo is not None and res.userinfo.summary():
+                    userinfo = res.userinfo
+                ok += 1
+            except Exception as e:
+                errors.append((url, classify_fetch_error(e)))
+        self.done.emit({
+            "configs": configs,
+            "userinfo": userinfo,
+            "ok": ok,
+            "errors": errors,
+            "total": len(self._urls),
+        })
+
+
 class ConfigsPickerDialog(QDialog):
     """Pick a saved config, or add/remove from the saved list.
 
@@ -101,6 +144,7 @@ class ConfigsPickerDialog(QDialog):
         self._chosen: Optional[ProxyConfig] = None
         self._pings: dict[str, Optional[int]] = {}  # name -> ms (None = unreachable)
         self._pinger: Optional[_PingerThread] = None
+        self._subs_refresher: Optional[_SubsRefreshThread] = None
         self._ping_labels: dict[str, QLabel] = {}   # name -> ping-pill QLabel (in-place updates)
         self._sort_mode = _SORT_SPEED
 
@@ -172,12 +216,19 @@ class ConfigsPickerDialog(QDialog):
         sub_btn = QPushButton("📥 Подписка")
         sub_btn.setToolTip("Импортировать сразу много конфигов из URL подписки")
         sub_btn.clicked.connect(self._on_import_subscription)
+        # Re-fetch every saved subscription and pull in new/updated servers.
+        self.refresh_subs_btn = QPushButton("🔄 Обновить")
+        self.refresh_subs_btn.setToolTip(
+            "Заново скачать все сохранённые подписки и добавить новые серверы"
+        )
+        self.refresh_subs_btn.clicked.connect(self._on_refresh_subscriptions)
         remove_btn = QPushButton("Удалить")
         remove_btn.setObjectName("danger")
         remove_btn.clicked.connect(self._on_remove)
 
         button_row.addWidget(add_btn)
         button_row.addWidget(sub_btn)
+        button_row.addWidget(self.refresh_subs_btn)
         button_row.addWidget(remove_btn)
         button_row.addStretch(1)
         layout.addLayout(button_row)
@@ -469,6 +520,93 @@ class ConfigsPickerDialog(QDialog):
             "Импорт завершён",
             f"Добавлено новых: {added}\nЗаменено существующих: {replaced}",
         )
+
+    def _all_subscription_urls(self) -> list[str]:
+        """Every subscription URL we've imported from.
+
+        Falls back to the single legacy `subscription_url` for installs
+        that predate the list, and de-dupes while preserving order.
+        """
+        s = storage.load_settings()
+        urls = [u for u in (s.get("subscription_urls") or []) if u]
+        if not urls:
+            one = s.get("subscription_url")
+            if one:
+                urls = [one]
+        seen: set[str] = set()
+        out: list[str] = []
+        for u in urls:
+            if u not in seen:
+                seen.add(u)
+                out.append(u)
+        return out
+
+    def _on_refresh_subscriptions(self) -> None:
+        """Re-fetch all saved subscriptions and merge in new/updated servers."""
+        if self._subs_refresher is not None and self._subs_refresher.isRunning():
+            return
+        urls = self._all_subscription_urls()
+        if not urls:
+            QMessageBox.information(
+                self,
+                "Подписки",
+                "Нет сохранённых подписок.\n"
+                "Добавь хотя бы одну через «📥 Подписка».",
+            )
+            return
+        self.refresh_subs_btn.setEnabled(False)
+        self.refresh_subs_btn.setText("⏳ Обновляю…")
+        listen_port = int(storage.load_settings().get("listen_port", 2080))
+        self._subs_refresher = _SubsRefreshThread(urls, listen_port, parent=self)
+        self._subs_refresher.done.connect(self._on_subs_refreshed)
+        self._subs_refresher.start()
+
+    def _on_subs_refreshed(self, agg: dict) -> None:
+        self.refresh_subs_btn.setEnabled(True)
+        self.refresh_subs_btn.setText("🔄 Обновить")
+
+        # Merge: add new servers by name, refresh existing ones (providers
+        # rotate IPs/keys). Never delete — a single failed or partial fetch
+        # must not wipe a working server list. Placeholders (0.0.0.0 stubs)
+        # are already filtered out upstream in result_from_body.
+        existing_by_name = {c.name: i for i, c in enumerate(self._configs)}
+        added = updated = 0
+        for cfg in agg["configs"]:
+            idx = existing_by_name.get(cfg.name)
+            if idx is not None:
+                self._configs[idx] = cfg
+                updated += 1
+            else:
+                self._configs.append(cfg)
+                existing_by_name[cfg.name] = len(self._configs) - 1
+                added += 1
+
+        if added or updated:
+            storage.save_configs(self._configs)
+            # Persist refreshed traffic/expiry info so Settings stays current.
+            if agg["userinfo"] is not None:
+                s = storage.load_settings()
+                s["subscription_userinfo"] = agg["userinfo"].to_dict()
+                storage.save_settings(s)
+            self._refresh()
+            self._start_pings()
+
+        # Report — counts + any per-subscription failures.
+        lines = [
+            f"Подписок обновлено: {agg['ok']} из {agg['total']}",
+            f"Добавлено новых серверов: {added}",
+            f"Обновлено существующих: {updated}",
+        ]
+        errors = agg["errors"]
+        if errors:
+            lines.append("")
+            lines.append(f"Не удалось обновить ({len(errors)}):")
+            for url, info in errors[:5]:
+                short = url if len(url) <= 48 else url[:45] + "…"
+                lines.append(f"• {short} — {info.title}")
+            if len(errors) > 5:
+                lines.append(f"…и ещё {len(errors) - 5}")
+        QMessageBox.information(self, "Обновление подписок", "\n".join(lines))
 
     def _on_remove(self) -> None:
         cfg = self._selected_cfg()
