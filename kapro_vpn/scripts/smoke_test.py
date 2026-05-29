@@ -1868,6 +1868,58 @@ check("updater: mirror-first source order", _updater_sources_order)
 
 
 # ---------------------------------------------------------------------------
+# Test 18 — configs picker: sort + colour-coded rows (UX 2.0 / 1.17.0)
+# ---------------------------------------------------------------------------
+
+section("Configs picker — sort + rows")
+
+
+def _picker_sort_and_rows() -> None:
+    import os as _os2
+    _os2.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_vpn.gui.configs_picker import (
+        ConfigsPickerDialog, _SORT_SPEED, _SORT_NAME, _SORT_PROTO,
+    )
+    from kapro_vpn.core.parser import ProxyConfig as PC
+    cfgs = [
+        PC(name="🇩🇪 Германия", protocol="vless", raw_url="vless://x@127.0.0.1:1",
+           outbound={"server": "127.0.0.1", "server_port": 1}),
+        PC(name="🇳🇱 Нидерланды", protocol="trojan", raw_url="trojan://x@127.0.0.1:1",
+           outbound={"server": "127.0.0.1", "server_port": 1}),
+        PC(name="🇫🇷 Франция", protocol="hysteria2", raw_url="hysteria2://x@127.0.0.1:1",
+           outbound={"server": "127.0.0.1", "server_port": 1}),
+    ]
+    dlg = ConfigsPickerDialog(cfgs, current_name="🇩🇪 Германия")
+    if dlg._pinger is not None:
+        dlg._pinger.wait(3000)  # let the (instant, localhost-refused) pinger finish
+    dlg._pings = {"🇩🇪 Германия": 50, "🇳🇱 Нидерланды": 200, "🇫🇷 Франция": -1}
+
+    dlg._sort_mode = _SORT_SPEED
+    if [c.name for c in dlg._sorted_configs()] != ["🇩🇪 Германия", "🇳🇱 Нидерланды", "🇫🇷 Франция"]:
+        raise AssertionError("speed sort wrong (reachable asc, UDP last)")
+
+    dlg._sort_mode = _SORT_NAME  # flag stripped -> Германия < Нидерланды < Франция
+    if [c.name for c in dlg._sorted_configs()] != ["🇩🇪 Германия", "🇳🇱 Нидерланды", "🇫🇷 Франция"]:
+        raise AssertionError("name sort wrong (flag-emoji not stripped?)")
+
+    dlg._sort_mode = _SORT_PROTO
+    protos = [c.protocol for c in dlg._sorted_configs()]
+    if protos != sorted(protos):
+        raise AssertionError(f"proto sort not ordered: {protos}")
+
+    # rows + pill styling must build without raising
+    if dlg._make_row(cfgs[0]) is None:
+        raise AssertionError("row widget is None")
+    dlg.deleteLater()
+
+
+check("picker: sort speed/name/proto + row build", _picker_sort_and_rows)
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 

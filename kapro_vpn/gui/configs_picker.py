@@ -8,6 +8,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -17,13 +18,20 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QVBoxLayout,
+    QWidget,
 )
 
 from ..core import storage
 from ..core.parser import ProxyConfig
-from . import flags
+from . import flags, styles, world_map
 from .config_dialog import AddConfigDialog
 from .subscription_dialog import SubscriptionDialog
+
+
+# Sort modes for the picker. Key = combo label, value = sort-key function
+# name handled in _sorted_configs.
+_SORT_SPEED, _SORT_NAME, _SORT_COUNTRY, _SORT_PROTO = range(4)
+_SORT_LABELS = ["⚡ По скорости", "Имя", "Страна", "Протокол"]
 
 
 class _PingerThread(QThread):
@@ -93,6 +101,8 @@ class ConfigsPickerDialog(QDialog):
         self._chosen: Optional[ProxyConfig] = None
         self._pings: dict[str, Optional[int]] = {}  # name -> ms (None = unreachable)
         self._pinger: Optional[_PingerThread] = None
+        self._ping_labels: dict[str, QLabel] = {}   # name -> ping-pill QLabel (in-place updates)
+        self._sort_mode = _SORT_SPEED
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -108,6 +118,14 @@ class ConfigsPickerDialog(QDialog):
         self.count_label.setObjectName("dim")
         header_row.addWidget(self.count_label)
         header_row.addStretch(1)
+        # Sort selector — speed (default) / name / country / protocol.
+        header_row.addWidget(QLabel("Сорт:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(_SORT_LABELS)
+        self.sort_combo.setCurrentIndex(self._sort_mode)
+        self.sort_combo.setToolTip("Сортировка списка серверов")
+        self.sort_combo.currentIndexChanged.connect(self._on_sort_changed)
+        header_row.addWidget(self.sort_combo)
         self.refresh_ping_btn = QPushButton("↻ Пинг")
         self.refresh_ping_btn.setToolTip("Перепроверить задержку до каждого сервера")
         self.refresh_ping_btn.clicked.connect(self._start_pings)
@@ -174,15 +192,62 @@ class ConfigsPickerDialog(QDialog):
 
     # --- helpers ----------------------------------------------------------
 
+    def _on_sort_changed(self, idx: int) -> None:
+        self._sort_mode = idx
+        self._refresh()
+
+    @staticmethod
+    def _name_key(cfg: ProxyConfig) -> str:
+        """Sort key for names: strip a leading flag emoji + spaces so
+        "🇳🇱 Нидерланды" sorts by 'нидерланды', not by emoji codepoint."""
+        n = cfg.name.lstrip()
+        i = 0
+        while i < len(n) and ("\U0001F1E6" <= n[i] <= "\U0001F1FF" or n[i].isspace()):
+            i += 1
+        return (n[i:].strip() or n).casefold()
+
+    def _sorted_configs(self) -> list[ProxyConfig]:
+        cfgs = list(self._configs)
+        mode = self._sort_mode
+        if mode == _SORT_NAME:
+            cfgs.sort(key=lambda c: self._name_key(c))
+        elif mode == _SORT_PROTO:
+            cfgs.sort(key=lambda c: (c.protocol.lower(), self._name_key(c)))
+        elif mode == _SORT_COUNTRY:
+            cfgs.sort(key=lambda c: (self._country_key(c), self._name_key(c)))
+        else:  # _SORT_SPEED: reachable (ms asc) → UDP/pending → unreachable
+            cfgs.sort(key=lambda c: (self._speed_rank(c), self._name_key(c)))
+        return cfgs
+
+    def _speed_rank(self, cfg: ProxyConfig) -> tuple:
+        v = self._pings.get(cfg.name, "pending")
+        if isinstance(v, int) and v >= 0:
+            return (0, v)
+        if v == -1 or v == "pending":   # UDP-only / not yet pinged
+            return (1, 0)
+        return (2, 0)                   # None = unreachable → last
+
+    @staticmethod
+    def _country_key(cfg: ProxyConfig) -> tuple:
+        try:
+            code = flags.country_code(cfg.name) or (world_map.country_code_from_flag(cfg.name) or "")
+        except Exception:
+            code = flags.country_code(cfg.name) or ""
+        return (0, code) if code else (1, "")
+
     def _refresh(self) -> None:
         self.list_widget.clear()
-        for cfg in self._configs:
-            item = QListWidgetItem(self._format_item(cfg))
+        self._ping_labels.clear()
+        for cfg in self._sorted_configs():
+            item = QListWidgetItem()
             item.setData(Qt.UserRole, cfg)
             self.list_widget.addItem(item)
+            row = self._make_row(cfg)
+            item.setSizeHint(row.sizeHint())
+            self.list_widget.setItemWidget(item, row)
             if cfg.name == self._current_name:
                 self.list_widget.setCurrentItem(item)
-        if self.list_widget.currentRow() < 0 and self._configs:
+        if self.list_widget.currentRow() < 0 and self.list_widget.count():
             self.list_widget.setCurrentRow(0)
         # Re-apply the active search filter to the rebuilt list — if
         # the user added/removed/imported configs while a query was in
@@ -240,26 +305,64 @@ class ConfigsPickerDialog(QDialog):
         ])
         return q in haystack
 
-    def _format_item(self, cfg: ProxyConfig) -> str:
-        srv = cfg.outbound.get("server", "?")
-        port = cfg.outbound.get("server_port", "?")
-        # Ping suffix is in the protocol line: known ms / "недоступен" / "…"
-        # Sentinel -1 from _ping_one means "UDP-only protocol, skip the
-        # ping label entirely" — TCP-probing a WG/HY2 endpoint always
-        # fails and would falsely show "недоступен".
-        ping_value = self._pings.get(cfg.name, "pending")
-        if ping_value == "pending":
-            ping_str = "…"
-        elif ping_value == -1:
-            ping_str = "UDP"  # protocol uses UDP-only, can't TCP-probe
-        elif ping_value is None:
-            ping_str = "недоступен"
+    def _make_row(self, cfg: ProxyConfig) -> QWidget:
+        """A themed two-line row: name (+active marker) over
+        protocol-badge · server:port · colour-coded ping pill."""
+        p = styles.get_active_palette()
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(8, 6, 8, 6)
+        v.setSpacing(3)
+
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        name = QLabel(flags.prefix_with_flag(cfg))  # name already carries the flag emoji
+        name.setStyleSheet(f"color:{p.TEXT}; font-weight:600;")
+        top.addWidget(name)
+        top.addStretch(1)
+        if cfg.name == self._current_name:
+            active = QLabel("● активен")
+            active.setStyleSheet(f"color:{p.ACCENT}; font-size:8pt; font-weight:600;")
+            top.addWidget(active)
+        v.addLayout(top)
+
+        bot = QHBoxLayout()
+        bot.setSpacing(6)
+        proto = QLabel(cfg.protocol.upper())
+        proto.setStyleSheet(
+            f"color:{p.ACCENT_DIM_TEXT}; background:{p.ACCENT_DIM};"
+            f"border-radius:4px; padding:1px 6px; font-size:8pt; font-weight:600;")
+        bot.addWidget(proto)
+        srv = QLabel(f"{cfg.outbound.get('server','?')}:{cfg.outbound.get('server_port','?')}")
+        srv.setStyleSheet(f"color:{p.TEXT_MUTED}; font-size:9pt;")
+        bot.addWidget(srv)
+        bot.addStretch(1)
+        pill = QLabel()
+        self._ping_labels[cfg.name] = pill
+        self._style_pill(pill, self._pings.get(cfg.name, "pending"))
+        bot.addWidget(pill)
+        v.addLayout(bot)
+        return w
+
+    def _style_pill(self, pill: QLabel, value) -> None:
+        """Colour-code the ping pill: green<100 / amber<250 / red ≥250 or
+        unreachable / grey for UDP-only & pending."""
+        p = styles.get_active_palette()
+        if value == "pending":
+            text, color = "…", p.TEXT_MUTED
+        elif value == -1:
+            text, color = "UDP", p.TEXT_MUTED   # UDP-only (hy2/wg): can't TCP-probe
+        elif value is None:
+            text, color = "недоступен", p.DANGER
+        elif isinstance(value, int):
+            text = f"{value} мс"
+            color = p.SUCCESS if value < 100 else (p.ACCENT if value < 250 else p.DANGER)
         else:
-            ping_str = f"{ping_value} мс"
-        return (
-            f"{flags.prefix_with_flag(cfg)}\n"
-            f"{cfg.protocol.upper()}  ·  {srv}:{port}  ·  {ping_str}"
-        )
+            text, color = "…", p.TEXT_MUTED
+        pill.setText(text)
+        pill.setStyleSheet(
+            f"color:{color}; font-size:9pt; font-weight:600;"
+            f"border:1px solid {color}; border-radius:8px; padding:1px 8px;")
 
     # --- pinger lifecycle -------------------------------------------------
 
@@ -269,26 +372,30 @@ class ConfigsPickerDialog(QDialog):
         # Reset all to "pending" so the UI shows progress
         for cfg in self._configs:
             self._pings[cfg.name] = "pending"
-        self._refresh_list_text()
+            pill = self._ping_labels.get(cfg.name)
+            if pill is not None:
+                self._style_pill(pill, "pending")
         self.refresh_ping_btn.setEnabled(False)
         self._pinger = _PingerThread(self._configs, parent=self)
         self._pinger.pinged.connect(self._on_pinged)
-        self._pinger.finished.connect(lambda: self.refresh_ping_btn.setEnabled(True))
+        self._pinger.finished.connect(self._on_pings_done)
         self._pinger.start()
 
     def _on_pinged(self, name: str, ms) -> None:
         self._pings[name] = ms
-        self._refresh_list_text()
+        pill = self._ping_labels.get(name)
+        if pill is not None:
+            self._style_pill(pill, ms)
 
-    def _refresh_list_text(self) -> None:
-        """Update each list item's label in place (no row rebuild)."""
-        for i in range(self.list_widget.count()):
-            item = self.list_widget.item(i)
-            cfg = item.data(Qt.UserRole)
-            item.setText(self._format_item(cfg))
+    def _on_pings_done(self) -> None:
+        self.refresh_ping_btn.setEnabled(True)
+        # Re-order now that latencies are in (only affects the speed sort).
+        if self._sort_mode == _SORT_SPEED:
+            self._refresh()
 
-    def _selected_index(self) -> int:
-        return self.list_widget.currentRow()
+    def _selected_cfg(self) -> Optional[ProxyConfig]:
+        item = self.list_widget.currentItem()
+        return item.data(Qt.UserRole) if item is not None else None
 
     # --- actions ----------------------------------------------------------
 
@@ -346,25 +453,25 @@ class ConfigsPickerDialog(QDialog):
         )
 
     def _on_remove(self) -> None:
-        idx = self._selected_index()
-        if idx < 0:
+        cfg = self._selected_cfg()
+        if cfg is None:
             return
-        cfg = self._configs[idx]
         confirm = QMessageBox.question(
             self, "Удалить", f"Удалить конфиг «{cfg.name}»?"
         )
         if confirm != QMessageBox.Yes:
             return
-        del self._configs[idx]
+        # Remove by identity — list order no longer matches _configs (sort).
+        self._configs = [c for c in self._configs if c is not cfg]
         storage.save_configs(self._configs)
         self._refresh()
 
     def _on_use(self) -> None:
-        idx = self._selected_index()
-        if idx < 0:
+        cfg = self._selected_cfg()
+        if cfg is None:
             QMessageBox.information(self, "Конфиг", "Выбери конфиг из списка.")
             return
-        self._chosen = self._configs[idx]
+        self._chosen = cfg
         self.accept()
 
     def _on_double_click(self, _item) -> None:
