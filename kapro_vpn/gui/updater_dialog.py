@@ -38,6 +38,10 @@ from ..core.updater import UpdateInfo
 
 
 SETUP_FILENAME = "KaproVPN-Setup.exe"
+# Our own mirror — reachable from RU/CIS where github.com is frequently
+# DNS-blocked / throttled. That block (getaddrinfo failed for github.com)
+# is exactly what made auto-update dead-on-arrival for those users.
+KAPROVPN_MIRROR_BASE = "https://files.kaprovpn.pro"
 
 
 def _release_setup_url(version: str) -> str:
@@ -47,6 +51,18 @@ def _release_setup_url(version: str) -> str:
     )
 
 
+def _mirror_setup_url(version: str) -> str:
+    # Flat, version-tagged name — matches the binary-mirror convention and
+    # keeps the server-setup sync a simple `mv` into the docroot.
+    return f"{KAPROVPN_MIRROR_BASE}/KaproVPN-Setup-v{version}.exe"
+
+
+def _setup_sources(version: str) -> list[str]:
+    """Download sources in priority order: our mirror first (RU-reachable),
+    GitHub as the canonical fallback."""
+    return [_mirror_setup_url(version), _release_setup_url(version)]
+
+
 # --- download worker ------------------------------------------------------
 
 class _DownloadWorker(QThread):
@@ -54,33 +70,47 @@ class _DownloadWorker(QThread):
     finished_ok = Signal(str)     # path to downloaded file
     failed = Signal(str)
 
-    def __init__(self, url: str, dest: Path, parent=None):
+    def __init__(self, urls: list[str], dest: Path, parent=None):
         super().__init__(parent)
-        self._url = url
+        self._urls = urls
         self._dest = dest
 
     def run(self) -> None:
-        try:
-            # Bypass system proxy — see core/xray_installer for full
-            # rationale. We're downloading our own installer .exe from
-            # GitHub, not pushing user traffic. A stale system proxy
-            # entry would self-perpetuate the bug (can't auto-update
-            # to a fix because the update mechanism itself fails).
-            with requests.get(self._url, stream=True, timeout=(15, 30),
-                              proxies={"http": "", "https": ""}) as r:
-                r.raise_for_status()
-                total = int(r.headers.get("Content-Length", 0))
+        # Try each source in order (mirror, then GitHub). The first that
+        # delivers a sane-sized file wins; we only report failure if ALL
+        # sources fail — so a github.com DNS block alone can't kill the
+        # update when the mirror is reachable.
+        #
+        # Bypass system proxy — see core/xray_installer for the rationale:
+        # a stale 127.0.0.1 proxy entry would otherwise self-perpetuate
+        # the bug (can't auto-update to a fix because the updater fails).
+        errors: list[str] = []
+        for url in self._urls:
+            host = url.split("/")[2] if "//" in url else url
+            try:
                 downloaded = 0
-                with open(self._dest, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=64 * 1024):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        self.progress.emit(downloaded, total)
-            self.finished_ok.emit(str(self._dest))
-        except Exception as e:
-            self.failed.emit(f"{type(e).__name__}: {e}")
+                with requests.get(url, stream=True, timeout=(15, 30),
+                                  proxies={"http": "", "https": ""}) as r:
+                    r.raise_for_status()
+                    total = int(r.headers.get("Content-Length", 0))
+                    with open(self._dest, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=64 * 1024):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            self.progress.emit(downloaded, total)
+                # Guard: a mirror/CDN serving an HTML error page as 200
+                # would otherwise be "downloaded" and then fail to launch.
+                if self._dest.stat().st_size < 1024 * 1024:
+                    raise RuntimeError(
+                        f"файл подозрительно мал ({self._dest.stat().st_size} Б)"
+                    )
+                self.finished_ok.emit(str(self._dest))
+                return
+            except Exception as e:
+                errors.append(f"{host}: {type(e).__name__}: {e}")
+        self.failed.emit(" | ".join(errors) if errors else "download failed")
 
 
 # --- dialog ---------------------------------------------------------------
@@ -151,7 +181,8 @@ class UpdaterDialog(QDialog):
         self.later_btn.setEnabled(False)
         self.status_label.setVisible(True)
         self.status_label.setText(
-            f"Качаю {SETUP_FILENAME} из GitHub Release v{self._info.version}…"
+            f"Качаю {SETUP_FILENAME} v{self._info.version} "
+            f"(зеркало, при сбое — GitHub)…"
         )
         self.progress_bar.setVisible(True)
 
@@ -161,7 +192,7 @@ class UpdaterDialog(QDialog):
         dest = temp_dir / f"KaproVPN-Setup-v{self._info.version}.exe"
 
         self._download_worker = _DownloadWorker(
-            _release_setup_url(self._info.version), dest, parent=self,
+            _setup_sources(self._info.version), dest, parent=self,
         )
         self._download_worker.progress.connect(self._on_progress)
         self._download_worker.finished_ok.connect(self._on_downloaded)

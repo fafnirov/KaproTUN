@@ -36,6 +36,8 @@ Files served by URL:
 | `/tun2socks-linux-amd64.zip`          | same |
 | `/tun2socks-linux-arm64.zip`          | same |
 | `/wintun-0.14.1.zip`                  | `wintun.net` |
+| `/hysteria-windows-amd64.exe` (+ darwin/linux, arm64) | `github.com/apernet/hysteria` release (tag `app/vX.Y.Z`) |
+| `/KaproVPN-Setup-v<ver>.exe`          | KaproVPN GitHub release — **in-app auto-updater fallback** when github.com is unreachable from RU |
 
 Total disk usage: ~150 MB at any given time.
 

@@ -1840,6 +1840,34 @@ check("hysteria: no port -> NotImplemented", _hy_no_port_raises)
 
 
 # ---------------------------------------------------------------------------
+# Test 17 — auto-updater: mirror-first download sources (v1.16.17)
+# ---------------------------------------------------------------------------
+# github.com is frequently DNS-blocked in RU (getaddrinfo failed), which
+# made auto-update dead. The updater must try our mirror BEFORE GitHub.
+
+section("Auto-updater — mirror-first download sources")
+
+from kapro_vpn.gui.updater_dialog import _setup_sources
+
+
+def _updater_sources_order() -> None:
+    srcs = _setup_sources("1.2.3")
+    if len(srcs) != 2:
+        raise AssertionError(f"expected 2 sources, got {srcs}")
+    if "files.kaprovpn.pro" not in srcs[0]:
+        raise AssertionError(f"mirror must be first: {srcs}")
+    if "github.com" not in srcs[1]:
+        raise AssertionError(f"github must be the fallback: {srcs}")
+    if "1.2.3" not in srcs[0] or "1.2.3" not in srcs[1]:
+        raise AssertionError(f"version missing from a source: {srcs}")
+    if not srcs[0].endswith("KaproVPN-Setup-v1.2.3.exe"):
+        raise AssertionError(f"mirror filename wrong: {srcs[0]}")
+
+
+check("updater: mirror-first source order", _updater_sources_order)
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 
