@@ -102,6 +102,7 @@ def _import_core() -> None:
         subscription, geoip_ru, killswitch, i18n, system_proxy,
         ip_probe, dns_options, secrets_store, ipv6_block,
         bandwidth_history, webrtc_block, leak_test, crash_handler,
+        hysteria_installer, hysteria_process,
     )
 
 
@@ -1768,6 +1769,74 @@ check("userinfo: summary (limited)",   _userinfo_summary_limited)
 check("userinfo: summary (unlimited)", _userinfo_summary_unlimited)
 check("userinfo: summary (expired)",   _userinfo_summary_expired)
 check("userinfo: to_dict/from_dict",   _userinfo_roundtrip)
+
+
+# ---------------------------------------------------------------------------
+# Test 16 — Hysteria2 transport: installer asset + client config + xray chain
+# ---------------------------------------------------------------------------
+# Xray can't dial hy2, so the hysteria client runs as a local SOCKS5 and
+# xray chains through it. E2E "does it connect" needs a real hy2 server;
+# here we verify the pure asset/config logic that gets us there.
+
+section("Hysteria2 — asset + client config + xray chain")
+
+from kapro_vpn.core import hysteria_installer as _hyi, hysteria_process as _hyp
+
+_HY2_URL = ("hysteria2://mypassword@1.2.3.4:443"
+            "?sni=example.com&insecure=1&obfs=salamander&obfs-password=xyz#hy2-test")
+
+
+def _hy_asset_name() -> None:
+    name = _hyi._asset_name()
+    known = {"hysteria-windows-amd64.exe", "hysteria-windows-arm64.exe",
+             "hysteria-darwin-amd64", "hysteria-darwin-arm64",
+             "hysteria-linux-amd64", "hysteria-linux-arm64"}
+    if name not in known:
+        raise AssertionError(f"unexpected asset name: {name}")
+    if sys.platform == "win32" and not name.startswith("hysteria-windows"):
+        raise AssertionError(f"win32 asset wrong: {name}")
+
+
+def _hy_client_config() -> None:
+    c = _hyp.build_client_config(parse(_HY2_URL).outbound, 2089)
+    if c["server"] != "1.2.3.4:443":
+        raise AssertionError(f"server wrong: {c['server']}")
+    if c["auth"] != "mypassword":
+        raise AssertionError(f"auth wrong: {c['auth']}")
+    if c["socks5"]["listen"] != "127.0.0.1:2089":
+        raise AssertionError(f"socks5 listen wrong: {c['socks5']}")
+    if c.get("tls", {}).get("sni") != "example.com" or not c["tls"].get("insecure"):
+        raise AssertionError(f"tls wrong: {c.get('tls')}")
+    obfs = c.get("obfs", {})
+    if obfs.get("type") != "salamander" or obfs.get("salamander", {}).get("password") != "xyz":
+        raise AssertionError(f"obfs wrong: {obfs}")
+
+
+def _hy_xray_chain() -> None:
+    from kapro_vpn.core.xray_config import build_config
+    full = build_config(parse(_HY2_URL), direct_domains=["example.com"],
+                        hysteria_socks_port=2089)
+    ob = full["outbounds"][0]
+    if ob.get("protocol") != "socks" or ob.get("tag") != "proxy":
+        raise AssertionError(f"hy2 proxy outbound not socks: {ob}")
+    srv = ob["settings"]["servers"][0]
+    if srv["address"] != "127.0.0.1" or srv["port"] != 2089:
+        raise AssertionError(f"socks chain target wrong: {srv}")
+
+
+def _hy_no_port_raises() -> None:
+    from kapro_vpn.core.xray_config import build_config
+    try:
+        build_config(parse(_HY2_URL), direct_domains=["example.com"])
+    except NotImplementedError:
+        return
+    raise AssertionError("hy2 without socks port should raise NotImplementedError")
+
+
+check("hysteria: asset name per platform",   _hy_asset_name)
+check("hysteria: client config mapping",     _hy_client_config)
+check("hysteria: xray socks-chain",          _hy_xray_chain)
+check("hysteria: no port -> NotImplemented", _hy_no_port_raises)
 
 
 # ---------------------------------------------------------------------------

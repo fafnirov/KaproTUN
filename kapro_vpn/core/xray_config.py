@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import dns_options, paths
@@ -253,8 +253,18 @@ def _ss_to_xray(url: str) -> dict[str, Any]:
 
 # ---- dispatcher ----------------------------------------------------------
 
-def proxy_to_xray_outbound(cfg: ProxyConfig) -> dict[str, Any]:
-    """Convert a parsed ProxyConfig into an Xray-core outbound dict."""
+def proxy_to_xray_outbound(cfg: ProxyConfig,
+                           hysteria_socks_port: Optional[int] = None) -> dict[str, Any]:
+    """Convert a parsed ProxyConfig into an Xray-core outbound dict.
+
+    Hysteria2 isn't a native Xray protocol — Xray can't dial it. Instead
+    the ConnectionManager runs the standalone `hysteria` client as a local
+    SOCKS5 proxy and passes its port here; we then emit a plain `socks`
+    outbound pointing at it, so xray keeps doing split-routing while the
+    actual encrypted transport to the server is hysteria's job. Without a
+    port (e.g. a bare build_config call in tests) hy2 still raises, since
+    there'd be nothing to chain to.
+    """
     scheme = cfg.raw_url.split("://", 1)[0].lower()
     if scheme == "vless":
         return _vless_to_xray(cfg.raw_url)
@@ -265,10 +275,21 @@ def proxy_to_xray_outbound(cfg: ProxyConfig) -> dict[str, Any]:
     if scheme == "ss":
         return _ss_to_xray(cfg.raw_url)
     if scheme in ("hysteria2", "hy2"):
-        raise NotImplementedError(
-            "Xray-core не поддерживает Hysteria2. Используй v2/hy2-совместимый клиент "
-            "или жди добавления второго движка (sing-box) в KaproVPN."
-        )
+        if hysteria_socks_port is None:
+            raise NotImplementedError(
+                "Hysteria2 идёт через локальный hysteria-клиент (chain по SOCKS). "
+                "Подключайся через ConnectionManager, который его поднимает."
+            )
+        return {
+            "tag": "proxy",
+            "protocol": "socks",
+            "settings": {
+                "servers": [{
+                    "address": "127.0.0.1",
+                    "port": int(hysteria_socks_port),
+                }],
+            },
+        }
     raise ValueError(f"Unknown protocol scheme: {scheme}")
 
 
@@ -282,6 +303,7 @@ def build_config(
     log_level: str = "warning",
     dns_option: str = "system",
     dns_leak_protection: bool = True,
+    hysteria_socks_port: Optional[int] = None,
 ) -> dict[str, Any]:
     """Build a complete Xray-core client config with split routing.
 
@@ -308,7 +330,7 @@ def build_config(
             "DNS-leak hardening" legacy behavior. Pi-hole / corporate /
             locally-pinned DNS keeps working. ISP sees domain queries.
     """
-    proxy_outbound = proxy_to_xray_outbound(proxy)
+    proxy_outbound = proxy_to_xray_outbound(proxy, hysteria_socks_port)
     cleaned = sorted({d.strip().lower() for d in direct_domains if d.strip()})
     dns_opt = dns_options.get(dns_option)
 
@@ -543,11 +565,13 @@ def write_config(
     listen_port: int = DEFAULT_LISTEN_PORT,
     dns_option: str = "system",
     dns_leak_protection: bool = True,
+    hysteria_socks_port: Optional[int] = None,
 ) -> str:
     config = build_config(
         proxy, direct_domains, listen_host, listen_port,
         dns_option=dns_option,
         dns_leak_protection=dns_leak_protection,
+        hysteria_socks_port=hysteria_socks_port,
     )
     target = paths.runtime_config_file()
     target.write_text(

@@ -78,6 +78,30 @@ def wintun_dll() -> Path:
     return tun_dir() / "wintun.dll"
 
 
+def hysteria_dir() -> Path:
+    """Houses the hysteria client binary (Hysteria2 transport).
+
+    Xray-core can't speak Hysteria2, so for hy2 configs we run the
+    standalone `hysteria` client as a local SOCKS5 proxy and chain xray
+    through it — same helper-process pattern as tun2socks.
+    """
+    path = app_data_dir() / "hysteria"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def hysteria_exe() -> Path:
+    name = "hysteria.exe" if _is_windows() else "hysteria"
+    return hysteria_dir() / name
+
+
+def hysteria_config_file() -> Path:
+    """Generated hysteria client config (JSON content in a .yaml file —
+    valid JSON is valid YAML, so hysteria's loader reads it without us
+    needing a YAML serializer)."""
+    return hysteria_dir() / "hysteria-client.yaml"
+
+
 def configs_file() -> Path:
     return app_data_dir() / "configs.json"
 

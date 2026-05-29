@@ -39,7 +39,7 @@ def _kill_orphan_helpers() -> None:
     # idempotent — they exit non-zero when no matching process exists,
     # which we swallow.
     if sys.platform == "win32":
-        for name in ("xray.exe", "tun2socks.exe"):
+        for name in ("xray.exe", "tun2socks.exe", "hysteria.exe"):
             try:
                 subprocess.run(
                     ["taskkill", "/F", "/IM", name],
@@ -48,7 +48,7 @@ def _kill_orphan_helpers() -> None:
             except (OSError, subprocess.SubprocessError):
                 pass
     else:
-        for name in ("xray", "tun2socks"):
+        for name in ("xray", "tun2socks", "hysteria"):
             try:
                 subprocess.run(
                     ["pkill", "-9", "-x", name],

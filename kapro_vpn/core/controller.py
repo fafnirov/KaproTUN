@@ -8,11 +8,13 @@ import time
 from typing import Callable, Optional
 
 from . import (
-    admin, dns_options, geoip_ru, ipv6_block, killswitch, paths, storage, webrtc_block,
+    admin, dns_options, geoip_ru, hysteria_installer, hysteria_process,
+    ipv6_block, killswitch, paths, storage, webrtc_block,
     system_proxy, xray_config,
 )
 from .parser import ProxyConfig
 from .xray_process import XrayProcess
+from .hysteria_process import HysteriaProcess
 
 # TUN-mode plumbing: same public API on every OS, but the backend that
 # manipulates routes/DNS is platform-specific. The Windows backend uses
@@ -93,6 +95,11 @@ class ConnectionManager:
         self.tun_process = Tun2socksProcess(
             on_log=(lambda l: on_log(f"[tun2socks] {l}")) if on_log else None,
         )
+        # Hysteria2 transport (only started for hy2 configs) — runs a local
+        # SOCKS5 that xray chains through, since Xray can't dial hy2 itself.
+        self.hysteria_process = HysteriaProcess(
+            on_log=(lambda l: on_log(f"[hysteria] {l}")) if on_log else None,
+        )
         self.settings = storage.load_settings()
         self._saved_proxy_state: Optional[dict] = None
         self._route_session: Optional[network_routes.RouteSession] = None
@@ -111,10 +118,51 @@ class ConnectionManager:
         if self.is_connected():
             raise ConnectionError("Уже подключено. Сначала отключись.")
         mode = self.settings.get("mode", MODE_HTTP_PROXY)
-        if mode == MODE_TUN:
-            self._connect_tun(config, direct_domains)
-        else:
-            self._connect_http(config, direct_domains)
+        try:
+            if mode == MODE_TUN:
+                self._connect_tun(config, direct_domains)
+            else:
+                self._connect_http(config, direct_domains)
+        except Exception:
+            # Any connect failure: make sure the hysteria helper isn't left
+            # running. Idempotent — a no-op for non-hy2 configs. (Per-step
+            # xray / tun2socks / proxy rollback is handled inside the paths.)
+            try:
+                self.hysteria_process.stop()
+            except Exception:
+                pass
+            raise
+
+    @staticmethod
+    def _is_hysteria(config: ProxyConfig) -> bool:
+        return config.raw_url.split("://", 1)[0].lower() in ("hysteria2", "hy2")
+
+    def _maybe_start_hysteria(self, config: ProxyConfig) -> Optional[int]:
+        """For hy2 configs: ensure the hysteria binary, start it as a local
+        SOCKS5 proxy and wait until it's listening. Returns the SOCKS port
+        for xray to chain through, or None for non-hy2 configs.
+        """
+        if not self._is_hysteria(config):
+            return None
+        try:
+            hysteria_installer.ensure_installed()
+        except Exception as e:
+            raise ConnectionError(f"Не удалось скачать hysteria-клиент: {e}") from e
+        port = hysteria_process.HYSTERIA_SOCKS_PORT
+        try:
+            cfg_path = hysteria_process.write_client_config(config.outbound, port)
+            self.hysteria_process.start(str(cfg_path))
+        except Exception as e:
+            raise ConnectionError(f"Не удалось запустить hysteria: {e}") from e
+        if not self.hysteria_process.wait_until_listening(port, timeout=8.0):
+            tail = " | ".join(self.hysteria_process.recent_logs()[-5:])
+            self.hysteria_process.stop()
+            raise ConnectionError(
+                "hysteria-клиент не поднял локальный SOCKS-порт за 8 с. "
+                f"Лог: {tail or '(пусто)'}"
+            )
+        self._log(f"[*] hysteria поднят, локальный SOCKS на :{port}")
+        return port
 
     def disconnect(self) -> None:
         # Order matters: stop TUN routing first so traffic stops hitting the
@@ -133,6 +181,10 @@ class ConnectionManager:
             finally:
                 self._saved_proxy_state = None
         self.process.stop()
+        # Stop the hysteria transport after xray (xray was chaining to it).
+        # Idempotent — no-op if this wasn't a hy2 session.
+        if self.hysteria_process.is_running():
+            self.hysteria_process.stop()
         # Kill-switch teardown LAST — until now the firewall block is the
         # safety net if any step above leaves traffic in a weird state.
         # Safe to call even if it wasn't installed (idempotent).
@@ -178,7 +230,9 @@ class ConnectionManager:
     def _connect_http(self, config: ProxyConfig, direct_domains: list[str]) -> None:
         host = str(self.settings.get("listen_host", "127.0.0.1"))
         port = int(self.settings.get("listen_port", 2080))
-        self._write_and_check(config, direct_domains, host, port)
+        hy_port = self._maybe_start_hysteria(config)
+        self._write_and_check(config, direct_domains, host, port,
+                              hysteria_socks_port=hy_port)
         self._start_xray()
         # Kill-switch goes up RIGHT AFTER xray starts but BEFORE we
         # touch system proxy — so if proxy-set fails, the firewall is
@@ -255,7 +309,13 @@ class ConnectionManager:
         # tun2socks forwards into).
         host = "127.0.0.1"
         port = int(self.settings.get("listen_port", 2080))
-        self._write_and_check(config, direct_domains, host, port)
+        # hy2: bring up the local hysteria SOCKS before xray so xray can
+        # chain to it. It connects to the server via the real route now;
+        # the static route added below keeps its QUIC off the TUN once the
+        # default route flips to the tunnel.
+        hy_port = self._maybe_start_hysteria(config)
+        self._write_and_check(config, direct_domains, host, port,
+                              hysteria_socks_port=hy_port)
         self._start_xray()
         # Arm kill-switch before tun2socks comes up — same reasoning as
         # _connect_http: firewall block must exist before any traffic
@@ -481,7 +541,8 @@ class ConnectionManager:
     # --- helpers ----------------------------------------------------------
 
     def _write_and_check(self, config: ProxyConfig, direct_domains: list[str],
-                         host: str, port: int) -> str:
+                         host: str, port: int,
+                         hysteria_socks_port: Optional[int] = None) -> str:
         dns_option = str(self.settings.get("dns_option", "system"))
         dns_leak_protection = bool(self.settings.get("dns_leak_protection", True))
         try:
@@ -489,6 +550,7 @@ class ConnectionManager:
                 config, direct_domains, host, port,
                 dns_option=dns_option,
                 dns_leak_protection=dns_leak_protection,
+                hysteria_socks_port=hysteria_socks_port,
             )
         except (ValueError, NotImplementedError) as e:
             raise ConnectionError(f"Конфиг не поддерживается: {e}") from e

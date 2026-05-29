@@ -27,6 +27,9 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 XRAY_VERSION="v26.3.27"
 TUN2SOCKS_VERSION="v2.6.0"
 WINTUN_VERSION="0.14.1"
+# Hysteria2 client binary (apernet/hysteria). Release tags are prefixed
+# `app/` — see the download URL below.
+HYSTERIA_VERSION="v2.9.2"
 
 XRAY_ASSETS=(
     "Xray-windows-64.zip"
@@ -43,6 +46,15 @@ TUN2SOCKS_ASSETS=(
     "tun2socks-darwin-arm64.zip"
     "tun2socks-linux-amd64.zip"
     "tun2socks-linux-arm64.zip"
+)
+
+HYSTERIA_ASSETS=(
+    "hysteria-windows-amd64.exe"
+    "hysteria-windows-arm64.exe"
+    "hysteria-darwin-amd64"
+    "hysteria-darwin-arm64"
+    "hysteria-linux-amd64"
+    "hysteria-linux-arm64"
 )
 
 WINTUN_FILE="wintun-${WINTUN_VERSION}.zip"
@@ -71,6 +83,14 @@ done
 echo "=== xjasonlyu/tun2socks $TUN2SOCKS_VERSION ==="
 for asset in "${TUN2SOCKS_ASSETS[@]}"; do
     fetch "https://github.com/xjasonlyu/tun2socks/releases/download/${TUN2SOCKS_VERSION}/${asset}" \
+          "$TMP_DIR/$asset"
+done
+
+echo "=== apernet/hysteria $HYSTERIA_VERSION ==="
+# NB: hysteria release tags are prefixed `app/`, so the path is
+# .../releases/download/app/vX.Y.Z/<asset>. Assets are single binaries.
+for asset in "${HYSTERIA_ASSETS[@]}"; do
+    fetch "https://github.com/apernet/hysteria/releases/download/app/${HYSTERIA_VERSION}/${asset}" \
           "$TMP_DIR/$asset"
 done
 
