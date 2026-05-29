@@ -275,6 +275,11 @@ class SubscriptionDialog(QDialog):
                     f"Пропущена заглушка от провайдера "
                     f"({len(result.placeholders)} шт., нерабочий сервер)</span>"
                 )
+            if result.userinfo is not None and result.userinfo.summary():
+                msg += (
+                    f"<br><span style='color:#fbbf24'>"
+                    f"Подписка: {result.userinfo.summary()}</span>"
+                )
             self.status_label.setText(msg)
             self.save_btn.setEnabled(True)
         elif result.placeholders:
@@ -300,9 +305,12 @@ class SubscriptionDialog(QDialog):
     def _on_accept(self) -> None:
         if not self._result or not self._result.configs:
             return
-        # Persist the URL for next time
+        # Persist the URL for next time, plus the provider's remaining-
+        # traffic / expiry info so Settings can show it without re-fetching.
         settings = storage.load_settings()
         settings["subscription_url"] = self.url_edit.text().strip()
+        if self._result.userinfo is not None:
+            settings["subscription_userinfo"] = self._result.userinfo.to_dict()
         storage.save_settings(settings)
         self.accept()
 

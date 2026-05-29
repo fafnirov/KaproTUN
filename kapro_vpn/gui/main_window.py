@@ -710,9 +710,11 @@ class SettingsPage(QWidget):
         outer.addWidget(sep)
 
         # --- Subscription import link ---
-        sub_row, _ = self._make_link_row(
+        # Subtitle doubles as a live status line: remaining traffic /
+        # expiry from the provider's Subscription-Userinfo, when known.
+        sub_row, self._sub_info_label = self._make_link_row(
             "Импорт по подписке",
-            "одна ссылка → много конфигов от провайдера",
+            self._sub_info_text(),
             self.subscription_clicked.emit,
         )
         outer.addLayout(sub_row)
@@ -796,6 +798,24 @@ class SettingsPage(QWidget):
     def refresh_sites_count(self) -> None:
         if self._sites_count_label is not None:
             self._sites_count_label.setText(f"{len(storage.load_sites())} доменов")
+
+    def _sub_info_text(self) -> str:
+        """Subscription-row subtitle: remaining traffic / expiry if the
+        provider sent Subscription-Userinfo, else the default hint."""
+        default = "одна ссылка → много конфигов от провайдера"
+        data = storage.load_settings().get("subscription_userinfo")
+        if not data:
+            return default
+        try:
+            from ..core.subscription import SubscriptionInfo
+            return SubscriptionInfo.from_dict(data).summary() or default
+        except Exception:
+            return default
+
+    def refresh_sub_info(self) -> None:
+        label = getattr(self, "_sub_info_label", None)
+        if label is not None:
+            label.setText(self._sub_info_text())
 
     def _on_port_changed(self, value: int) -> None:
         self._manager.update_settings(listen_port=int(value))
@@ -1892,6 +1912,9 @@ class MainWindow(QMainWindow):
                 existing_by_name[cfg.name] = len(self.configs) - 1
                 added += 1
         storage.save_configs(self.configs)
+        # Subscription-Userinfo was just persisted by the dialog — reflect
+        # the fresh remaining-traffic / expiry in the Settings subtitle.
+        self.refresh_sub_info()
         # If no active config yet, pick the first imported one
         if self._active_config is None and self.configs:
             self._active_config = self.configs[0]

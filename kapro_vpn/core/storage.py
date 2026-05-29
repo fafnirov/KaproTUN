@@ -160,6 +160,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "mode": "http",  # "http" (browser-only) or "tun" (system-wide, needs admin)
     "autoconnect_on_launch": False,
     "subscription_url": "",  # last imported subscription, for one-click re-sync
+    "subscription_userinfo": None,  # last seen Subscription-Userinfo (traffic/expiry) as dict, or None
     "kill_switch": False,    # leave TUN up if xray dies (no leak via real ISP)
     "language": "auto",      # "ru" / "en" / "auto" (detect from QLocale.system())
     "subscription_auto_refresh": True,  # background re-fetch every 12h

@@ -1710,6 +1710,67 @@ check("classify: generic conn -> conn",         _classify_conn)
 
 
 # ---------------------------------------------------------------------------
+# Test 15 — Subscription-Userinfo: remaining traffic / expiry (v1.16.15)
+# ---------------------------------------------------------------------------
+
+section("Subscription-Userinfo — parse + summary")
+
+
+def _userinfo_parse_full() -> None:
+    info = _sub.parse_userinfo("upload=100; download=200; total=1000; expire=4102444800")
+    if info is None:
+        raise AssertionError("full header parsed to None")
+    if (info.upload, info.download, info.total, info.expire) != (100, 200, 1000, 4102444800):
+        raise AssertionError(f"fields wrong: {info}")
+    if info.used != 300 or info.remaining != 700:
+        raise AssertionError(f"used/remaining wrong: {info.used}/{info.remaining}")
+
+
+def _userinfo_parse_edge() -> None:
+    if _sub.parse_userinfo("") is not None:
+        raise AssertionError("empty header should parse to None")
+    if _sub.parse_userinfo("garbage-no-fields") is not None:
+        raise AssertionError("fieldless header should parse to None")
+    partial = _sub.parse_userinfo("total=2048")
+    if partial is None or partial.total != 2048 or partial.upload != 0:
+        raise AssertionError(f"partial header wrong: {partial}")
+
+
+def _userinfo_summary_limited() -> None:
+    s = _sub.SubscriptionInfo(upload=100, download=200, total=1000,
+                              expire=4102444800).summary()
+    if "осталось" not in s or "до " not in s:
+        raise AssertionError(f"limited summary missing parts: {s!r}")
+
+
+def _userinfo_summary_unlimited() -> None:
+    s = _sub.SubscriptionInfo(total=0, download=500).summary()
+    if "осталось" in s or "использовано" not in s:
+        raise AssertionError(f"unlimited summary wrong: {s!r}")
+
+
+def _userinfo_summary_expired() -> None:
+    s = _sub.SubscriptionInfo(total=1000, expire=1).summary()
+    if "истекла" not in s:
+        raise AssertionError(f"expired summary wrong: {s!r}")
+
+
+def _userinfo_roundtrip() -> None:
+    x = _sub.SubscriptionInfo(upload=1, download=2, total=3, expire=4)
+    y = _sub.SubscriptionInfo.from_dict(x.to_dict())
+    if (y.upload, y.download, y.total, y.expire) != (1, 2, 3, 4):
+        raise AssertionError(f"round-trip mismatch: {y}")
+
+
+check("userinfo: parse full header",   _userinfo_parse_full)
+check("userinfo: parse empty/partial", _userinfo_parse_edge)
+check("userinfo: summary (limited)",   _userinfo_summary_limited)
+check("userinfo: summary (unlimited)", _userinfo_summary_unlimited)
+check("userinfo: summary (expired)",   _userinfo_summary_expired)
+check("userinfo: to_dict/from_dict",   _userinfo_roundtrip)
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 

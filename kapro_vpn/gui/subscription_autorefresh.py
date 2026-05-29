@@ -141,6 +141,12 @@ class SubscriptionAutoRefresh(QObject):
         self._worker.start()
 
     def _on_fetched(self, result: SubscriptionResult) -> None:
+        # Refresh the cached remaining-traffic / expiry even when no new
+        # servers arrived — the balance still moves between refreshes.
+        if result.userinfo is not None:
+            settings = storage.load_settings()
+            settings["subscription_userinfo"] = result.userinfo.to_dict()
+            storage.save_settings(settings)
         if not result.configs:
             return  # empty body — treat as transient, don't touch state
         existing = storage.load_configs()

@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import base64
 import socket
+import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 import requests
@@ -45,12 +47,113 @@ SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://",
                      "hysteria2://", "hy2://")
 
 
+def _human_bytes(n: int) -> str:
+    """Compact byte size: 95.2 ГБ / 940 МБ / 12 КБ."""
+    units = ("Б", "КБ", "МБ", "ГБ", "ТБ", "ПБ")
+    val = float(max(0, n))
+    for u in units:
+        if val < 1024.0 or u == units[-1]:
+            return f"{int(val)} {u}" if u == "Б" else f"{val:.1f} {u}"
+        val /= 1024.0
+    return f"{n} Б"
+
+
+@dataclass
+class SubscriptionInfo:
+    """Parsed `Subscription-Userinfo` header (de-facto Clash/v2ray standard):
+    `upload=…; download=…; total=…; expire=…` — byte counters + a Unix expiry
+    epoch. total <= 0 means unlimited; expire <= 0 means no expiry.
+    """
+    upload: int = 0
+    download: int = 0
+    total: int = 0
+    expire: int = 0
+
+    @property
+    def used(self) -> int:
+        return max(0, self.upload + self.download)
+
+    @property
+    def remaining(self) -> Optional[int]:
+        if self.total <= 0:
+            return None  # unlimited
+        return max(0, self.total - self.used)
+
+    def expire_date(self) -> Optional[datetime]:
+        if self.expire <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(self.expire)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    def is_expired(self) -> bool:
+        return 0 < self.expire < int(time.time())
+
+    def summary(self) -> str:
+        """One-line human status, or '' if the header carried nothing useful."""
+        parts: list[str] = []
+        if self.total > 0:
+            parts.append(
+                f"осталось {_human_bytes(self.remaining or 0)} "
+                f"из {_human_bytes(self.total)}"
+            )
+        elif self.used > 0:
+            parts.append(f"использовано {_human_bytes(self.used)}")
+        d = self.expire_date()
+        if d is not None:
+            parts.append(
+                f"истекла {d:%d.%m.%Y}" if self.is_expired() else f"до {d:%d.%m.%Y}"
+            )
+        return " · ".join(parts)
+
+    def to_dict(self) -> dict:
+        return {"upload": self.upload, "download": self.download,
+                "total": self.total, "expire": self.expire}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SubscriptionInfo":
+        return cls(
+            upload=int(d.get("upload", 0)),
+            download=int(d.get("download", 0)),
+            total=int(d.get("total", 0)),
+            expire=int(d.get("expire", 0)),
+        )
+
+
+def parse_userinfo(header: str) -> Optional[SubscriptionInfo]:
+    """Parse a `Subscription-Userinfo` header value. Returns None if the
+    header is absent or carries no recognisable numeric fields."""
+    if not header:
+        return None
+    fields: dict[str, int] = {}
+    for part in header.split(";"):
+        key, sep, val = part.partition("=")
+        if not sep:
+            continue
+        try:
+            fields[key.strip().lower()] = int(float(val.strip()))
+        except ValueError:
+            continue
+    if not fields:
+        return None
+    return SubscriptionInfo(
+        upload=fields.get("upload", 0),
+        download=fields.get("download", 0),
+        total=fields.get("total", 0),
+        expire=fields.get("expire", 0),
+    )
+
+
 @dataclass
 class SubscriptionResult:
     configs: list[ProxyConfig]
     errors: list[str]
     raw_lines: int  # how many candidate lines we tried to parse
     via_proxy: bool = False  # did we fall back to the local xray tunnel?
+    # Remaining-traffic / expiry from the provider's Subscription-Userinfo
+    # header (None if not sent or for the manual-paste path).
+    userinfo: Optional[SubscriptionInfo] = None
     # Names of configs that parsed fine but are provider "stubs" (e.g.
     # gmailvpn's `vless://…@0.0.0.0:1 #App not supported`) — filtered out
     # of `configs` so a dead placeholder is never imported as a server.
@@ -199,8 +302,12 @@ def parse_subscription_body(body: str) -> list[str]:
 
 
 def _fetch(url: str, timeout: tuple[float, float],
-           proxy_url: Optional[str] = None) -> str:
-    """One requests.get call; optionally routed through proxy_url."""
+           proxy_url: Optional[str] = None) -> tuple[str, Optional[SubscriptionInfo]]:
+    """One requests.get call; optionally routed through proxy_url.
+
+    Returns (body, userinfo) — userinfo parsed from the provider's
+    `Subscription-Userinfo` header (remaining traffic + expiry), or None.
+    """
     proxies = None
     if proxy_url:
         # xray's mixed inbound speaks both HTTP and SOCKS on the same port,
@@ -210,7 +317,8 @@ def _fetch(url: str, timeout: tuple[float, float],
         "User-Agent": USER_AGENT,
     })
     response.raise_for_status()
-    return response.text
+    userinfo = parse_userinfo(response.headers.get("Subscription-Userinfo", ""))
+    return response.text, userinfo
 
 
 def _looks_like_dpi_block(err: Exception) -> bool:
@@ -283,8 +391,10 @@ def import_subscription(
     "http://127.0.0.1:2080" to go via the active xray tunnel).
     Raises requests.RequestException on network failure.
     """
-    body = _fetch(url, timeout, proxy_url=proxy_url)
-    return result_from_body(body, via_proxy=bool(proxy_url))
+    body, userinfo = _fetch(url, timeout, proxy_url=proxy_url)
+    result = result_from_body(body, via_proxy=bool(proxy_url))
+    result.userinfo = userinfo
+    return result
 
 
 def import_with_dpi_fallback(
