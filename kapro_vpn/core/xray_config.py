@@ -303,6 +303,8 @@ def build_config(
     log_level: str = "warning",
     dns_option: str = "system",
     dns_leak_protection: bool = True,
+    block_ads: bool = False,
+    route_ru_direct: bool = False,
     hysteria_socks_port: Optional[int] = None,
 ) -> dict[str, Any]:
     """Build a complete Xray-core client config with split routing.
@@ -404,20 +406,18 @@ def build_config(
             "77.88.8.88/32", "77.88.8.7/32", # Yandex safe/family
         ]})
 
-    # AdGuard-only ad/tracker block via xray routing. v1.9.0 only added DNS
-    # override, but browsers (Chrome's "Secure DNS" → Cloudflare 1.1.1.1 by
-    # default) and apps with their own DoH bypass any OS-level DNS, so an
-    # AdGuard DoH server alone didn't actually block ads for most users.
+    # Ad/tracker block via xray routing. This rule looks at the SNI / HTTP
+    # CONNECT host on every outbound request and drops anything matching the
+    # bundled geosite "category-ads-all" list (~10k+ known ad/tracker
+    # domains, maintained by the v2fly community). Works regardless of which
+    # DNS the app uses — unlike a DoH blocklist, which any app with its own
+    # DoH (Chrome "Secure DNS" → 1.1.1.1) silently bypasses.
     #
-    # This rule looks at the SNI / HTTP CONNECT host on every outbound
-    # request and drops anything matching the bundled geosite "category-
-    # ads-all" list (~10k+ known ad/tracker domains, maintained by the
-    # v2fly community). Works regardless of which DNS the app uses.
-    #
-    # Why only on adguard: keeps the four-option positioning clean —
-    # Cloudflare (fast, no filter), Quad9 (security only, no ads), System
-    # (no change). User who wants ad-block picks AdGuard, gets ad-block.
-    if dns_opt.key == "adguard":
+    # v1.19.0: now driven by an explicit `block_ads` setting so users get
+    # ad-block on ANY DNS, not just AdGuard. AdGuard still implies it
+    # (back-compat — those users relied on this rule), so the effective
+    # condition is "block_ads OR DNS is AdGuard".
+    if block_ads or dns_opt.key == "adguard":
         # First — allow-list our own public-IP probe endpoints. v1.10.1
         # user discovered AdGuard's blocklist NXDOMAIN's ipinfo.io
         # (classed as a tracker). At the DNS layer we can't fight that —
@@ -446,6 +446,15 @@ def build_config(
 
     if domain_rules:
         rules.append({"type": "field", "domain": domain_rules, "outboundTag": "direct"})
+
+    # v1.19.0: route ALL Russian-geolocated traffic directly (bypass VPN)
+    # by geoip, not just the curated 168-domain direct-list. domainStrategy
+    # is IPIfNonMatch, so a domain that doesn't hit the list above is
+    # resolved and matched here by destination IP. Catches RU banks /
+    # gosuslugi / marketplaces that geofence foreign IPs but aren't (yet)
+    # in default_sites.json. Opt-in — broadens what bypasses the tunnel.
+    if route_ru_direct:
+        rules.append({"type": "field", "ip": ["geoip:ru"], "outboundTag": "direct"})
 
     # API inbound for runtime stats (read by core/xray_stats.py via the
     # `xray api stats` CLI helper). Routed to the dedicated `api` outbound
@@ -565,12 +574,16 @@ def write_config(
     listen_port: int = DEFAULT_LISTEN_PORT,
     dns_option: str = "system",
     dns_leak_protection: bool = True,
+    block_ads: bool = False,
+    route_ru_direct: bool = False,
     hysteria_socks_port: Optional[int] = None,
 ) -> str:
     config = build_config(
         proxy, direct_domains, listen_host, listen_port,
         dns_option=dns_option,
         dns_leak_protection=dns_leak_protection,
+        block_ads=block_ads,
+        route_ru_direct=route_ru_direct,
         hysteria_socks_port=hysteria_socks_port,
     )
     target = paths.runtime_config_file()

@@ -551,11 +551,15 @@ class ConnectionManager:
                          hysteria_socks_port: Optional[int] = None) -> str:
         dns_option = str(self.settings.get("dns_option", "system"))
         dns_leak_protection = bool(self.settings.get("dns_leak_protection", True))
+        block_ads = bool(self.settings.get("block_ads", False))
+        route_ru_direct = bool(self.settings.get("route_ru_direct", False))
         try:
             path = xray_config.write_config(
                 config, direct_domains, host, port,
                 dns_option=dns_option,
                 dns_leak_protection=dns_leak_protection,
+                block_ads=block_ads,
+                route_ru_direct=route_ru_direct,
                 hysteria_socks_port=hysteria_socks_port,
             )
         except (ValueError, NotImplementedError) as e:

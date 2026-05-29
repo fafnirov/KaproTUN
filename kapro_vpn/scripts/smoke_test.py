@@ -351,6 +351,62 @@ check("dns_leak_protection=False: direct :53 rules restored, no hijack",
       _dns_leak_protection_off_produces_direct_rules)
 
 
+# v1.19.0: ad-block decoupled from the AdGuard DNS option (block_ads works
+# on any DNS), plus geoip:ru direct routing. The geo TAGS themselves are
+# validated against a real xray -test at release time; these guard the
+# config-shape (rule present/absent + ordering) against regressions.
+def _block_ads_independent_of_dns() -> None:
+    def _has_ad_block(full):
+        return any(
+            r.get("outboundTag") == "block"
+            and "geosite:category-ads-all" in r.get("domain", [])
+            for r in full["routing"]["rules"]
+        )
+    on = build_config(_vless_cfg, direct_domains=["example.com"],
+                      dns_option="system", block_ads=True)
+    json.dumps(on, ensure_ascii=False)
+    if not _has_ad_block(on):
+        raise AssertionError(
+            "block_ads=True must add the geosite:category-ads-all block on "
+            "ANY DNS, not just AdGuard"
+        )
+    # The IP-probe allow-list must precede the block so our own probe to
+    # ipinfo.io isn't dropped as a 'tracker'.
+    rules = on["routing"]["rules"]
+    block_idx = next(i for i, r in enumerate(rules)
+                     if "geosite:category-ads-all" in r.get("domain", []))
+    allow_idx = next((i for i, r in enumerate(rules)
+                      if r.get("outboundTag") == "proxy"
+                      and any("ipinfo.io" in d for d in r.get("domain", []))), None)
+    if allow_idx is None or allow_idx >= block_idx:
+        raise AssertionError("IP-probe allow-list must come before the ad-block rule")
+    off = build_config(_vless_cfg, direct_domains=["example.com"],
+                       dns_option="system", block_ads=False)
+    if _has_ad_block(off):
+        raise AssertionError("block_ads=False on System must NOT add an ad-block rule")
+
+
+def _route_ru_direct_adds_geoip_rule() -> None:
+    def _has_ru(full):
+        return any(
+            r.get("outboundTag") == "direct" and "geoip:ru" in r.get("ip", [])
+            for r in full["routing"]["rules"]
+        )
+    on = build_config(_vless_cfg, direct_domains=["example.com"], route_ru_direct=True)
+    json.dumps(on, ensure_ascii=False)
+    if not _has_ru(on):
+        raise AssertionError("route_ru_direct=True must add geoip:ru -> direct")
+    off = build_config(_vless_cfg, direct_domains=["example.com"], route_ru_direct=False)
+    if _has_ru(off):
+        raise AssertionError("route_ru_direct=False must NOT add a geoip:ru rule")
+
+
+check("block_ads: geosite ad-block on any DNS + probe allow-list order",
+      _block_ads_independent_of_dns)
+check("route_ru_direct: geoip:ru -> direct rule toggles",
+      _route_ru_direct_adds_geoip_rule)
+
+
 # ---------------------------------------------------------------------------
 # Test 5 — IP probe graceful failure (v1.10.0)
 # ---------------------------------------------------------------------------

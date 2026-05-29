@@ -628,6 +628,53 @@ class SettingsPage(QWidget):
         dns_leak_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(dns_leak_hint)
 
+        # --- Routing: ad-block + RU-direct (v1.19.0) ---------------------
+        # Both apply at the xray routing layer via the bundled geo data
+        # files (geosite.dat / geoip.dat ship with xray-core), so they
+        # work on any server and any DNS choice.
+        sep_routing = QFrame()
+        sep_routing.setFrameShape(QFrame.HLine)
+        outer.addWidget(sep_routing)
+
+        routing_label = QLabel("Маршрутизация")
+        routing_label.setObjectName("h2")
+        outer.addWidget(routing_label)
+
+        self.block_ads_check = QCheckBox("Блокировать рекламу и трекеры")
+        self.block_ads_check.setChecked(
+            bool(manager.settings.get("block_ads", False))
+        )
+        self.block_ads_check.toggled.connect(self._on_block_ads_changed)
+        outer.addWidget(self.block_ads_check)
+        block_ads_hint = QLabel(
+            "Режет ~10 тыс. рекламных и трекерных доменов прямо в туннеле "
+            "(geosite:category-ads-all) — работает при любом DNS, в отличие "
+            "от DoH-блок-листа, который обходят браузеры со своим DNS. "
+            "Нативную YouTube-рекламу не трогает (нужен uBlock Origin в "
+            "браузере). Применяется при следующем подключении."
+        )
+        block_ads_hint.setObjectName("dim")
+        block_ads_hint.setWordWrap(True)
+        block_ads_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(block_ads_hint)
+
+        self.ru_direct_check = QCheckBox("Российские сайты напрямую (по гео-IP)")
+        self.ru_direct_check.setChecked(
+            bool(manager.settings.get("route_ru_direct", False))
+        )
+        self.ru_direct_check.toggled.connect(self._on_route_ru_direct_changed)
+        outer.addWidget(self.ru_direct_check)
+        ru_direct_hint = QLabel(
+            "Весь трафик к российским IP (geoip:ru) идёт мимо VPN, а не "
+            "только домены из встроенного списка. Полезно для банков, "
+            "госуслуг и маркетплейсов, которые блокируют заграничные IP. "
+            "Применяется при следующем подключении."
+        )
+        ru_direct_hint.setObjectName("dim")
+        ru_direct_hint.setWordWrap(True)
+        ru_direct_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(ru_direct_hint)
+
         # --- Language toggle ---
         # Lives in Security section because it's the only other "global
         # preference" — too small to deserve its own section header.
@@ -851,6 +898,14 @@ class SettingsPage(QWidget):
 
     def _on_dns_leak_changed(self, checked: bool) -> None:
         self._manager.update_settings(dns_leak_protection=checked)
+        self.settings_changed.emit()
+
+    def _on_block_ads_changed(self, checked: bool) -> None:
+        self._manager.update_settings(block_ads=checked)
+        self.settings_changed.emit()
+
+    def _on_route_ru_direct_changed(self, checked: bool) -> None:
+        self._manager.update_settings(route_ru_direct=checked)
         self.settings_changed.emit()
 
     def _on_leak_test_clicked(self) -> None:
