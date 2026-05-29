@@ -1,7 +1,0 @@
-build/
-
-# Скачиваемые на лету vendor-зависимости — слишком тяжёлые для git
-# (libv2ray.aar ~55 MB). Gradle-task downloadLibV2ray качает на каждой
-# чистой сборке если файла нет.
-libs/*.aar
-libs/*.jar
