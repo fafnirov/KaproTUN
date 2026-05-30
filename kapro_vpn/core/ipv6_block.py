@@ -56,6 +56,16 @@ _IPV6_GLOBAL_UNICAST = "2000::/3"
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+# Captured stdout+stderr of the last install() netsh call. Surfaced in the
+# connection log and the leak-test diagnostics so a silent install failure
+# (the cause of "protection ON but IPv6 still leaks" reports) is debuggable
+# instead of swallowed. v1.19.4.
+_last_install_output = ""
+
+
+def last_install_output() -> str:
+    return _last_install_output
+
 
 def is_supported() -> bool:
     """Windows-only — uses `netsh advfirewall`, same as kill-switch.
@@ -90,14 +100,61 @@ def install() -> bool:
         "profile=any",
         f"remoteip={_IPV6_GLOBAL_UNICAST}",
     ]
+    global _last_install_output
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, timeout=10,
-            creationflags=_NO_WINDOW,
+            cmd, capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as e:
+        _last_install_output = f"netsh не запустился: {e}"
         return False
+    _last_install_output = ((proc.stdout or "") + (proc.stderr or "")).strip()
     return proc.returncode == 0
+
+
+def probe_ipv6_reachable(timeout: float = 1.5) -> bool:
+    """True if a global-unicast IPv6 host is reachable right now.
+
+    Used to VERIFY the block actually took effect: if this returns True
+    while the block is supposed to be on, the firewall rule didn't apply
+    (the "protection ON but still leaks" case) — so we can warn instead of
+    leaking silently. Cheap TCP connect to Cloudflare's IPv6 resolver:443.
+    """
+    import socket
+    try:
+        with socket.create_connection(("2606:4700:4700::1111", 443), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def diagnostics() -> str:
+    """Read-only snapshot for support: firewall on/off + our rule + the
+    last install output. ONLY runs `show` commands — never modifies the
+    firewall. Surfaced via the leak-test 'Скопировать диагностику' button
+    so a user whose block silently fails can hand us the cause.
+    """
+    parts: list[str] = []
+
+    def _show(label: str, args: list[str]) -> None:
+        try:
+            p = subprocess.run(args, capture_output=True, text=True, timeout=10,
+                               encoding="utf-8", errors="replace",
+                               creationflags=_NO_WINDOW)
+            parts.append(f"=== {label} ===\n{(p.stdout or '').strip() or '(пусто)'}")
+        except Exception as e:  # noqa: BLE001 — diagnostics must never raise
+            parts.append(f"=== {label} ===\n(ошибка: {e})")
+
+    if sys.platform != "win32":
+        return "IPv6-block диагностика только для Windows."
+    _show("Windows Firewall state", ["netsh", "advfirewall", "show", "allprofiles", "state"])
+    _show(f"rule {_RULE_BLOCK_GLOBAL}",
+          ["netsh", "advfirewall", "firewall", "show", "rule", f"name={_RULE_BLOCK_GLOBAL}"])
+    parts.append(f"=== is_active() ===\n{is_active()}")
+    parts.append(f"=== last install output ===\n{_last_install_output or '(нет)'}")
+    parts.append(f"=== IPv6 reachable now (True = утечка/блок не сработал) ===\n{probe_ipv6_reachable()}")
+    return "\n\n".join(parts)
 
 
 def remove() -> None:

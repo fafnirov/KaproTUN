@@ -538,6 +538,22 @@ check("ipv6_block targets 2000::/3 only (LAN-preserving)",
       _ipv6_block_uses_global_unicast_only)
 
 
+# v1.19.4: diagnosability for "protection ON but IPv6 still leaks" reports.
+def _ipv6_block_diagnostics_surface() -> None:
+    from kapro_vpn.core import ipv6_block
+    out = ipv6_block.diagnostics()
+    if not isinstance(out, str) or not out.strip():
+        raise AssertionError("diagnostics() must return a non-empty string")
+    if not isinstance(ipv6_block.probe_ipv6_reachable(timeout=0.5), bool):
+        raise AssertionError("probe_ipv6_reachable() must return a bool")
+    if not isinstance(ipv6_block.last_install_output(), str):
+        raise AssertionError("last_install_output() must return a str")
+
+
+check("ipv6_block diagnostics/probe surface cleanly",
+      _ipv6_block_diagnostics_surface)
+
+
 # v1.18.1: IPv6-leak protection must be armed in HTTP-proxy mode too, not
 # just TUN. Earlier builds only armed it in TUN, so the default HTTP mode
 # leaked the real IPv6 on a leak test. These guard against silent reverts.

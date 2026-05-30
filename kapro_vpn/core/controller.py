@@ -632,11 +632,22 @@ class ConnectionManager:
                       "имени администратора или используй TUN-режим.")
             return
         if ipv6_block.install():
-            self._log("[*] IPv6-leak protection активирована "
-                      "(блок outbound к 2000::/3)")
+            # Verify it actually took effect. On some systems the netsh add
+            # "succeeds" but the IPv6 rule is inert (3rd-party firewall, or
+            # IPv6 filtering disabled) — that's the "protection ON but still
+            # leaks" report. Better to warn loudly than to leak silently.
+            if ipv6_block.probe_ipv6_reachable():
+                self._log("[!] IPv6-block правило добавлено, но IPv6 ВСЁ ЕЩЁ "
+                          "доступен — правило не сработало в этой системе "
+                          "(сторонний firewall / фильтрация IPv6 отключена?). "
+                          "Возможна утечка IPv6 — проверь «Тест утечек».")
+            else:
+                self._log("[*] IPv6-leak protection активирована "
+                          "(блок outbound к 2000::/3)")
         else:
             self._log("[!] Не удалось установить IPv6-block firewall-правило "
-                      "— v6-трафик может утечь мимо туннеля")
+                      "— v6-трафик может утечь мимо туннеля. netsh: "
+                      + (ipv6_block.last_install_output() or "(нет вывода)"))
 
     def _maybe_arm_webrtc_block(self) -> None:
         """If user enabled WebRTC-leak protection, install the STUN-block

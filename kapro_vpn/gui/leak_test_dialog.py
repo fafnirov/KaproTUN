@@ -102,6 +102,7 @@ class LeakTestDialog(QDialog):
         # finds a leak that's only leaking because its toggle is off.
         self._manager = manager
         self._fixable: list = []
+        self._action: Optional[str] = None  # "enable" | "diag"
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(20, 20, 20, 20)
@@ -161,7 +162,7 @@ class LeakTestDialog(QDialog):
         self._fix_btn = QPushButton("🛡 Включить защиту")
         self._fix_btn.setObjectName("primary")
         self._fix_btn.setVisible(False)
-        self._fix_btn.clicked.connect(self._on_fix_clicked)
+        self._fix_btn.clicked.connect(self._on_action_clicked)
         self._layout.addWidget(self._fix_btn)
 
         # ----- Close button at the bottom -----
@@ -274,6 +275,7 @@ class LeakTestDialog(QDialog):
             self._fixable = leak_test.fixable_protections(
                 report, self._manager.settings)
             if self._fixable:
+                self._action = "enable"
                 names = ", ".join(label for _, label in self._fixable)
                 self._fix_caption.setText(
                     f"Защита для {names} выключена в настройках — поэтому "
@@ -282,11 +284,33 @@ class LeakTestDialog(QDialog):
                 self._fix_btn.setText(f"🛡 Включить защиту ({names})")
                 self._fix_caption.setVisible(True)
                 self._fix_btn.setVisible(True)
+            elif (not report.ipv6.ipv6_blocked
+                  and self._manager.settings.get("ipv6_leak_protection", True)):
+                # Leaking even though the toggle is ON — the firewall rule
+                # didn't take effect on this system (the rare "protection on
+                # but still leaks" case). Offer a diagnostics bundle for
+                # support instead of a toggle (it's already on).
+                self._action = "diag"
+                self._fix_caption.setText(
+                    "Защита IPv6 включена, но правило firewall не сработало в "
+                    "твоей системе (редкий случай — сторонний firewall или "
+                    "отключённая фильтрация IPv6). Собери диагностику для "
+                    "поддержки:"
+                )
+                self._fix_btn.setText("📋 Скопировать диагностику")
+                self._fix_caption.setVisible(True)
+                self._fix_btn.setVisible(True)
 
         # Resize the dialog to fit the new content.
         self.adjustSize()
 
-    def _on_fix_clicked(self) -> None:
+    def _on_action_clicked(self) -> None:
+        if self._action == "enable":
+            self._enable_protections()
+        elif self._action == "diag":
+            self._copy_diagnostics()
+
+    def _enable_protections(self) -> None:
         """Enable the off-but-needed protection toggles via the manager
         (updates in-memory settings AND persists), then tell the user to
         reconnect so the firewall rules actually get armed."""
@@ -300,6 +324,26 @@ class LeakTestDialog(QDialog):
         self._fix_caption.setText(
             f"Защита {names} включена. Переподключись (выключи и снова включи "
             f"VPN), чтобы применить, затем запусти проверку заново."
+        )
+        self.adjustSize()
+
+    def _copy_diagnostics(self) -> None:
+        """Copy a read-only firewall diagnostics bundle to the clipboard so
+        the user can paste it into a support request. The commands only
+        READ firewall state — nothing is modified."""
+        from PySide6.QtWidgets import QApplication
+
+        from ..core import ipv6_block
+        try:
+            diag = ipv6_block.diagnostics()
+        except Exception as e:  # noqa: BLE001 — never let copy crash the dialog
+            diag = f"(не удалось собрать диагностику: {e})"
+        QApplication.clipboard().setText(diag)
+        self._fix_btn.setEnabled(False)
+        self._fix_btn.setText("✓ Скопировано в буфер обмена")
+        self._fix_caption.setText(
+            "Диагностика скопирована — вставь её в письмо в поддержку. "
+            "(Команды только читают состояние firewall, ничего не меняют.)"
         )
         self.adjustSize()
 
