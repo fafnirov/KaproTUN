@@ -24,11 +24,27 @@ show nothing than make the UI feel sluggish.
 from __future__ import annotations
 
 import socket
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 import requests
+
+# _force_ipv4 monkeypatches the PROCESS-GLOBAL socket.getaddrinfo. If two
+# probes overlap (e.g. a reconnect kicks a second one while the first is in
+# flight), the first's `finally` restores the original mid-probe and the
+# second silently resolves AAAA again — leaking the user's real IPv6 into
+# the "Ваш IP" label. Serialize the patched region so it can never be raced.
+_probe_lock = threading.Lock()
+
+
+def _looks_ipv4(ip: str) -> bool:
+    """True only for an IPv4 literal. We reject IPv6 results outright: the
+    probe exists to show the VPN's IPv4 egress, and KaproVPN's TUN only
+    tunnels IPv4 — any IPv6 we'd get back is the user's REAL leaked address,
+    which must never be shown as 'your IP'."""
+    return bool(ip) and ":" not in ip and ip.count(".") == 3
 
 
 @contextmanager
@@ -52,16 +68,19 @@ def _force_ipv4():
     the probe runs in a single worker thread for ~5 seconds with no
     concurrent socket calls — restoration in `finally` is guaranteed.
     """
-    original = socket.getaddrinfo
+    # Serialize: the patch is process-global, so overlapping probes must
+    # not race each other's setup/teardown (see _probe_lock comment).
+    with _probe_lock:
+        original = socket.getaddrinfo
 
-    def _v4_only(host, port, family=0, *args, **kwargs):
-        return original(host, port, socket.AF_INET, *args, **kwargs)
+        def _v4_only(host, port, family=0, *args, **kwargs):
+            return original(host, port, socket.AF_INET, *args, **kwargs)
 
-    socket.getaddrinfo = _v4_only
-    try:
-        yield
-    finally:
-        socket.getaddrinfo = original
+        socket.getaddrinfo = _v4_only
+        try:
+            yield
+        finally:
+            socket.getaddrinfo = original
 
 
 # Map ISO 3166-1 alpha-2 country codes → Russian display names for the
@@ -338,6 +357,15 @@ def _probe_with_fallback(
             except Exception as e:
                 last_error = f"{host}: handler failed: {type(e).__name__}: {e}"
                 _say(f"[ip-probe] {host}: handler failed: {type(e).__name__}: {e}, trying next")
+                continue
+
+            # Belt-and-suspenders: never surface an IPv6 as "your IP". If
+            # one slipped through (monkeypatch raced, or HTTP-mode socks5h
+            # resolved AAAA remotely), it's the user's leaked real address —
+            # skip it and try the next endpoint for the v4 egress.
+            if not _looks_ipv4(ip):
+                last_error = f"{host}: got non-IPv4 {ip!r} (leak?) — skipping"
+                _say(f"[ip-probe] {host}: got non-IPv4 {ip!r}, skipping (would be a leak)")
                 continue
 
             # Success. country_code may be empty (ipify is IP-only) — that's

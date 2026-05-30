@@ -473,6 +473,23 @@ check("RU country table covers common VPN locales",
       _probe_locale_table_has_common_countries)
 
 
+# v1.19.5: the probe must never surface an IPv6 as "your IP" (it would be
+# the user's leaked real address). _looks_ipv4 gates that.
+def _probe_rejects_ipv6_results() -> None:
+    from kapro_vpn.core.ip_probe import _looks_ipv4
+    for good in ("77.239.122.15", "1.2.3.4", "255.255.255.255"):
+        if not _looks_ipv4(good):
+            raise AssertionError(f"_looks_ipv4 rejected a valid IPv4: {good}")
+    for bad in ("2a01:ecc0:200:1b63::2", "::1", "fe80::1", "", "garbage",
+                "1.2.3", "1.2.3.4.5"):
+        if _looks_ipv4(bad):
+            raise AssertionError(f"_looks_ipv4 accepted a non-IPv4: {bad!r}")
+
+
+check("ip-probe rejects IPv6 results (never shows leaked v6 as 'your IP')",
+      _probe_rejects_ipv6_results)
+
+
 def _probe_restores_getaddrinfo() -> None:
     # v1.10.3: probe monkey-patches socket.getaddrinfo for IPv4-only
     # resolution during the call. If the `finally` doesn't restore the
