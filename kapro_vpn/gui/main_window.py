@@ -929,7 +929,7 @@ class SettingsPage(QWidget):
             # otherwise the system resolver runs FIRST and the probe
             # reports the system DNS path instead of xray's.
             socks_proxy = f"socks5h://{host}:{port + 1}"
-        dlg = LeakTestDialog(socks_proxy, parent=self.window())
+        dlg = LeakTestDialog(socks_proxy, manager=self._manager, parent=self.window())
         dlg.exec()
 
     def _on_ip_probe_changed(self, checked: bool) -> None:

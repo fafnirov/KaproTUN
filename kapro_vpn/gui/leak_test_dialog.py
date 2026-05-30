@@ -92,11 +92,16 @@ class _LeakTestWorker(QObject):
 class LeakTestDialog(QDialog):
     """The Settings → 'Проверить утечки' dialog."""
 
-    def __init__(self, socks_proxy: Optional[str], parent: Optional[QWidget] = None):
+    def __init__(self, socks_proxy: Optional[str], manager=None,
+                 parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("Проверка утечек")
         self.setModal(True)
         self.setMinimumWidth(440)
+        # Manager lets us flip a protection setting in-place when the test
+        # finds a leak that's only leaking because its toggle is off.
+        self._manager = manager
+        self._fixable: list = []
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(20, 20, 20, 20)
@@ -144,6 +149,20 @@ class LeakTestDialog(QDialog):
         self._dns_detail.setFixedHeight(110)
         self._dns_detail.setVisible(False)
         self._layout.addWidget(self._dns_detail)
+
+        # ----- One-click fix (v1.19.3) — shown only when a detected leak is
+        # leaking *because its protection toggle is off*, so enabling it
+        # actually fixes it. Turns the leak test from "reports a problem"
+        # into "fixes the problem".
+        self._fix_caption = QLabel("")
+        self._fix_caption.setWordWrap(True)
+        self._fix_caption.setVisible(False)
+        self._layout.addWidget(self._fix_caption)
+        self._fix_btn = QPushButton("🛡 Включить защиту")
+        self._fix_btn.setObjectName("primary")
+        self._fix_btn.setVisible(False)
+        self._fix_btn.clicked.connect(self._on_fix_clicked)
+        self._layout.addWidget(self._fix_btn)
 
         # ----- Close button at the bottom -----
         btn_row = QHBoxLayout()
@@ -248,7 +267,40 @@ class LeakTestDialog(QDialog):
         for row in (self._row_ipv4, self._row_ipv6,
                     self._row_dns, self._row_webrtc):
             row.setVisible(True)
+
+        # One-click fix: if a leak is leaking only because its protection
+        # toggle is off, offer to flip it right here.
+        if self._manager is not None:
+            self._fixable = leak_test.fixable_protections(
+                report, self._manager.settings)
+            if self._fixable:
+                names = ", ".join(label for _, label in self._fixable)
+                self._fix_caption.setText(
+                    f"Защита для {names} выключена в настройках — поэтому "
+                    f"утечка. Можно включить прямо сейчас:"
+                )
+                self._fix_btn.setText(f"🛡 Включить защиту ({names})")
+                self._fix_caption.setVisible(True)
+                self._fix_btn.setVisible(True)
+
         # Resize the dialog to fit the new content.
+        self.adjustSize()
+
+    def _on_fix_clicked(self) -> None:
+        """Enable the off-but-needed protection toggles via the manager
+        (updates in-memory settings AND persists), then tell the user to
+        reconnect so the firewall rules actually get armed."""
+        if self._manager is None or not self._fixable:
+            return
+        for key, _label in self._fixable:
+            self._manager.update_settings(**{key: True})
+        names = ", ".join(label for _, label in self._fixable)
+        self._fix_btn.setEnabled(False)
+        self._fix_btn.setText(f"✓ Защита {names} включена")
+        self._fix_caption.setText(
+            f"Защита {names} включена. Переподключись (выключи и снова включи "
+            f"VPN), чтобы применить, затем запусти проверку заново."
+        )
         self.adjustSize()
 
     def _format_dns_resolvers(self, dns: leak_test.DnsResult) -> str:

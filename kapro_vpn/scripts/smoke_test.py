@@ -912,6 +912,41 @@ check("leak_test: probe_webrtc returns blocked on timeout",
       _leak_test_webrtc_returns_blocked_on_timeout)
 
 
+# v1.19.3: the leak test offers a one-click fix when a leak is leaking only
+# because its protection toggle is OFF. fixable_protections() drives that.
+def _leak_test_fixable_protections() -> None:
+    from kapro_vpn.core import leak_test as lt
+    rep = lt.LeakTestReport()
+    rep.ipv6 = lt.IPv6Result(ip="2a01:ecc0::2", ipv6_blocked=False)   # leaking
+    rep.webrtc = lt.WebRtcResult(stun_blocked=False)                   # leaking
+
+    # Both leaking + both toggles OFF -> both offered.
+    fx = lt.fixable_protections(rep, {"ipv6_leak_protection": False,
+                                       "webrtc_leak_protection": False})
+    keys = {k for k, _ in fx}
+    if keys != {"ipv6_leak_protection", "webrtc_leak_protection"}:
+        raise AssertionError(f"expected both fixable, got {keys}")
+
+    # Leaking but protection already ON -> NOT offered (a real toggle flip
+    # wouldn't help; e.g. the rule failed to install — different problem).
+    fx = lt.fixable_protections(rep, {"ipv6_leak_protection": True,
+                                       "webrtc_leak_protection": True})
+    if fx:
+        raise AssertionError(f"must not offer a fix when protection is ON: {fx}")
+
+    # No leak (blocked) + toggle off -> nothing to fix.
+    rep2 = lt.LeakTestReport()
+    rep2.ipv6 = lt.IPv6Result(ipv6_blocked=True)
+    rep2.webrtc = lt.WebRtcResult(stun_blocked=True)
+    if lt.fixable_protections(rep2, {"ipv6_leak_protection": False,
+                                     "webrtc_leak_protection": False}):
+        raise AssertionError("must not offer a fix when there's no leak")
+
+
+check("leak_test: fixable_protections offers off-toggle leaks only",
+      _leak_test_fixable_protections)
+
+
 # ---------------------------------------------------------------------------
 # Test 5.6 — Configs-picker search filter (v1.12.0)
 # ---------------------------------------------------------------------------

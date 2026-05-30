@@ -169,6 +169,26 @@ class LeakTestReport:
     webrtc: WebRtcResult = field(default_factory=WebRtcResult)
 
 
+def fixable_protections(report: "LeakTestReport", settings: dict) -> list:
+    """Leaks the user can fix by flipping a protection toggle that's OFF.
+
+    Returns (settings_key, human_label) pairs for each detected leak whose
+    protection setting is currently disabled — so the leak-test dialog can
+    offer a one-click "enable" instead of making the user hunt through
+    Settings. We only list leaks that turning the setting back ON would
+    actually stop (IPv6 / WebRTC firewall blocks); a DNS leak or a leak that
+    persists *with* protection on isn't a simple toggle flip, so it's not
+    offered here. (v1.19.3 — prompted by a user whose IPv6 leaked because
+    ipv6_leak_protection had been switched off.)
+    """
+    out: list = []
+    if not report.ipv6.ipv6_blocked and not settings.get("ipv6_leak_protection", True):
+        out.append(("ipv6_leak_protection", "IPv6"))
+    if not report.webrtc.stun_blocked and not settings.get("webrtc_leak_protection", True):
+        out.append(("webrtc_leak_protection", "WebRTC"))
+    return out
+
+
 # ===== Probes ==============================================================
 
 # IPv4 probes — two redundant endpoints because dnsleak'd ISPs sometimes
