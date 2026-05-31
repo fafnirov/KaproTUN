@@ -349,32 +349,63 @@ class RouteSession:
         return False
 
     def add_bypass_routes(self, ips: list[str], gateway: str, if_index: int,
-                          metric: int = 1) -> int:
-        """Add /32 host-routes for a list of IPs. Returns count succeeded."""
+                          metric: int = 1) -> tuple[int, int]:
+        """Add /32 host-routes for a list of IPs.
+
+        Returns (added, adopted) — see add_bypass_cidrs.
+        """
         ips = sorted({ip for ip in ips if ip})
         if not ips:
-            return 0
+            return (0, 0)
         entries = [(ip, "255.255.255.255") for ip in ips]
         return self.add_bypass_cidrs(entries, gateway, if_index, metric)
 
     def add_bypass_cidrs(self, entries: list[tuple[str, str]],
-                         gateway: str, if_index: int, metric: int = 1) -> int:
-        """Add many (dest, mask) routes via native API.
+                         gateway: str, if_index: int, metric: int = 1) -> tuple[int, int]:
+        """Add many (dest, mask) routes via the native API.
 
         ~100 µs per call → 8000+ routes finish in under a second, where
         shelling out to `route add` would take >70 s.
+
+        Returns (added, adopted):
+
+          - added: routes freshly created this call.
+          - adopted: routes that were ALREADY in the table — almost always
+            ours, left over from a prior session the app never got to clean
+            up (killed / crashed / power-lost). We register them in THIS
+            session so disconnect's restore() removes them too. Without this
+            they leak into the routing table indefinitely, and if the user
+            later joins a different network (new gateway) the stale entries
+            blackhole those destinations until reboot.
         """
         if not entries:
-            return 0
+            return (0, 0)
         added = 0
+        adopted = 0
         for dest, mask in entries:
             rc = _create_route_native(dest, mask, gateway, if_index, metric)
             if rc == _NO_ERROR:
                 self.routes.append(_RouteEntry(dest, mask, gateway, if_index, metric))
                 added += 1
-            # Silently skip already-exists / invalid — they're not failures
-            # we can do anything useful about per-route.
-        return added
+            elif rc == _ERROR_ALREADY_EXISTS:
+                # Exact duplicate (same dest+mask+next_hop+proto) — ours from
+                # a prior session. Adopt it: track it so restore() deletes it.
+                # Native delete keys on dest+mask+next_hop, which all match,
+                # so cleanup at disconnect will find it.
+                self.routes.append(_RouteEntry(dest, mask, gateway, if_index, metric))
+                adopted += 1
+            elif rc == _ERROR_OBJECT_ALREADY_EXISTS:
+                # Same dest+mask but mismatched proto/ifIndex — typically a
+                # stale row pointing at a now-dead adapter. We can't trust its
+                # next-hop, so delete (the shell form matches by dest+mask
+                # regardless of proto) and recreate cleanly via OUR gateway.
+                delete_route(dest, mask)
+                if _create_route_native(dest, mask, gateway, if_index, metric) == _NO_ERROR:
+                    self.routes.append(_RouteEntry(dest, mask, gateway, if_index, metric))
+                    added += 1
+            # else: genuinely invalid (bad gateway / metric below iface) —
+            # nothing useful to do per-route, skip.
+        return (added, adopted)
 
     def set_dns(self, iface_name: str, servers: list[str]) -> None:
         set_dns(iface_name, servers)

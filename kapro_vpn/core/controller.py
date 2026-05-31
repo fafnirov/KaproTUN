@@ -158,11 +158,23 @@ class ConnectionManager:
         # connects are instant; "Перемерить" clears it to re-measure.
         if bool(self.settings.get("hysteria_auto_bandwidth", True)) and (up <= 0 or down <= 0):
             self._log("[*] Замеряю скорость канала для Hysteria2 (разово)…")
+            from . import speed_test
+            t_start = time.time()
             try:
-                from . import speed_test
                 m_down, m_up = speed_test.measure_link_speed()
             except Exception:
                 m_down, m_up = 0, 0
+            # Retry once — but only if the first attempt failed FAST (a
+            # transient DNS/connection blip), not after burning the whole
+            # measurement window on a genuinely dead-slow link. Bounds the
+            # extra connect-time stall to one quick re-attempt.
+            if (m_down <= 0 or m_up <= 0) and (time.time() - t_start) < 6.0:
+                self._log("[!] Замер сорвался (быстрый сбой) — пробую ещё раз…")
+                time.sleep(1.0)
+                try:
+                    m_down, m_up = speed_test.measure_link_speed()
+                except Exception:
+                    m_down, m_up = 0, 0
             if m_down > 0 and m_up > 0:
                 down, up = m_down, m_up
                 self.update_settings(hysteria_down_mbps=down, hysteria_up_mbps=up)
@@ -482,11 +494,12 @@ class ConnectionManager:
             for ip in dns_opt.bypass_ips:
                 if ip not in existing_ips:
                     bypass_list.append((ip, "255.255.255.255"))
-            added_always = session.add_bypass_cidrs(
+            added_always, adopted_always = session.add_bypass_cidrs(
                 bypass_list, real.gateway, real.index, metric=bypass_metric,
             )
-            self._log(f"[*] Добавлено {added_always} always-bypass роутов "
-                      f"(DNS-серверы + Yandex/VK CIDR'ы)")
+            self._log(f"[*] Always-bypass роуты (DNS + Yandex/VK): {added_always} новых"
+                      + (f", {adopted_always} уже было (подхвачены для очистки)"
+                         if adopted_always else ""))
 
             # Default route through TUN. Two /1 routes beat the existing
             # 0.0.0.0/0 by being more specific, so we use those instead of
@@ -545,8 +558,9 @@ class ConnectionManager:
                     f"{len(set(all_ips))} уникальных IP"
                     + (f" (не резолвнулось: {failed})" if failed else "")
                 )
-                added = session.add_bypass_routes(all_ips, real.gateway, real.index, metric=bypass_metric)
-                self._log(f"[*] Добавлено {added} bypass-роутов для direct-доменов")
+                added, adopted = session.add_bypass_routes(all_ips, real.gateway, real.index, metric=bypass_metric)
+                self._log(f"[*] Bypass-роуты для direct-доменов: {added} новых"
+                          + (f", {adopted} уже было (подхвачены)" if adopted else ""))
 
             # geoip:ru — bypass the entire Russian IP space so any RU-hosted
             # resource (CDN sub-domains we didn't pre-resolve, third-party
@@ -557,8 +571,10 @@ class ConnectionManager:
             if ru_cidrs:
                 self._log(f"[*] Добавляю {len(ru_cidrs)} CIDR'ов из geoip:ru…")
                 t0 = time.time()
-                added = session.add_bypass_cidrs(ru_cidrs, real.gateway, real.index, metric=bypass_metric)
-                self._log(f"[*] Добавлено {added} CIDR'ов за {time.time()-t0:.1f}с — локальный IP-блок идёт мимо TUN")
+                added, adopted = session.add_bypass_cidrs(ru_cidrs, real.gateway, real.index, metric=bypass_metric)
+                self._log(f"[*] geoip:ru за {time.time()-t0:.1f}с: {added} новых"
+                          + (f", {adopted} уже было (подхвачены для очистки)" if adopted else "")
+                          + " — локальный IP-блок идёт мимо TUN")
             else:
                 self._log("[!] CIDR-список не закеширован — прямые сайты с динамическими IP могут не работать")
         except Exception:

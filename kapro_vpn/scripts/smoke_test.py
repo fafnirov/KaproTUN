@@ -451,7 +451,7 @@ from kapro_vpn.core import ip_probe as _ip_probe
 def _probe_returns_none_on_dead_socks() -> None:
     # 127.0.0.1:1 — well-known "nothing listens here" port. Probe must
     # not raise; must return None within timeout.
-    result = _ip_probe.fetch_public_ip(socks_proxy="127.0.0.1:1", timeout=2.0)
+    result = _ip_probe.fetch_public_ip(socks_proxy="127.0.0.1:1", timeout=2.0, retries=0)
     if result is not None:
         raise AssertionError(
             f"expected None on dead SOCKS, got {result!r}"
@@ -498,7 +498,7 @@ def _probe_restores_getaddrinfo() -> None:
     # paths. Regression guard.
     import socket as _socket
     original = _socket.getaddrinfo
-    _ip_probe.fetch_public_ip(socks_proxy="127.0.0.1:1", timeout=1.0)
+    _ip_probe.fetch_public_ip(socks_proxy="127.0.0.1:1", timeout=1.0, retries=0)
     if _socket.getaddrinfo is not original:
         raise AssertionError(
             "socket.getaddrinfo was not restored after fetch_public_ip"
@@ -507,6 +507,101 @@ def _probe_restores_getaddrinfo() -> None:
 
 check("probe restores socket.getaddrinfo after running",
       _probe_restores_getaddrinfo)
+
+
+# v1.21.1: in TUN mode the probe can fire before the tunnel's DNS path is
+# answering — every endpoint fails on that first pass. It must retry the
+# whole pass (not give up), and return as soon as one pass succeeds.
+def _ip_probe_retries_then_succeeds() -> None:
+    orig_probe = _ip_probe._probe_with_fallback
+    state = {"n": 0}
+    fake_ip = _ip_probe.PublicIp(ip="1.2.3.4", country_code="NL",
+                                 country_name="Нидерланды", city=None)
+
+    def _fail_twice_then_ok(proxies, t, locale, say):
+        state["n"] += 1
+        return fake_ip if state["n"] >= 3 else None
+
+    _ip_probe._probe_with_fallback = _fail_twice_then_ok
+    try:
+        # retry_delay=0 keeps the test instant (no real sleep).
+        result = _ip_probe.fetch_public_ip(timeout=1.0, retries=2, retry_delay=0)
+        if result is None or result.ip != "1.2.3.4":
+            raise AssertionError(f"retry should have produced the success, got {result!r}")
+        if state["n"] != 3:
+            raise AssertionError(f"expected 3 passes (2 fail + 1 ok), got {state['n']}")
+        # retries=0 → exactly one pass, no retry loop
+        state["n"] = 0
+        _ip_probe._probe_with_fallback = lambda *a, **k: (state.update(n=state["n"] + 1) or None)
+        r0 = _ip_probe.fetch_public_ip(timeout=1.0, retries=0, retry_delay=0)
+        if r0 is not None or state["n"] != 1:
+            raise AssertionError(f"retries=0 must do exactly one pass, got n={state['n']} r={r0!r}")
+    finally:
+        _ip_probe._probe_with_fallback = orig_probe
+
+
+check("ip-probe retries the pass while tunnel DNS warms up",
+      _ip_probe_retries_then_succeeds)
+
+
+# v1.21.1: leftover bypass routes from a prior session (app killed/crashed
+# before restore() ran) must be ADOPTED into the current session so
+# disconnect cleans them — otherwise they leak into the routing table and
+# can blackhole on a network change. Windows native-API path only.
+def _bypass_routes_adopt_leftovers() -> None:
+    import sys as _sys
+    if _sys.platform != "win32":
+        return  # CreateIpForwardEntry path is Windows-only
+    from kapro_vpn.core import network_routes as _nr
+    orig = _nr._create_route_native
+    try:
+        # Simulate every route already present (ERROR_ALREADY_EXISTS).
+        _nr._create_route_native = lambda *a, **k: _nr._ERROR_ALREADY_EXISTS
+        sess = _nr.RouteSession()
+        added, adopted = sess.add_bypass_cidrs(
+            [("8.8.8.8", "255.255.255.255"), ("1.1.1.1", "255.255.255.255")],
+            "192.168.1.1", 12, metric=26,
+        )
+        if (added, adopted) != (0, 2):
+            raise AssertionError(f"all-existing should give (0,2), got ({added},{adopted})")
+        if len(sess.routes) != 2:
+            raise AssertionError(f"adopted routes must be tracked for cleanup, got {len(sess.routes)}")
+        # Fresh adds report as added, not adopted.
+        _nr._create_route_native = lambda *a, **k: _nr._NO_ERROR
+        sess2 = _nr.RouteSession()
+        a2, ad2 = sess2.add_bypass_cidrs([("9.9.9.9", "255.255.255.255")], "192.168.1.1", 12)
+        if (a2, ad2) != (1, 0):
+            raise AssertionError(f"fresh add should give (1,0), got ({a2},{ad2})")
+    finally:
+        _nr._create_route_native = orig
+
+
+check("bypass routes: adopt leftovers so disconnect cleans them",
+      _bypass_routes_adopt_leftovers)
+
+
+# v1.21.1: benign broadcast/multicast UDP relay failures (Steam :27036,
+# SSDP, mDNS → WSAENOBUFS) are filtered from the user's live Logs page;
+# real lines pass through untouched.
+def _tun2socks_log_noise_filter() -> None:
+    from kapro_vpn.core.tun2socks_process import _is_noise_line
+    noise = ('{"level":"warn","caller":"tunnel/udp.go:31","msg":"[UDP] dial '
+             '10.255.0.255:27036: listen packet: listen udp :0: bind: An '
+             'operation on a socket could not be performed because the system '
+             'lacked sufficient buffer space or because a queue was full."}')
+    if not _is_noise_line(noise):
+        raise AssertionError("Steam-broadcast UDP buffer warning should be filtered")
+    for keep in (
+        '{"level":"info","msg":"tun2socks 2.6.0 started"}',
+        '{"level":"error","msg":"[TCP] connection reset by peer"}',
+        'INFO[0000] [STACK] tun://KaproTun <-> socks5://127.0.0.1:2081',
+    ):
+        if _is_noise_line(keep):
+            raise AssertionError(f"non-noise line wrongly filtered: {keep!r}")
+
+
+check("tun2socks log: benign broadcast-UDP noise is filtered, real lines kept",
+      _tun2socks_log_noise_filter)
 
 
 # ---------------------------------------------------------------------------

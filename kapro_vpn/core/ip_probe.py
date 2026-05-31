@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -251,6 +252,8 @@ def fetch_public_ip(
     timeout: float = 5.0,
     locale: str = "ru",
     debug: Optional[Callable[[str], None]] = None,
+    retries: int = 2,
+    retry_delay: float = 1.5,
 ) -> Optional[PublicIp]:
     """Return the public IP + country as seen by ipinfo.io, or None on
     any failure (timeout, network error, malformed response, etc.).
@@ -300,9 +303,23 @@ def fetch_public_ip(
     # endpoint doesn't eat the whole probe window.
     per_endpoint_timeout = max(2.0, timeout / len(_PROBE_ENDPOINTS))
 
-    return _probe_with_fallback(
-        proxies, per_endpoint_timeout, locale, _say,
-    )
+    # In TUN mode the probe can fire a beat before the tunnel's DNS path
+    # (xray's hijack → DoH upstream over the VPN) is answering — every
+    # endpoint then fails fast with getaddrinfo/connection errors. That's a
+    # warm-up race, not a real failure, so retry the whole pass a couple of
+    # times with a short pause. The happy path returns on the first success,
+    # so HTTP mode (and TUN once DNS is up) pays nothing. Runs in the probe
+    # worker thread, so the sleep never blocks the UI.
+    for attempt in range(retries + 1):
+        result = _probe_with_fallback(
+            proxies, per_endpoint_timeout, locale, _say,
+        )
+        if result is not None or attempt >= retries:
+            return result
+        _say(f"[ip-probe] повтор {attempt + 1}/{retries} через {retry_delay:.1f}s "
+             f"(туннельный DNS, возможно, ещё прогревается)")
+        time.sleep(retry_delay)
+    return None
 
 
 def _probe_with_fallback(

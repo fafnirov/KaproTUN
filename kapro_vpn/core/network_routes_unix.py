@@ -303,28 +303,31 @@ class RouteSession:
         return False
 
     def add_bypass_routes(self, ips: list[str], gateway: str, if_index: int,
-                          metric: int = 1) -> int:
-        """Add /32 host-routes for many IPs. Returns count succeeded."""
+                          metric: int = 1) -> tuple[int, int]:
+        """Add /32 host-routes for many IPs. Returns (added, adopted)."""
         ips = sorted({ip for ip in ips if ip})
         if not ips:
-            return 0
+            return (0, 0)
         entries = [(ip, "255.255.255.255") for ip in ips]
         return self.add_bypass_cidrs(entries, gateway, if_index, metric)
 
     def add_bypass_cidrs(self, entries: list[tuple[str, str]],
-                         gateway: str, if_index: int, metric: int = 1) -> int:
-        """Add many (dest, mask) routes.
+                         gateway: str, if_index: int, metric: int = 1) -> tuple[int, int]:
+        """Add many (dest, mask) routes. Returns (added, adopted).
 
         Linux: batch via `ip -batch -` (pipes all commands in one fork,
-        ~9000 routes in <1 second).
+        ~9000 routes in <1 second). It already tracks every wanted route
+        for cleanup, so there's no cross-session leak to repair here —
+        `adopted` is reported 0 (the precise added/already-exists split is
+        Windows-specific, where the native API hands back per-route rc).
         macOS: no batch interface; loops over `route add` (~30-60s for
         geoip:ru). Callers should surface a "wait..." log.
         """
         if not entries:
-            return 0
+            return (0, 0)
         if sys.platform == "darwin":
-            return self._mac_bypass_loop(entries, gateway, if_index, metric)
-        return self._linux_bypass_batch(entries, gateway, if_index, metric)
+            return (self._mac_bypass_loop(entries, gateway, if_index, metric), 0)
+        return (self._linux_bypass_batch(entries, gateway, if_index, metric), 0)
 
     def _linux_bypass_batch(self, entries: list[tuple[str, str]],
                             gateway: str, if_index: int, metric: int) -> int:

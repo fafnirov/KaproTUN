@@ -32,6 +32,24 @@ LogSink = Callable[[str], None]
 TUN_DEVICE_NAME = "KaproTun" if sys.platform == "win32" else "kaprotun"
 
 
+def _is_noise_line(line: str) -> bool:
+    """True for known-benign tun2socks spam not worth surfacing on the
+    user's Logs page.
+
+    Today that's UDP relay failures for broadcast / multicast datagrams —
+    Steam LAN discovery (udp/27036 → x.x.x.255), SSDP, mDNS — which on
+    Windows hit WSAENOBUFS ("...lacked sufficient buffer space ... or
+    because a queue was full"). These datagrams can't be proxied through a
+    SOCKS tunnel anyway and there's nothing the user can act on. We still
+    keep them in the in-memory ring (recent_logs) for deep debugging — just
+    don't stream them live to the UI.
+    """
+    if "[UDP]" not in line:
+        return False
+    low = line.lower()
+    return "buffer space" in low or "queue was full" in low
+
+
 def _device_arg() -> str:
     """The right -device URI for our OS.
 
@@ -174,7 +192,7 @@ class Tun2socksProcess:
                         self._mac_device_name = name
                         break
                     idx = line.find(marker, idx + 1)
-            if self._on_log:
+            if self._on_log and not _is_noise_line(line):
                 try:
                     self._on_log(line)
                 except Exception:
