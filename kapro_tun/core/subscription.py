@@ -36,12 +36,21 @@ import requests
 from .. import __version__
 from .parser import ParseError, ProxyConfig, parse
 
-# Self-identifying User-Agent so subscription providers have one obvious
-# string to whitelist or block. Format follows the de-facto convention
-# (`Name/Version (Platform; +URL)`) used by v2rayN, NekoBox, Streisand
-# etc., so server-side allowlists that pattern-match "<Name>/" work out
-# of the box.
-USER_AGENT = f"KaproTUN/{__version__} (Windows; +https://github.com/fafnirov/KaproTUN)"
+# Wire User-Agent for subscription fetches. This is a COMPATIBILITY TOKEN,
+# not branding — DO NOT rename it to match the app.
+#
+# Several providers gate their subscription endpoint on a User-Agent
+# allowlist and only hand back real servers when the UA begins with the
+# exact prefix `KaproVPN/`. Measured directly against gmailvpn.site:
+#   "KaproVPN/<ver> (...)"  -> 9 real configs
+#   "KaproTUN/<ver> (...)"  -> 1 dead "App not supported" stub
+#   "KaproVPN" (no slash) / "KaproVPN-TUN/..." / "...KaproVPN/" mid-string -> stub
+# i.e. the match is a strict `KaproVPN/` PREFIX. When the app was rebranded
+# KaproTUN (v1.22.0) we changed this UA too, which silently turned every
+# such provider into a stub — paid users saw "провайдер вернул заглушку".
+# So the subscription UA stays "KaproVPN/" forever, regardless of brand.
+# (Format still follows the `Name/Version (Platform; +URL)` convention.)
+USER_AGENT = f"KaproVPN/{__version__} (Windows; +https://github.com/fafnirov/KaproTUN)"
 
 SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://",
                      "hysteria2://", "hy2://")

@@ -2108,6 +2108,26 @@ _STUB_URL = ("vless://aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa@0.0.0.0:1"
 _REAL_URL = SAMPLE_URLS[0][1]  # synthetic vless sample (host 1.2.3.4:443)
 
 
+def _subscription_ua_is_kaprovpn_prefix() -> None:
+    """v1.22.1 regression. Providers (gmailvpn.site & co.) gate their
+    subscription endpoint on a User-Agent allowlist matched as a strict
+    `KaproVPN/` PREFIX. The v1.22.0 KaproVPN->KaproTUN rebrand changed this
+    UA to `KaproTUN/` and silently turned every such provider into a dead
+    "App not supported" stub (measured: KaproVPN/ -> 9 real servers,
+    KaproTUN/ -> 1 stub). The subscription UA must stay `KaproVPN/`
+    regardless of app brand — guard it so a future rename can't regress it.
+    """
+    ua = _sub.USER_AGENT
+    if not ua.startswith("KaproVPN/"):
+        raise AssertionError(
+            f"subscription User-Agent must start with 'KaproVPN/' (provider "
+            f"allowlist prefix) — got {ua!r}")
+
+
+check("subscription User-Agent keeps the KaproVPN/ allowlist prefix",
+      _subscription_ua_is_kaprovpn_prefix)
+
+
 def _placeholder_detects_stub() -> None:
     if not _sub.is_placeholder_config(parse(_STUB_URL)):
         raise AssertionError("0.0.0.0 / 'App not supported' not flagged as placeholder")
