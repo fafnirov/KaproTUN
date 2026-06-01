@@ -282,7 +282,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "block_ads": False,  # drop geosite:category-ads-all at the xray routing layer (any DNS) — v1.19.0
     "route_ru_direct": False,  # route all geoip:ru traffic direct (bypass VPN), not just the curated domain list — v1.19.0
     "theme": "auto",  # "auto" (follow OS) / "dark" / "light" — see gui/styles.py
-    "window_size": [480, 870],  # [w, h] — restored on launch, saved on close
+    "window_size": [480, 870],  # [w, h] — restored on launch (advanced resizable mode only)
+    "allow_window_resize": False,  # v2.0.3: opt-in. False = fixed-size window (no mouse resize, no drift); True = resizable + edge handles
 }
 
 

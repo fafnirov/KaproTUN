@@ -1301,20 +1301,39 @@ class MainWindow(QMainWindow):
         # radio-button text and a few hints were getting clipped.
         # v1.14.5: 820 → 870 default H to restore the connect button
         # to a larger 220×220 with proper spacing.
-        self.setMinimumSize(480, 780)
-        # Restore the persisted window size BEFORE building the manager
-        # (which we don't have yet — going to storage directly).
-        # storage.load_settings is the canonical reader; manager just
-        # caches the same dict on .settings later.
+        # Window sizing + resize policy.
+        #
+        # DEFAULT (allow_window_resize=False): a FIXED-size window. No mouse
+        # resize — opens at the canonical 480×870 every launch. This kills the
+        # "window resizes/creeps erratically" UX bug: the frameless edge-handles
+        # let users drag-resize (often by accident on the 6px invisible border),
+        # and resizeEvent persisted every intermediate size, so the window
+        # drifted a few px each session. Fixed size + no handles = predictable.
+        #
+        # ADVANCED (allow_window_resize=True, opt-in via settings): the old
+        # resizable behaviour — restore the persisted size, install the 8 edge
+        # handles (below), persist on resize.
+        DEFAULT_W, DEFAULT_H = 480, 870
+        MIN_W, MIN_H = 480, 780
+        # storage.load_settings is the canonical reader; manager caches the
+        # same dict on .settings later. Read it now, before the manager exists.
         saved_settings = storage.load_settings()
-        saved_size = saved_settings.get("window_size", [480, 870])
-        try:
-            w, h = int(saved_size[0]), int(saved_size[1])
-        except (TypeError, ValueError, IndexError):
-            w, h = 480, 870
-        # Clamp restored size to the minimum so a corrupted settings
-        # file can't shrink us below usable.
-        self.resize(max(w, 480), max(h, 780))
+        self._allow_resize = self._window_resize_allowed(saved_settings)
+        if self._allow_resize:
+            self.setMinimumSize(MIN_W, MIN_H)
+            saved_size = saved_settings.get("window_size", [DEFAULT_W, DEFAULT_H])
+            try:
+                w, h = int(saved_size[0]), int(saved_size[1])
+            except (TypeError, ValueError, IndexError):
+                w, h = DEFAULT_W, DEFAULT_H
+            # Clamp restored size to the minimum so a corrupted settings
+            # file can't shrink us below usable.
+            self.resize(max(w, MIN_W), max(h, MIN_H))
+        else:
+            # min == max == fixed: Qt blocks any user OR programmatic resize,
+            # and we never create the edge handles. Ignore any persisted
+            # (possibly drifted) window_size so startup is always identical.
+            self.setFixedSize(DEFAULT_W, DEFAULT_H)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowMinimizeButtonHint)
 
         self.manager = ConnectionManager(on_log=self.log_received.emit)
@@ -1412,8 +1431,15 @@ class MainWindow(QMainWindow):
         # attempt). These child widgets sit on top of the layout
         # (raised in reposition()) and capture mouse events directly,
         # which works identically on Windows, macOS, and Linux.
-        self._resize_handles = window_resize.ResizeHandles(self)
-        self._resize_handles.install()
+        # Edge resize-handles exist ONLY in the opt-in resizable mode. In the
+        # default fixed-size mode we never create them — so there are no
+        # invisible 6px grab-zones at the borders (no accidental resize, no
+        # edge-cursor artifacts on either side of the content).
+        if self._allow_resize:
+            self._resize_handles = window_resize.ResizeHandles(self)
+            self._resize_handles.install()
+        else:
+            self._resize_handles = None
 
         # System tray (gracefully no-op if user's DE doesn't expose one)
         self.tray = TrayManager(self)
@@ -2286,6 +2312,15 @@ class MainWindow(QMainWindow):
 
     # --- frameless resize support (v1.16.3) -------------------------------
 
+    @staticmethod
+    def _window_resize_allowed(settings: dict) -> bool:
+        """Whether the window is user-resizable. Default False — a fixed-size
+        window that can't drift. Advanced users opt in via the
+        `allow_window_resize` setting. Gates BOTH the edge-handle install and
+        the size-persistence in resizeEvent, so flipping it off guarantees no
+        handles are ever created. Pure + unit-testable."""
+        return bool(settings.get("allow_window_resize", False))
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         """Persist size to settings + reposition the 8 edge resize-handles.
 
@@ -2300,7 +2335,11 @@ class MainWindow(QMainWindow):
         """
         super().resizeEvent(event)
         sz = event.size()
-        if hasattr(self, "manager"):
+        # Persist size ONLY in resizable mode. In fixed mode the size never
+        # changes, and persisting a forced value would be pointless (and is
+        # exactly the drift loop we removed). getattr keeps the early-init
+        # resize (from setFixedSize/resize, before _allow_resize is read) safe.
+        if getattr(self, "_allow_resize", False) and hasattr(self, "manager"):
             self.manager.update_settings(window_size=[sz.width(), sz.height()])
         handles = getattr(self, "_resize_handles", None)
         if handles is not None:

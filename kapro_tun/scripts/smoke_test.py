@@ -950,6 +950,78 @@ check("window resize: 8 handles install and follow resize",
       _resize_handles_install_and_reposition)
 
 
+# v2.0.3 — fixed-size window by default (kills the "window resizes/creeps
+# erratically" UX bug). Edge handles + size-persistence are gated behind
+# allow_window_resize (default OFF); titlebar drag must keep working.
+def _window_resize_gate_default_off() -> None:
+    from kapro_tun.gui.main_window import MainWindow
+    from kapro_tun.core import storage as _st
+    if MainWindow._window_resize_allowed({}) is not False:
+        raise AssertionError("empty settings must default to non-resizable")
+    if MainWindow._window_resize_allowed({"allow_window_resize": False}) is not False:
+        raise AssertionError("explicit False must stay non-resizable")
+    if MainWindow._window_resize_allowed({"allow_window_resize": True}) is not True:
+        raise AssertionError("allow_window_resize=True must enable resize")
+    if _st.DEFAULT_SETTINGS.get("allow_window_resize") is not False:
+        raise AssertionError("DEFAULT_SETTINGS.allow_window_resize must ship False")
+
+
+def _window_fixed_and_handleless_by_default() -> None:
+    """Build the REAL MainWindow in the default (off) mode and assert it is
+    fixed-size with NO resize handles created. Non-fragile: checks geometry
+    policy + the handles attribute, not pixels."""
+    import os as _o
+    _o.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_tun.gui import main_window as _mw
+    from kapro_tun.core import storage as _st
+    orig_load = _st.load_settings
+    _st.load_settings = lambda: {**_st.DEFAULT_SETTINGS, "allow_window_resize": False}
+    try:
+        w = _mw.MainWindow()
+    finally:
+        _st.load_settings = orig_load
+    try:
+        if getattr(w, "_resize_handles", "missing") is not None:
+            raise AssertionError("default (fixed) mode must NOT create resize handles")
+        if w.minimumSize() != w.maximumSize():
+            raise AssertionError("fixed mode must lock min==max (no mouse resize)")
+        if (w.width(), w.height()) != (480, 870):
+            raise AssertionError(f"fixed mode must open at 480x870, got {w.width()}x{w.height()}")
+    finally:
+        for attr in ("_poll", "_sub_autorefresh", "_tray_pinger"):
+            obj = getattr(w, attr, None)
+            if obj is not None and hasattr(obj, "stop"):
+                try: obj.stop()
+                except Exception: pass
+        tray = getattr(w, "tray", None)
+        if tray is not None and hasattr(tray, "hide"):
+            try: tray.hide()
+            except Exception: pass
+        w.close()
+        w.deleteLater()
+
+
+def _titlebar_drag_intact() -> None:
+    """The titlebar drag-to-move handlers + window-control signals must still
+    be present — this fix must not touch titlebar behaviour. No pixels."""
+    from PySide6.QtWidgets import QFrame
+    from kapro_tun.gui.titlebar import TitleBar
+    for name in ("mousePressEvent", "mouseMoveEvent", "mouseReleaseEvent"):
+        if getattr(TitleBar, name) is getattr(QFrame, name):
+            raise AssertionError(f"TitleBar.{name} drag handler missing (not overridden)")
+    for sig in ("minimize_clicked", "close_clicked"):
+        if not hasattr(TitleBar, sig):
+            raise AssertionError(f"TitleBar.{sig} window-control signal missing")
+
+
+check("window: resize gate defaults off (fixed window)", _window_resize_gate_default_off)
+check("window: fixed-size + no handles by default", _window_fixed_and_handleless_by_default)
+check("window: titlebar drag handlers + controls intact", _titlebar_drag_intact)
+
+
 # ---------------------------------------------------------------------------
 # Test 9 — Leak self-test module (v1.16.4)
 # ---------------------------------------------------------------------------
