@@ -1248,6 +1248,77 @@ class _IpProbeWorker(QThread):
         )
 
 
+class _DnsWatchdog(QThread):
+    """Runtime DNS health monitor for TUN mode (v2.1.4).
+
+    The failure this guards against: the tunnel stays "up" (xray + tun2socks
+    alive) but its DNS path dies mid-session — server-side resolver outage,
+    :53 blocked upstream, half-open hysteria. Because TUN mode clears the
+    physical NIC's DNS, that means the machine silently stops resolving
+    *anything* while still showing "connected", and nothing in the existing
+    process-death watcher notices (the processes are fine).
+
+    This thread periodically asks dns_health whether names still resolve and,
+    on a SUSTAINED outage (two consecutive failed probes ≈ a minute), emits
+    `unhealthy`. The window turns that into a bounded self-heal.
+
+    It self-gates on ConnectionManager.tun_dns_guarded(): when we're not in a
+    DNS-clearing TUN session it doesn't probe at all, so it's cheap to leave
+    running for the whole app lifetime and never touches HTTP-mode / leak-
+    protection-off sessions where a lookup failure isn't ours to fix.
+    """
+
+    unhealthy = Signal()
+
+    def __init__(self, is_guarded, parent=None):
+        super().__init__(parent)
+        self._is_guarded = is_guarded   # callable -> bool (manager.tun_dns_guarded)
+        self._stop = False
+        self._fail_streak = 0
+        self._interval_s = 20           # gap between probes while connected
+        self._fail_threshold = 2        # consecutive fails before we heal
+
+    def run(self) -> None:
+        from ..core import dns_health
+        while not self._stop:
+            # Sleep the interval in 1-second slices so stop() returns promptly
+            # instead of blocking up to a full interval on quit.
+            for _ in range(self._interval_s):
+                if self._stop:
+                    return
+                self.msleep(1000)
+            if self._stop:
+                return
+            if not self._guarded():
+                self._fail_streak = 0
+                continue
+            ok = dns_health.probe(timeout=1.5, attempts=2)
+            if self._stop:
+                return
+            # A disconnect may have landed while we were resolving — never heal
+            # a session that's already gone.
+            if not self._guarded():
+                self._fail_streak = 0
+                continue
+            if ok:
+                self._fail_streak = 0
+            else:
+                self._fail_streak += 1
+                if self._fail_streak >= self._fail_threshold:
+                    self._fail_streak = 0
+                    self.unhealthy.emit()
+
+    def _guarded(self) -> bool:
+        try:
+            return bool(self._is_guarded())
+        except Exception:
+            return False
+
+    def stop(self) -> None:
+        self._stop = True
+        self.wait(4000)
+
+
 class LogsPage(QWidget):
     """Read-only viewer for Xray-core logs."""
 
@@ -1392,6 +1463,16 @@ class MainWindow(QMainWindow):
         self._reconnect_timer = QTimer(self)
         self._reconnect_timer.setSingleShot(True)
         self._reconnect_timer.timeout.connect(self._do_auto_reconnect)
+
+        # Runtime DNS watchdog (v2.1.4): catches the "tunnel up but DNS dead"
+        # state the process-death watcher can't see. Self-gates on TUN-with-
+        # leak-protection, so it's idle (no probing) in HTTP mode or when the
+        # user has leak protection off. A sustained outage drives the same
+        # bounded reconnect machinery as a crash. Started once, lives for the
+        # app's lifetime; stopped on quit.
+        self._dns_watchdog = _DnsWatchdog(self.manager.tun_dns_guarded, parent=self)
+        self._dns_watchdog.unhealthy.connect(self._on_dns_unhealthy)
+        self._dns_watchdog.start()
 
         # --- App-shell layout (everything inside the rounded dark frame) ---
         shell = QWidget()
@@ -2050,6 +2131,66 @@ class MainWindow(QMainWindow):
         )
         self._do_connect()
 
+    def _on_dns_unhealthy(self) -> None:
+        """DNS watchdog reported a sustained resolution outage through the
+        tunnel. Drive a *bounded* self-heal that reuses the crash-reconnect
+        machinery: a clean disconnect (guaranteed to restore DNS / routes /
+        proxy) followed by a backed-off reconnect whose own connect-time DNS
+        health-check will roll back again if the tunnel is still broken. After
+        _reconnect_max failed heals, stop and leave the machine cleanly
+        DISCONNECTED (real DNS restored) with a clear message — never loop.
+        """
+        # The worker emitted this from another thread a moment ago; the session
+        # may have changed underneath us. Re-validate on the GUI thread.
+        if not self.manager.tun_dns_guarded():
+            return
+        # Don't pile onto an in-flight connect or an already-scheduled heal.
+        if self._connecting or self._reconnect_timer.isActive():
+            return
+
+        if self._reconnect_attempts >= self._reconnect_max:
+            # Budget spent — guarantee a clean, DNS-restored teardown and stop.
+            if not self._crash_notified:
+                self.logs_page.append(
+                    f"[!] Watchdog: DNS через туннель не восстановился после "
+                    f"{self._reconnect_max} попыток. Отключаюсь начисто — "
+                    f"DNS, маршруты и системный прокси возвращены в исходное "
+                    f"состояние. Переподключи вручную, когда будешь готов."
+                )
+                show_toast(
+                    self,
+                    "VPN: DNS не работает. Отключено, сеть восстановлена. "
+                    "Переподключи вручную.",
+                    kind="error", duration_ms=10000,
+                )
+                self._crash_notified = True
+            self._reconnect_timer.stop()
+            self.manager.disconnect()      # restores DNS/routes/proxy, clears journal
+            self._connected_at = 0.0
+            self._refresh_home()
+            return
+
+        delay = self._reconnect_backoff[self._reconnect_attempts]
+        self._reconnect_attempts += 1
+        self.logs_page.append(
+            f"[!] Watchdog: нет резолва DNS через туннель — самовосстановление "
+            f"#{self._reconnect_attempts}/{self._reconnect_max} через {delay} с "
+            f"(чистый reconnect; DNS/маршруты/прокси будут восстановлены)…"
+        )
+        show_toast(
+            self,
+            f"DNS не работает — восстановление #{self._reconnect_attempts}…",
+            kind="info", duration_ms=delay * 1000,
+        )
+        # Same tear-down-but-keep-config dance as the crash path, so the timer
+        # reconnects to the same server. disconnect() restores DNS/routes/proxy
+        # and clears the recovery journal; the reconnect re-marks it.
+        saved = self._active_config
+        self.manager.disconnect()
+        self._active_config = saved
+        self._connected_at = 0.0
+        self._reconnect_timer.start(delay * 1000)
+
     def _do_disconnect(self) -> None:
         # User asked for it — kill the auto-reconnect chain too so we
         # don't bring the VPN back up against their wishes.
@@ -2305,6 +2446,10 @@ class MainWindow(QMainWindow):
     def _on_quit_for_real(self) -> None:
         """Disconnect, tear down tray, terminate the QApplication event loop."""
         self._really_quitting = True
+        try:
+            self._dns_watchdog.stop()
+        except Exception:
+            pass
         if self.manager.is_connected():
             self.manager.disconnect()
         self.tray.hide()
@@ -2407,6 +2552,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self._really_quitting:
+            try:
+                self._dns_watchdog.stop()
+            except Exception:
+                pass
             if self.manager.is_connected():
                 self.manager.disconnect()
             event.accept()

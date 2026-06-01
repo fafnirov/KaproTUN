@@ -9,7 +9,8 @@ import sys
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from .core import autostart, i18n, ipv6_block, killswitch, storage, system_proxy, webrtc_block
+from .core import (autostart, i18n, ipv6_block, killswitch, storage,
+                   system_proxy, tun_recovery, webrtc_block)
 from .gui import icons
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
@@ -200,6 +201,22 @@ def _run_app() -> int:
         app.processEvents()
 
     window = MainWindow()
+
+    # Fourth defensive sweep (v2.1.4): TUN mode clears the physical NIC's DNS
+    # for leak protection and only restores it on a clean disconnect. If the
+    # previous run was force-killed / crashed / lost power while connected, that
+    # interface is still "DNS = none" with no tunnel to carry queries — the
+    # machine resolves nothing until the user restarts the adapter by hand.
+    # recover() reads the crash journal and restores DHCP DNS on that exact
+    # interface. Idempotent and silent when there's nothing to recover. Runs
+    # before the optional auto-connect below so we never reconnect on top of a
+    # half-broken DNS state.
+    try:
+        for _action in tun_recovery.recover():
+            window.logs_page.append(f"[восстановление] {_action}")
+    except Exception:
+        pass
+
     # Re-route "show" pings from any future second-launch attempts to
     # the same code path the tray icon uses.
     guard.setParent(window)  # keep the guard alive for the window's lifetime

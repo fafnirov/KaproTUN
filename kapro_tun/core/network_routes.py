@@ -126,12 +126,39 @@ def _run(args: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
 
 
 def _ps(script: str, timeout: float = 10.0) -> tuple[int, str, str]:
-    """Run a single PowerShell command and return (rc, stdout, stderr)."""
+    """Run a single PowerShell command and return (rc, stdout, stderr).
+
+    PowerShell writes its stdout in the console's OEM codepage (cp866 on a
+    Russian Windows), but _run() decodes as UTF-8 — so any Cyrillic the script
+    emits (interface aliases like "Беспроводная сеть") came back mojibake
+    ("���"), which then polluted logs and route lookups. Forcing the console
+    output encoding to UTF-8 from inside the script makes PS encode what _run
+    decodes, so non-ASCII interface names survive the round-trip intact.
+    """
+    script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;\n" + script
     return _run(
         ["powershell.exe", "-NoProfile", "-NonInteractive",
          "-ExecutionPolicy", "Bypass", "-Command", script],
         timeout=timeout,
     )
+
+
+def reset_dns_by_index(if_index: int) -> bool:
+    """Restore an interface's DNS to DHCP, addressing it by ifIndex.
+
+    Index-based so it works during crash recovery, where the saved interface
+    *name* may have been captured with a broken encoding or the alias may have
+    changed. Uses the DnsClient cmdlet (resets to automatic/DHCP). Returns
+    True on rc 0. Never raises — recovery must stay best-effort.
+    """
+    try:
+        rc, _out, _err = _ps(
+            f"Set-DnsClientServerAddress -InterfaceIndex {int(if_index)} "
+            f"-ResetServerAddresses -ErrorAction Stop"
+        )
+        return rc == 0
+    except Exception:
+        return False
 
 
 # --- discovery ------------------------------------------------------------

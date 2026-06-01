@@ -3408,6 +3408,287 @@ check("picker: subscription refresh merge + URL-list migration",
 
 
 # ---------------------------------------------------------------------------
+# Test — TUN reliability hardening (v2.1.4)
+#   D1 startup recovery · D2 DNS health-check rollback · D3 watchdog · D4 logs
+# ---------------------------------------------------------------------------
+
+section("TUN reliability — recovery / DNS health / watchdog")
+
+
+def _dns_health_probe_contract() -> None:
+    """probe() is bounded, never raises, and reads success/failure correctly.
+
+    Deterministic offline: 'localhost' always resolves (loopback / hosts file);
+    a '.invalid' TLD (RFC 6761) never resolves — no network dependency either
+    way."""
+    from kapro_tun.core import dns_health
+
+    if dns_health.probe(hosts=("localhost",), timeout=2.0, attempts=1) is not True:
+        raise AssertionError("probe() should resolve localhost → True")
+
+    bad = dns_health.probe(
+        hosts=("nonexistent-kaprotun-xyz.invalid",), timeout=1.0, attempts=1)
+    if bad is not False:
+        raise AssertionError("probe() should return False for an .invalid host")
+
+    # Must never raise, whatever it's handed.
+    for kw in ({}, {"hosts": ("localhost",)}, {"timeout": 0.1, "attempts": 1}):
+        r = dns_health.probe(**kw)
+        if not isinstance(r, bool):
+            raise AssertionError(f"probe({kw}) returned non-bool {type(r)}")
+
+
+check("dns_health.probe: bounded, never raises, correct verdict",
+      _dns_health_probe_contract)
+
+
+def _tun_recovery_journal_lifecycle() -> None:
+    """D1: mark→has_pending→recover restores DNS + deletes journal, and is
+    idempotent. Covers clean (no journal), crashed (journal present), and
+    corrupt-journal cases — plus the index→name fallback."""
+    import os
+    import sys as _sys
+    import json as _json
+    import types
+    import tempfile
+    from kapro_tun.core import paths, tun_recovery
+
+    import kapro_tun.core as _core_pkg
+    tmpdir = tempfile.mkdtemp(prefix="kaprotun_rec_")
+    journal = os.path.join(tmpdir, "tun-session.json")
+    orig_path_fn = paths.tun_recovery_file
+    orig_nr = _sys.modules.get("kapro_tun.core.network_routes")
+    orig_attr = getattr(_core_pkg, "network_routes", None)
+
+    # Fake the route backend so the test is platform-independent (the real one
+    # is Windows-only) and so we can observe which restore path was taken.
+    calls = {"by_index": [], "by_name": []}
+    fake_nr = types.ModuleType("kapro_tun.core.network_routes")
+    fake_nr.reset_dns_by_index = lambda idx: (calls["by_index"].append(idx) or True)
+    fake_nr.reset_dns = lambda name: calls["by_name"].append(name)
+
+    from pathlib import Path
+    paths.tun_recovery_file = lambda: Path(journal)
+    # recover() does `from . import network_routes` — on Windows the real module
+    # is already imported, so the binding comes from the PACKAGE ATTRIBUTE, not
+    # sys.modules. Patch both so the fake is picked up on every platform.
+    _sys.modules["kapro_tun.core.network_routes"] = fake_nr
+    _core_pkg.network_routes = fake_nr
+    try:
+        # (0) Clean machine: no journal → recover is silent and idempotent.
+        tun_recovery.clear()
+        if tun_recovery.has_pending():
+            raise AssertionError("has_pending() true after clear()")
+        if tun_recovery.recover() != []:
+            raise AssertionError("recover() not silent when no journal present")
+
+        # (1) Mark a session, then crash (we just don't call clear()).
+        if not tun_recovery.mark("Ethernet 2", 17):
+            raise AssertionError("mark() returned False")
+        if not tun_recovery.has_pending():
+            raise AssertionError("has_pending() false right after mark()")
+        with open(journal, "r", encoding="utf-8") as fh:
+            data = _json.load(fh)
+        if (data.get("iface_name") != "Ethernet 2"
+                or data.get("iface_index") != 17
+                or data.get("dns_cleared") is not True):
+            raise AssertionError(f"journal payload wrong: {data}")
+
+        # (2) Next startup recovers: restores DNS by INDEX and deletes journal.
+        actions = tun_recovery.recover()
+        if not actions:
+            raise AssertionError("recover() produced no actions for a live journal")
+        if calls["by_index"] != [17]:
+            raise AssertionError(f"DNS not restored by index: {calls['by_index']}")
+        if tun_recovery.has_pending():
+            raise AssertionError("journal not deleted after recover()")
+
+        # (3) Idempotent: a second recover() does nothing.
+        if tun_recovery.recover() != []:
+            raise AssertionError("recover() not idempotent (second call acted)")
+
+        # (4) Fallback to name when no usable index was journalled.
+        calls["by_index"].clear(); calls["by_name"].clear()
+        tun_recovery.mark("Беспроводная сеть", None)
+        tun_recovery.recover()
+        if calls["by_name"] != ["Беспроводная сеть"]:
+            raise AssertionError(f"name-fallback restore not used: {calls}")
+
+        # (5) Corrupt journal is cleaned up, not left to trip every startup.
+        with open(journal, "w", encoding="utf-8") as fh:
+            fh.write("{ this is not json")
+        if not tun_recovery.has_pending():
+            raise AssertionError("corrupt journal should still count as pending")
+        acts = tun_recovery.recover()
+        if tun_recovery.has_pending():
+            raise AssertionError("corrupt journal not removed by recover()")
+        if not any("повреждён" in a for a in acts):
+            raise AssertionError(f"corrupt-journal note missing: {acts}")
+    finally:
+        paths.tun_recovery_file = orig_path_fn
+        if orig_nr is not None:
+            _sys.modules["kapro_tun.core.network_routes"] = orig_nr
+        else:
+            _sys.modules.pop("kapro_tun.core.network_routes", None)
+        if orig_attr is not None:
+            _core_pkg.network_routes = orig_attr
+        else:
+            try:
+                delattr(_core_pkg, "network_routes")
+            except AttributeError:
+                pass
+        try:
+            if os.path.exists(journal):
+                os.remove(journal)
+            os.rmdir(tmpdir)
+        except OSError:
+            pass
+
+
+check("tun_recovery: journal lifecycle, idempotent, corrupt-safe",
+      _tun_recovery_journal_lifecycle)
+
+
+def _connect_tun_has_dns_rollback_wiring() -> None:
+    """D2: _connect_tun journals the interface BEFORE clearing its DNS, then
+    health-checks the TUN DNS path and rolls back (clears journal too) on
+    failure. Verified at source level — the live path needs admin + a real
+    TUN, so we assert the safety wiring is present and correctly ordered."""
+    import inspect
+    from kapro_tun.core import controller
+    from kapro_tun.core.controller import ConnectionManager
+
+    # Imports actually wired up.
+    if not hasattr(controller, "dns_health") or not hasattr(controller, "tun_recovery"):
+        raise AssertionError("controller missing dns_health / tun_recovery imports")
+
+    src = inspect.getsource(ConnectionManager._connect_tun)
+    mark_i = src.find("tun_recovery.mark(")
+    clear_dns_i = src.find("session.set_dns(real.name, [])")
+    probe_i = src.find("dns_health.probe(")
+    raise_i = src.find("raise ConnectionError(")
+    if mark_i < 0:
+        raise AssertionError("_connect_tun does not journal the interface (mark)")
+    if clear_dns_i < 0:
+        raise AssertionError("_connect_tun no longer clears physical DNS?")
+    if not (0 <= mark_i < clear_dns_i):
+        raise AssertionError("journal mark() must precede the DNS clear")
+    if probe_i < 0 or raise_i < 0:
+        raise AssertionError("_connect_tun missing DNS health-check + rollback raise")
+    if not (clear_dns_i < probe_i):
+        raise AssertionError("health-check must run AFTER the DNS clear")
+
+    exc_src = src[src.find("except Exception"):]
+    if "session.restore()" not in exc_src or "tun_recovery.clear()" not in exc_src:
+        raise AssertionError("rollback path must restore() and clear the journal")
+
+    disc = inspect.getsource(ConnectionManager.disconnect)
+    if "tun_recovery.clear()" not in disc:
+        raise AssertionError("disconnect() must clear the recovery journal")
+
+
+check("controller: DNS health-check + crash-journal rollback wiring",
+      _connect_tun_has_dns_rollback_wiring)
+
+
+def _tun_dns_guarded_gate() -> None:
+    """D3 gate: a fresh (disconnected) manager is NOT guarded, so the watchdog
+    stays idle in HTTP mode / when disconnected / with leak protection off."""
+    from kapro_tun.core.controller import ConnectionManager, MODE_TUN
+    mgr = ConnectionManager(on_log=lambda _l: None)
+    if mgr.tun_dns_guarded() is not False:
+        raise AssertionError("disconnected manager reported tun_dns_guarded() True")
+    # Even if settings say TUN + leak-protection, a disconnected manager is not
+    # guarded (no live session holding DNS hostage).
+    mgr.settings["mode"] = MODE_TUN
+    mgr.settings["dns_leak_protection"] = True
+    if mgr.tun_dns_guarded() is not False:
+        raise AssertionError("guarded True with no live connection")
+
+
+check("controller.tun_dns_guarded(): false unless a live TUN session",
+      _tun_dns_guarded_gate)
+
+
+def _watchdog_threshold_and_gating() -> None:
+    """D3: _DnsWatchdog emits `unhealthy` only after >=2 consecutive failed
+    probes AND only while guarded. Driven with interval 0 and a stubbed probe
+    so it's deterministic and sub-second; threads are always stopped."""
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import Qt
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_tun.gui.main_window import _DnsWatchdog
+    from kapro_tun.core import dns_health
+
+    orig_probe = dns_health.probe
+    dns_health.probe = lambda **k: False   # pretend DNS is dead
+    wd = wd2 = None
+    try:
+        # (a) Guarded + failing → emits (sustained-outage heal trigger).
+        emits = []
+        wd = _DnsWatchdog(is_guarded=lambda: True)
+        wd._interval_s = 0
+        if wd._fail_threshold < 2:
+            raise AssertionError("watchdog should require >=2 fails before healing")
+
+        def _on_emit():
+            emits.append(1)
+            wd._stop = True
+        wd.unhealthy.connect(_on_emit, Qt.DirectConnection)
+        wd.start()
+        wd.wait(3000)
+        if wd.isRunning():
+            wd.stop()
+        if not emits:
+            raise AssertionError("watchdog never emitted on a sustained DNS outage")
+
+        # (b) NOT guarded → never emits, even with the probe failing.
+        emits2 = []
+        wd2 = _DnsWatchdog(is_guarded=lambda: False)
+        wd2._interval_s = 0
+        wd2.unhealthy.connect(lambda: emits2.append(1), Qt.DirectConnection)
+        wd2.start()
+        wd2.wait(150)        # let it spin through many guard-skips
+        wd2.stop()
+        if emits2:
+            raise AssertionError("watchdog emitted while not in guarded TUN mode")
+    finally:
+        dns_health.probe = orig_probe
+        for w in (wd, wd2):
+            try:
+                if w is not None and w.isRunning():
+                    w.stop()
+            except Exception:
+                pass
+
+
+check("watchdog: emits only on sustained failure while guarded",
+      _watchdog_threshold_and_gating)
+
+
+def _ps_forces_utf8_output() -> None:
+    """D4: the PowerShell wrapper prepends a UTF-8 OutputEncoding line so
+    Cyrillic interface names survive instead of arriving as mojibake."""
+    import sys as _sys
+    if _sys.platform != "win32":
+        return   # network_routes is win32-only (ctypes.windll at import time)
+    import inspect
+    from kapro_tun.core import network_routes as nr
+    src = inspect.getsource(nr._ps)
+    if "OutputEncoding" not in src or "UTF8" not in src:
+        raise AssertionError("_ps() does not force UTF-8 console output encoding")
+    if not hasattr(nr, "reset_dns_by_index"):
+        raise AssertionError("network_routes missing reset_dns_by_index helper")
+
+
+check("network_routes._ps: forces UTF-8 (fixes garbled iface names)",
+      _ps_forces_utf8_output)
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 

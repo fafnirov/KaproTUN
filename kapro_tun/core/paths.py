@@ -168,6 +168,16 @@ def settings_file() -> Path:
     return app_data_dir() / "settings.json"
 
 
+def tun_recovery_file() -> Path:
+    """Crash-recovery journal for TUN mode. While a TUN session holds the
+    physical NIC's DNS cleared (leak protection), we record which interface
+    was touched here. On the next startup, recover() reads this to restore
+    DNS-to-DHCP if the previous run died before disconnect could. Deleted on
+    a clean disconnect, so its mere presence means 'a TUN session is/was live'.
+    """
+    return app_data_dir() / "tun-session.json"
+
+
 def secrets_file() -> Path:
     """Encrypted-at-rest blob for non-config secrets — subscription URLs and
     the last-seen Subscription-Userinfo. Uses the same crypto as

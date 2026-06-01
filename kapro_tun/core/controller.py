@@ -8,9 +8,9 @@ import time
 from typing import Callable, Optional
 
 from . import (
-    admin, dns_options, geoip_ru, hysteria_installer, hysteria_process,
-    ipv6_block, killswitch, paths, storage, webrtc_block,
-    system_proxy, xray_config,
+    admin, dns_options, dns_health, geoip_ru, hysteria_installer,
+    hysteria_process, ipv6_block, killswitch, paths, storage, tun_recovery,
+    webrtc_block, system_proxy, xray_config,
 )
 from .parser import ProxyConfig
 from .xray_process import XrayProcess
@@ -264,6 +264,10 @@ class ConnectionManager:
                 self._route_session.restore()
             finally:
                 self._route_session = None
+        # Clean disconnect: restore() above already put the physical NIC's DNS
+        # back, so the crash-recovery journal has nothing left to undo. Drop it
+        # — its presence on next startup must mean "a session died uncleanly".
+        tun_recovery.clear()
         if self.tun_process.is_running():
             self.tun_process.stop()
         if self._saved_proxy_state is not None:
@@ -325,6 +329,21 @@ class ConnectionManager:
 
     def current_mode(self) -> str:
         return self.settings.get("mode", MODE_HTTP_PROXY)
+
+    def tun_dns_guarded(self) -> bool:
+        """True when a live TUN session is holding the physical NIC's DNS
+        cleared — i.e. the only case where a DNS outage means a broken tunnel
+        rather than a normal app-level hiccup.
+
+        The runtime watchdog uses this to decide whether a failed DNS probe is
+        worth healing: in HTTP mode, or with leak protection off, the physical
+        resolver is untouched and a transient lookup failure is not our problem.
+        """
+        return (
+            self.is_connected()
+            and self.current_mode() == MODE_TUN
+            and bool(self.settings.get("dns_leak_protection", True))
+        )
 
     # --- HTTP-proxy mode (browsers only) ----------------------------------
 
@@ -588,11 +607,21 @@ class ConnectionManager:
             #
             # Session tracks the change so disconnect's cleanup restores
             # DHCP-source DNS automatically.
-            if bool(self.settings.get("dns_leak_protection", True)):
+            dns_cleared = bool(self.settings.get("dns_leak_protection", True))
+            if dns_cleared:
+                # Journal the interface BEFORE we clear its DNS, so a crash
+                # while connected can be undone on the next startup (recover()
+                # restores DHCP). Best-effort: a failed journal write still
+                # lets the connect proceed (the in-session health-check below
+                # and disconnect's restore() remain the primary safety nets).
+                if not tun_recovery.mark(real.name, real.index):
+                    self._log("[!] Не удалось записать журнал восстановления TUN "
+                              "(восстановление после аварийного выхода может не "
+                              "сработать) — продолжаю.")
                 session.set_dns(real.name, [])  # empty = clear via address=none
-                self._log("[*] DNS на физическом интерфейсе очищен "
-                          "(защита от утечек: все запросы пойдут через TUN → "
-                          "DoH-upstream через VPN)")
+                self._log(f"[*] DNS на физическом интерфейсе «{real.name}» "
+                          f"(ifIndex {real.index}) очищен — все запросы пойдут "
+                          f"через TUN → DoH-upstream через VPN.")
 
             # Split-routing in TUN mode: xray's freedom outbound can't be
             # trusted alone because its outgoing packets still hit the kernel
@@ -623,8 +652,31 @@ class ConnectionManager:
             # live TUN session. The curated direct-domain routes above are
             # independent and always applied.
             self._install_geoip_ru_bypass(session, real, bypass_metric)
+
+            # Safer DNS transition (v2.1.4): we just cleared the physical NIC's
+            # DNS, so the ONLY working resolver path is now through the TUN. If
+            # the tunnel is up but its DNS is dead (bad server, blocked :53,
+            # half-open hysteria), the user would land in the worst state —
+            # "connected" but unable to resolve anything, with their real DNS
+            # already wiped. Verify the TUN DNS path actually answers before we
+            # commit; if it doesn't, fall through to the except below which
+            # restores DNS/routes/proxy and tears down the processes, surfacing
+            # a clear error instead of a silently-broken connection.
+            if dns_cleared:
+                self._log("[*] Проверяю, что DNS поднимается через TUN…")
+                if not dns_health.probe(timeout=1.5, attempts=3):
+                    raise ConnectionError(
+                        "TUN поднялся, но DNS через туннель не отвечает. "
+                        "Откатываю изменения (DNS/маршруты восстановлены), "
+                        "чтобы не оставить интернет без резолвинга. Проверь "
+                        "сервер/подписку и попробуй снова."
+                    )
+                self._log("[*] DNS через TUN работает — соединение готово.")
         except Exception:
             session.restore()
+            # DNS/routes are back; the recovery journal would otherwise make the
+            # next startup think this run crashed mid-session, so drop it now.
+            tun_recovery.clear()
             self.tun_process.stop()
             self.process.stop()
             raise
