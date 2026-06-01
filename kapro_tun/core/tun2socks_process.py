@@ -84,6 +84,15 @@ class Tun2socksProcess:
     TCP_SNDBUF = "4m"
     TCP_RCVBUF = "4m"
 
+    # v2.0.1: how long an IDLE UDP session is kept in gVisor's netstack. A
+    # UDP-heavy app (Telegram calls/QUIC, a game, a torrent's DHT) opens many
+    # short-lived flows; at the upstream default (~60s) idle sessions pile up,
+    # pressure the netstack (the WSAENOBUFS lines we already filter are a
+    # symptom) and can wedge the whole tunnel under a "UDP storm". 30s reaps
+    # idle flows ~2x sooner. ACTIVE flows keep receiving packets, so they're
+    # never idle -> never reaped -> live Telegram calls/QUIC are unaffected.
+    UDP_TIMEOUT = "30s"
+
     def __init__(self, on_log: Optional[LogSink] = None, log_buffer: int = 500):
         self._proc: Optional[subprocess.Popen] = None
         self._reader: Optional[threading.Thread] = None
@@ -107,6 +116,8 @@ class Tun2socksProcess:
             "-tcp-auto-tuning",
             "-tcp-sndbuf", self.TCP_SNDBUF,
             "-tcp-rcvbuf", self.TCP_RCVBUF,
+            # --- UDP-storm soft guard (v2.0.1) ---
+            "-udp-timeout", self.UDP_TIMEOUT,
         ]
 
     def start(self, socks_addr: str = "127.0.0.1:2081",

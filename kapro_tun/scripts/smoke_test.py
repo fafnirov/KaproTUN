@@ -2664,7 +2664,7 @@ def _hy_auto_measures_when_empty() -> None:
             st.measure_link_speed, ctrl.storage.save_settings)
     ctrl.hysteria_installer.ensure_installed = lambda *a, **k: None
     ctrl.hysteria_process.write_client_config = _fake_write
-    st.measure_link_speed = lambda *a, **k: (88, 22)
+    st.measure_link_speed = lambda *a, **k: (100, 20)
     ctrl.storage.save_settings = lambda s: None
     try:
         mgr._maybe_start_hysteria(cfg)
@@ -2672,14 +2672,84 @@ def _hy_auto_measures_when_empty() -> None:
         (ctrl.hysteria_installer.ensure_installed,
          ctrl.hysteria_process.write_client_config,
          st.measure_link_speed, ctrl.storage.save_settings) = orig
-    if captured.get("down") != 88 or captured.get("up") != 22:
-        raise AssertionError(f"measured bw must reach the hy config: {captured}")
-    if mgr.settings.get("hysteria_down_mbps") != 88:
-        raise AssertionError("measured bw must be cached in settings")
+    # v2.0.1: auto-measured speed gets a SAFE CAP before brutal CC
+    # (down *0.75, up *0.50) so a bursty app (Telegram) can't saturate the
+    # uplink and stall the whole tunnel. 100/20 measured -> 75/10 applied.
+    if captured.get("down") != 75 or captured.get("up") != 10:
+        raise AssertionError(f"auto bw must be capped 100/20 -> 75/10: {captured}")
+    if mgr.settings.get("hysteria_down_mbps") != 75 or mgr.settings.get("hysteria_up_mbps") != 10:
+        raise AssertionError(f"capped bw must be cached: {mgr.settings.get('hysteria_down_mbps')}/{mgr.settings.get('hysteria_up_mbps')}")
+
+
+def _hy_auto_bandwidth_margin() -> None:
+    # v2.0.1: safe cap on AUTO-measured bandwidth (down*0.75, up*0.50). A
+    # failed measurement (0) passes through as 0 (-> BBR); a tiny positive
+    # value floors at 1 so a valid measurement never collapses to "BBR".
+    from kapro_tun.core import hysteria_process as _hp
+    if _hp.apply_auto_bandwidth_margin(100, 20) != (75, 10):
+        raise AssertionError(f"100/20 -> {_hp.apply_auto_bandwidth_margin(100, 20)}, want (75,10)")
+    if _hp.apply_auto_bandwidth_margin(0, 0) != (0, 0):
+        raise AssertionError("0/0 must pass through (BBR fallback)")
+    if _hp.apply_auto_bandwidth_margin(1, 1) != (1, 1):
+        raise AssertionError("positive measurement must floor at 1, not collapse to 0")
+    if not (_hp.AUTO_BW_DOWN_FACTOR > _hp.AUTO_BW_UP_FACTOR):
+        raise AssertionError("uplink must be capped harder than downlink")
+
+
+def _geoip_ru_gated_on_route_ru_direct() -> None:
+    # v2.0.1: the TUN geoip:ru kernel bypass must fire ONLY when
+    # route_ru_direct is on — a forced RU split otherwise destabilises
+    # Telegram/CDN. Test the extracted gate with fakes (no real TUN / admin).
+    from kapro_tun.core import controller as ctrl, geoip_ru as geo
+
+    class _FakeSession:
+        def __init__(self): self.cidr_calls = 0
+        def add_bypass_cidrs(self, *a, **k):
+            self.cidr_calls += 1
+            return (0, 0)
+
+    class _FakeReal:
+        gateway = "192.168.1.1"
+        index = 17
+
+    class _FakeSelf:
+        def __init__(self, ru): self.settings = {"route_ru_direct": ru}
+        def _log(self, *_a): pass
+
+    load_calls = {"n": 0}
+    orig = geo.load_cidrs
+    geo.load_cidrs = lambda: (load_calls.__setitem__("n", load_calls["n"] + 1)
+                              or [("1.2.3.0", "255.255.255.0")])
+    try:
+        s_off = _FakeSession()
+        ctrl.ConnectionManager._install_geoip_ru_bypass(_FakeSelf(False), s_off, _FakeReal(), 26)
+        if load_calls["n"] != 0 or s_off.cidr_calls != 0:
+            raise AssertionError(f"OFF must not load/add RU cidrs: load={load_calls['n']} add={s_off.cidr_calls}")
+        s_on = _FakeSession()
+        ctrl.ConnectionManager._install_geoip_ru_bypass(_FakeSelf(True), s_on, _FakeReal(), 26)
+        if load_calls["n"] != 1 or s_on.cidr_calls != 1:
+            raise AssertionError(f"ON must load+add RU cidrs: load={load_calls['n']} add={s_on.cidr_calls}")
+    finally:
+        geo.load_cidrs = orig
+
+
+def _tun2socks_udp_timeout_arg() -> None:
+    # v2.0.1: explicit -udp-timeout so idle UDP sessions are reaped under a
+    # Telegram/UDP storm instead of piling up in the netstack.
+    from kapro_tun.core.tun2socks_process import Tun2socksProcess
+    args = Tun2socksProcess()._build_args("tun2socks", "127.0.0.1:2081", 1500, "warn")
+    if "-udp-timeout" not in args:
+        raise AssertionError("tun2socks args must include -udp-timeout")
+    val = args[args.index("-udp-timeout") + 1]
+    if not val.endswith("s"):
+        raise AssertionError(f"-udp-timeout should be a duration like '30s', got {val!r}")
 
 
 check("speed_test: probe math + never-raises", _speed_test_surface)
 check("hysteria: auto-measures link speed when empty", _hy_auto_measures_when_empty)
+check("hysteria: auto-bandwidth safe cap (down*0.75/up*0.50)", _hy_auto_bandwidth_margin)
+check("controller: geoip:ru TUN bypass gated on route_ru_direct", _geoip_ru_gated_on_route_ru_direct)
+check("tun2socks: -udp-timeout reaps idle UDP (storm guard)", _tun2socks_udp_timeout_arg)
 
 
 # ---------------------------------------------------------------------------

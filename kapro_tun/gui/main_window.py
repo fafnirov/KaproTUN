@@ -672,7 +672,11 @@ class SettingsPage(QWidget):
         ru_direct_hint = QLabel(
             "Весь трафик к российским IP (geoip:ru) идёт мимо VPN, а не "
             "только домены из встроенного списка. Полезно для банков, "
-            "госуслуг и маркетплейсов, которые блокируют заграничные IP. "
+            "госуслуг и маркетплейсов, которые блокируют заграничные IP.\n"
+            "⚠️ Это широкий обход для ВСЕХ российских IP — может задеть "
+            "приложения и CDN, у которых часть серверов в РФ (например, "
+            "Telegram): их трафик пойдёт частью мимо VPN, частью через. Если "
+            "что-то начинает глючить/виснуть — выключи. "
             "Применяется при следующем подключении."
         )
         ru_direct_hint.setObjectName("dim")
@@ -695,6 +699,16 @@ class SettingsPage(QWidget):
         self.hy_auto_check.setChecked(bool(manager.settings.get("hysteria_auto_bandwidth", True)))
         self.hy_auto_check.toggled.connect(self._on_hy_auto_changed)
         outer.addWidget(self.hy_auto_check)
+        hy_auto_hint = QLabel(
+            "В авто-режиме применяется безопасный запас: берётся ≈75% от "
+            "замеренной загрузки и ≈50% от отдачи, чтобы Hysteria2 не забивал "
+            "канал и не ронял соединение под нагрузкой (Telegram, торренты). "
+            "Ручной ввод (галка снята) используется как есть, без запаса."
+        )
+        hy_auto_hint.setObjectName("dim")
+        hy_auto_hint.setWordWrap(True)
+        hy_auto_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(hy_auto_hint)
 
         hy_row = QHBoxLayout()
         hy_row.addWidget(QLabel("Загрузка:"))
@@ -1325,6 +1339,12 @@ class MainWindow(QMainWindow):
         self._minute_window_start = 0
         self._update_worker: Optional[_UpdateCheckWorker] = None
         self._crash_notified = False  # avoid spamming the same kill-switch toast
+        # v2.0.1: one-shot flags so a SILENT helper-process death (tun2socks
+        # engine / hysteria transport dies while xray itself stays alive ->
+        # "connected but no internet") is logged once, not every poll tick.
+        # Cleared when the session goes idle so the next connect reports fresh.
+        self._tun_death_notified = False
+        self._hy_death_notified = False
         # Auto-reconnect state: when xray dies without us asking, we try
         # to bring it back up to MAX times with exponential backoff. Reset
         # on successful connect, on user-initiated disconnect, or after
@@ -1570,6 +1590,41 @@ class MainWindow(QMainWindow):
         self._tray_pinger.finished.connect(on_finished)
         self._tray_pinger.start()
 
+    def _diagnose_component_death(self) -> None:
+        """Log (once each) when a helper process that should be alive has
+        exited while we still consider ourselves connected — the "VPN отмер"
+        case where xray is up but no traffic flows. returncode() is None until
+        a process has actually run, so `not is_running() and returncode() is
+        not None` distinguishes "ran then died" from "never started this mode".
+        """
+        m = self.manager
+        tun = m.tun_process
+        if (not self._tun_death_notified
+                and not tun.is_running() and tun.returncode() is not None):
+            self._tun_death_notified = True
+            tail = " | ".join(tun.recent_logs()[-4:])
+            self.logs_page.append(
+                f"[!] tun2socks (TUN-движок) завершился (код {tun.returncode()}) — "
+                f"туннель в TUN-режиме сломан, переподключись."
+                + (f" Лог: {tail}" if tail else "")
+            )
+        hy = m.hysteria_process
+        if (not self._hy_death_notified
+                and not hy.is_running() and hy.returncode() is not None):
+            self._hy_death_notified = True
+            tail = " | ".join(hy.recent_logs()[-4:])
+            msg = (f"[!] hysteria-транспорт завершился (код {hy.returncode()}) — "
+                   f"Hysteria2-туннель сломан, переподключись.")
+            # Saturation suspicion: hy2 + auto-bandwidth + brutal CC active
+            # (a measured up-rate is set) is the classic "Telegram saturates
+            # the uplink -> tunnel dies" shape. Point the user at it.
+            if (bool(m.settings.get("hysteria_auto_bandwidth", True))
+                    and int(m.settings.get("hysteria_up_mbps", 0) or 0) > 0):
+                msg += (" Возможная причина — перегрузка канала (Telegram/торрент) "
+                        "при включённом brutal CC; попробуй снизить нагрузку или "
+                        "снять галку «Авто-замер скорости».")
+            self.logs_page.append(msg + (f" Лог: {tail}" if tail else ""))
+
     def _refresh_home(self) -> None:
         # Don't fight the connect worker for the button state — the
         # "connecting" pulse keeps animating until the worker finishes
@@ -1652,6 +1707,14 @@ class MainWindow(QMainWindow):
             # immediately giving up.
             if self.manager.is_connected() and self._reconnect_attempts > 0:
                 self._reconnect_attempts = 0
+            # xray is up — but the tunnel can still be dead if a HELPER process
+            # silently exited. Diagnose that once. When fully idle (no active
+            # config) clear the one-shot flags so the next session reports anew.
+            if self.manager._active is not None:
+                self._diagnose_component_death()
+            else:
+                self._tun_death_notified = False
+                self._hy_death_notified = False
 
         active_name = self._active_config.name if self._active_config else ""
         if self.manager.is_connected():

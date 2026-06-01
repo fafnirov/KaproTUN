@@ -30,6 +30,36 @@ LogSink = Callable[[str], None]
 # Picked clear of xray's 2080 (http-in) / 2081 (socks-in) and the stats API.
 HYSTERIA_SOCKS_PORT = 2089
 
+# Safety margins applied to AUTO-MEASURED link speed before it is handed to
+# Hysteria2's "brutal" congestion control. brutal sends at a FIXED rate
+# regardless of loss/queueing, so feeding it the full measured speed means a
+# bursty app (Telegram media auto-download, a torrent) plus brutal's own
+# pacing oversubscribe the link -> bufferbloat -> latency-sensitive flows
+# (DNS, the browser) stall — which users experience as "the whole VPN died".
+# Under-claiming keeps headroom. The uplink is the dangerous one: it's smaller
+# and a saturated uplink starves ACKs for EVERY flow, so we cap it harder.
+#   download: 75% of measured
+#   upload:   50% of measured
+# Applied ONLY to auto-measured values; a manual setting is used verbatim
+# (the user opted into exact numbers).
+AUTO_BW_DOWN_FACTOR = 0.75
+AUTO_BW_UP_FACTOR = 0.50
+
+
+def apply_auto_bandwidth_margin(down_mbps: int, up_mbps: int) -> tuple[int, int]:
+    """Scale an AUTO-measured (down, up) link speed down to a safe brutal-CC
+    rate via AUTO_BW_*_FACTOR.
+
+    A positive measurement never collapses to 0 (0 means "fall back to BBR") —
+    it floors at 1 Mbps. A zero/negative input (measurement failed) passes
+    through as 0 so the caller still falls back to BBR. Pure + testable.
+    """
+    def _cap(value: int, factor: float) -> int:
+        if value <= 0:
+            return 0
+        return max(1, int(value * factor))
+    return _cap(int(down_mbps), AUTO_BW_DOWN_FACTOR), _cap(int(up_mbps), AUTO_BW_UP_FACTOR)
+
 
 def build_client_config(outbound: dict[str, Any],
                         socks_port: int = HYSTERIA_SOCKS_PORT,

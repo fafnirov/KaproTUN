@@ -176,9 +176,17 @@ class ConnectionManager:
                 except Exception:
                     m_down, m_up = 0, 0
             if m_down > 0 and m_up > 0:
-                down, up = m_down, m_up
+                # Auto-measured -> apply a safety cap before brutal CC. Feeding
+                # the FULL measured rate makes a bursty app (Telegram media, a
+                # torrent) oversubscribe the link — especially the uplink — and
+                # bufferbloat stalls everything. The cap keeps headroom. Manual
+                # values (auto off) skip this and are used verbatim.
+                down, up = hysteria_process.apply_auto_bandwidth_margin(m_down, m_up)
                 self.update_settings(hysteria_down_mbps=down, hysteria_up_mbps=up)
-                self._log(f"[*] Замерено: ↓{down} / ↑{up} Мбит/с — включаю brutal CC")
+                self._log(
+                    f"[*] Замерено: ↓{m_down} / ↑{m_up} Мбит/с; "
+                    f"безопасный кап → ↓{down} / ↑{up} Мбит/с — включаю brutal CC"
+                )
             else:
                 self._log("[!] Не удалось замерить скорость — Hysteria2 на авто (BBR)")
         try:
@@ -217,6 +225,35 @@ class ConnectionManager:
             f"hysteria-клиент не поднял локальный SOCKS-порт за 8 с "
             f"({attempts} попытки). Лог: {last_tail or '(пусто)'}"
         )
+
+    def _install_geoip_ru_bypass(self, session, real, bypass_metric: int) -> None:
+        """Pin kernel bypass routes for the whole geoip:ru IP space so RU
+        traffic skips the TUN — but ONLY when the user enabled
+        `route_ru_direct`.
+
+        When it's OFF we touch ru_cidrs not at all: the user wants RU traffic
+        to go THROUGH the VPN like everything else, and installing the bypass
+        anyway would silently route the entire RU IP space around the tunnel.
+        A partial direct/tunnel split across thousands of RU CIDRs is exactly
+        what destabilises apps/CDNs with RU-hosted endpoints (Telegram), so the
+        default-off behaviour matters. Cached list lives in
+        %LOCALAPPDATA%\\KaproTUN\\geoip-ru.txt (main_window triggers download).
+        Extracted from _connect_tun so the gate is testable without a real TUN.
+        """
+        if not bool(self.settings.get("route_ru_direct", False)):
+            self._log("[*] geoip:ru-direct выключен — весь RU-трафик идёт через VPN")
+            return
+        ru_cidrs = geoip_ru.load_cidrs()
+        if not ru_cidrs:
+            self._log("[!] CIDR-список не закеширован — прямые RU-сайты с динамическими IP могут не работать")
+            return
+        self._log(f"[*] Добавляю {len(ru_cidrs)} CIDR'ов из geoip:ru…")
+        t0 = time.time()
+        added, adopted = session.add_bypass_cidrs(
+            ru_cidrs, real.gateway, real.index, metric=bypass_metric)
+        self._log(f"[*] geoip:ru за {time.time()-t0:.1f}с: {added} новых"
+                  + (f", {adopted} уже было (подхвачены для очистки)" if adopted else "")
+                  + " — локальный IP-блок идёт мимо TUN")
 
     def disconnect(self) -> None:
         # Order matters: stop TUN routing first so traffic stops hitting the
@@ -572,31 +609,11 @@ class ConnectionManager:
                 self._log(f"[*] Bypass-роуты для direct-доменов: {added} новых"
                           + (f", {adopted} уже было (подхвачены)" if adopted else ""))
 
-            # geoip:ru — bypass the entire Russian IP space so any RU-hosted
-            # resource (CDN sub-domains we didn't pre-resolve, third-party
-            # widgets, statics, even minor sites) skips the tunnel.
-            # Cached list lives in %LOCALAPPDATA%\KaproTUN\geoip-ru.txt;
-            # main_window's connect path triggers download if missing.
-            #
-            # GATED on the user's `route_ru_direct` choice (the same flag the
-            # xray routing layer uses for geoip:ru -> direct). When it's OFF
-            # the user wants RU traffic to go THROUGH the VPN like everything
-            # else — installing the kernel bypass anyway would silently route
-            # the whole RU IP space around the tunnel. The curated
-            # direct-domain routes above are independent and always applied.
-            if bool(self.settings.get("route_ru_direct", False)):
-                ru_cidrs = geoip_ru.load_cidrs()
-                if ru_cidrs:
-                    self._log(f"[*] Добавляю {len(ru_cidrs)} CIDR'ов из geoip:ru…")
-                    t0 = time.time()
-                    added, adopted = session.add_bypass_cidrs(ru_cidrs, real.gateway, real.index, metric=bypass_metric)
-                    self._log(f"[*] geoip:ru за {time.time()-t0:.1f}с: {added} новых"
-                              + (f", {adopted} уже было (подхвачены для очистки)" if adopted else "")
-                              + " — локальный IP-блок идёт мимо TUN")
-                else:
-                    self._log("[!] CIDR-список не закеширован — прямые RU-сайты с динамическими IP могут не работать")
-            else:
-                self._log("[*] geoip:ru-direct выключен — весь RU-трафик идёт через VPN")
+            # geoip:ru kernel bypass — gated on route_ru_direct. Extracted to
+            # _install_geoip_ru_bypass so the gating is unit-testable without a
+            # live TUN session. The curated direct-domain routes above are
+            # independent and always applied.
+            self._install_geoip_ru_bypass(session, real, bypass_metric)
         except Exception:
             session.restore()
             self.tun_process.stop()
