@@ -59,6 +59,17 @@ def _reject_if_declared_too_big(resp, max_bytes: int, url: str) -> None:
             f"(лимит {_human(max_bytes)}). Скачивание отклонено. [{url}]")
 
 
+def _content_length(resp) -> int:
+    """Declared body size for the progress callback, or 0 when the server
+    omits OR lies about it (a non-numeric Content-Length like 'abc' must NOT
+    crash the download — it's just treated as 'unknown total', and the hard
+    cap in _guard_running_total still protects us during streaming)."""
+    try:
+        return int(resp.headers.get("Content-Length"))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _guard_running_total(downloaded: int, max_bytes: int, url: str) -> None:
     if downloaded > max_bytes:
         raise DownloadTooLarge(
@@ -74,7 +85,7 @@ def download_to_memory(url: str, max_bytes: int, progress: ProgressCb = None,
     with requests.get(url, stream=True, timeout=timeout, proxies=_NO_PROXY) as r:
         r.raise_for_status()
         _reject_if_declared_too_big(r, max_bytes, url)
-        total = int(r.headers.get("Content-Length", 0) or 0)
+        total = _content_length(r)
         sink = io.BytesIO()
         downloaded = 0
         for chunk in r.iter_content(chunk_size=64 * 1024):
@@ -98,7 +109,7 @@ def download_to_file(url: str, dest: Path, max_bytes: int,
         with requests.get(url, stream=True, timeout=timeout, proxies=_NO_PROXY) as r:
             r.raise_for_status()
             _reject_if_declared_too_big(r, max_bytes, url)
-            total = int(r.headers.get("Content-Length", 0) or 0)
+            total = _content_length(r)
             downloaded = 0
             with open(tmp, "wb") as f:
                 for chunk in r.iter_content(chunk_size=256 * 1024):

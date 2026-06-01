@@ -39,7 +39,7 @@ WINTUN_DLL_IN_ZIP = "wintun/bin/amd64/wintun.dll"
 # Our own mirror — same setup as xray_installer. See server-setup/
 # for nginx + sync-binaries.sh. Mirror is tried FIRST, upstream is
 # the fallback when our server is down or doesn't have a file yet.
-KAPROTUN_MIRROR_BASE = "https://files.kaprovpn.pro"
+KAPROTUN_MIRROR_BASE = "https://kaprovpn.pro/files"
 
 # Bypass system proxy on our own downloads — see xray_installer for full
 # story. TL;DR: a stale 127.0.0.1:2080 registry entry from a crashed

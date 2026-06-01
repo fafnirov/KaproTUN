@@ -87,6 +87,16 @@ def get_default_route_v4() -> Optional[InterfaceInfo]:
     return _linux_default_route()
 
 
+def find_egress_to(remote_ip: str) -> Optional[InterfaceInfo]:
+    """API-compat shim for the Windows network_routes.find_egress_to (which
+    binds the egress to the actual route to the VPN server). The controller's
+    TUN path calls this cross-platform; on Unix we don't yet do per-server
+    route binding, so delegate to the default-route picker. `remote_ip` is
+    accepted for signature parity (currently unused) so a future Unix
+    implementation can refine it without touching callers."""
+    return get_default_route_v4()
+
+
 def _linux_default_route() -> Optional[InterfaceInfo]:
     """Parse `ip route show default`. Output example:
         default via 192.168.1.1 dev wlan0 proto dhcp metric 600

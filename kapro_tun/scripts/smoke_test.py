@@ -667,6 +667,76 @@ check("egress: reject non-IPv4 remote before shelling out",
       _egress_injection_and_garbage_guard)
 
 
+# v2.1.2 — three robustness/cross-platform fixes.
+def _unix_find_egress_api_compat() -> None:
+    """P1: controller calls network_routes.find_egress_to() cross-platform —
+    the Unix module must expose it (it didn't → AttributeError on Linux/macOS).
+    Importable + callable + never raises on every OS."""
+    from kapro_tun.core import network_routes_unix as nru
+    if not hasattr(nru, "find_egress_to"):
+        raise AssertionError("network_routes_unix.find_egress_to missing (Unix TUN AttributeError)")
+    res = nru.find_egress_to("77.239.122.15")  # must not raise
+    if res is not None and not hasattr(res, "gateway"):
+        raise AssertionError("find_egress_to must return None or an InterfaceInfo")
+
+
+def _net_download_bad_content_length() -> None:
+    """P2: a non-numeric Content-Length ('abc') must NOT crash the download —
+    treated as unknown total (0); streaming + hard cap still work."""
+    import tempfile, shutil
+    from pathlib import Path
+    from kapro_tun.core import net_download as nd
+    import requests as _rq
+
+    class _FakeResp:
+        def __init__(self, headers, chunks):
+            self.headers = headers
+            self._chunks = chunks
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size=0):
+            for c in self._chunks:
+                yield c
+
+    orig = _rq.get
+    _rq.get = lambda *a, **k: _FakeResp({"Content-Length": "abc"}, [b"hello", b"world"])
+    try:
+        data = nd.download_to_memory("http://x/f.bin", max_bytes=10_000)
+        if data != b"helloworld":
+            raise AssertionError(f"download_to_memory body wrong: {data!r}")
+        seen = []
+        nd.download_to_memory("http://x/f.bin", max_bytes=10_000,
+                              progress=lambda d, t: seen.append(t))
+        if seen and seen[-1] != 0:
+            raise AssertionError(f"non-numeric Content-Length must map to total=0, got {seen}")
+        tmp = Path(tempfile.mkdtemp(prefix="kt-nd-"))
+        try:
+            p = nd.download_to_file("http://x/f.bin", tmp / "out.bin", max_bytes=10_000)
+            if p.read_bytes() != b"helloworld":
+                raise AssertionError("download_to_file body wrong on non-numeric Content-Length")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    finally:
+        _rq.get = orig
+
+
+def _tun2socks_mirror_url_host() -> None:
+    """P2: tun2socks mirror must use the same working host as the rest of the
+    project (kaprovpn.pro/files), not the dead files.kaprovpn.pro subdomain."""
+    from kapro_tun.core import tun2socks_installer as ti
+    if ti.KAPROTUN_MIRROR_BASE != "https://kaprovpn.pro/files":
+        raise AssertionError(f"tun2socks mirror base wrong: {ti.KAPROTUN_MIRROR_BASE!r}")
+    url = ti._mirror_url("tun2socks-windows-amd64.zip")
+    if not url.startswith("https://kaprovpn.pro/files/") or "files.kaprovpn.pro" in url:
+        raise AssertionError(f"tun2socks mirror URL wrong: {url!r}")
+
+
+check("unix: network_routes_unix.find_egress_to exists + safe", _unix_find_egress_api_compat)
+check("net_download: non-numeric Content-Length doesn't crash", _net_download_bad_content_length)
+check("tun2socks: mirror URL uses kaprovpn.pro/files", _tun2socks_mirror_url_host)
+
+
 # v1.21.1: benign broadcast/multicast UDP relay failures (Steam :27036,
 # SSDP, mDNS → WSAENOBUFS) are filtered from the user's live Logs page;
 # real lines pass through untouched.

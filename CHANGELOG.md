@@ -17,6 +17,21 @@ Windows). Android-клиент живёт в отдельном репозито
 
 # Desktop (Windows + Python)
 
+## v2.1.2 — Три точечных фикса: Unix-TUN, битый Content-Length, зеркало tun2socks
+
+- **Unix-регрессия TUN.** Контроллер вызывает `network_routes.find_egress_to()`
+  кроссплатформенно, но в `network_routes_unix` этой функции не было →
+  `AttributeError` при TUN на Linux/macOS. Добавлен совместимый
+  `find_egress_to(remote_ip)` (делегирует на `get_default_route_v4()`).
+- **Битый `Content-Length` ронял загрузчик.** В `net_download` строка
+  `int(Content-Length)` падала на нечисловом заголовке (например `"abc"`).
+  Теперь такой total трактуется как «неизвестно» (0), стрим продолжается, а
+  жёсткий лимит размера по-прежнему защищает.
+- **Зеркало tun2socks указывало не туда.** База была `https://files.kaprovpn.pro`
+  (несуществующий поддомен, NXDOMAIN), а остальной проект — `https://kaprovpn.pro/files`.
+  Приведено к единому рабочему адресу, так что mirror-first для tun2socks
+  реально работает (важно для РФ при блокировке GitHub).
+
 ## v2.1.1 — Фикс TUN на Ethernet/мульти-NIC: «подключено, но трафика нет»
 
 В TUN-режиме на Ethernet (особенно с несколькими адаптерами) клиент мог
