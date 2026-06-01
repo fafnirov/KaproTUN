@@ -978,7 +978,11 @@ def _window_fixed_and_handleless_by_default() -> None:
     from kapro_tun.gui import main_window as _mw
     from kapro_tun.core import storage as _st
     orig_load = _st.load_settings
-    _st.load_settings = lambda: {**_st.DEFAULT_SETTINGS, "allow_window_resize": False}
+    # Pin the standard preset so the assertion is deterministic regardless of
+    # the test machine's screen height (auto would pick compact on short ones).
+    _st.load_settings = lambda: {**_st.DEFAULT_SETTINGS,
+                                 "allow_window_resize": False,
+                                 "window_size_preset": "standard"}
     try:
         w = _mw.MainWindow()
     finally:
@@ -1020,6 +1024,149 @@ def _titlebar_drag_intact() -> None:
 check("window: resize gate defaults off (fixed window)", _window_resize_gate_default_off)
 check("window: fixed-size + no handles by default", _window_fixed_and_handleless_by_default)
 check("window: titlebar drag handlers + controls intact", _titlebar_drag_intact)
+
+
+# v2.1.0 — UI/UX pack: unified state model, typography tokens, readable graph,
+# fixed-width traffic legend, standard/compact window presets.
+def _connection_state_model() -> None:
+    from kapro_tun.gui import connection_state as cs
+    if len(cs.ALL_STATES) != 6:
+        raise AssertionError("expected six canonical states")
+    for s in cs.ALL_STATES:
+        sp = cs.spec(s)
+        if sp.state != s:
+            raise AssertionError(f"spec({s}).state mismatch")
+        if sp.circle_state not in ("idle", "connecting", "connected"):
+            raise AssertionError(f"{s}: circle_state must be a button visual state")
+        if sp.accent not in ("ACCENT", "TEXT_MUTED", "DANGER", "SUCCESS"):
+            raise AssertionError(f"{s}: accent must be a palette field name")
+        if not sp.label or not sp.glyph:
+            raise AssertionError(f"{s}: needs a label + indicator glyph")
+    if cs.normalize("idle") != cs.DISCONNECTED:
+        raise AssertionError("legacy 'idle' must map to disconnected")
+    if cs.normalize("garbage") != cs.DISCONNECTED:
+        raise AssertionError("unknown state must fall back to disconnected")
+    if not (cs.spec(cs.ERROR).is_error and cs.spec(cs.KILLSWITCH_ACTIVE).is_error):
+        raise AssertionError("error + killswitch must be flagged is_error")
+    if cs.spec(cs.CONNECTED).is_error:
+        raise AssertionError("connected must not be is_error")
+    # Every accent the spec references must resolve on the styles module
+    # (StatusLabel does getattr(styles, accent)).
+    from kapro_tun.gui import styles as _sty
+    for s in cs.ALL_STATES:
+        if not hasattr(_sty, cs.spec(s).accent):
+            raise AssertionError(f"styles missing accent {cs.spec(s).accent}")
+
+
+def _typography_tokens_in_qss() -> None:
+    from kapro_tun.gui import styles
+    for tok in ("#title", "#section", "#body", "#secondary", "#caption",
+                "#graphDown", "#graphUp", "#graphValue"):
+        if f"QLabel{tok}" not in styles.DARK_QSS or f"QLabel{tok}" not in styles.LIGHT_QSS:
+            raise AssertionError(f"typography token {tok} missing from QSS")
+    if "letter-spacing: 0" not in styles.DARK_QSS:
+        raise AssertionError("typography tokens must set letter-spacing: 0")
+
+
+def _traffic_legend_fixed_width() -> None:
+    import os as _o
+    _o.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_tun.gui.widgets import TrafficLegend
+    leg = TrafficLegend()
+    w0 = leg.down_value.minimumWidth()
+    leg.set_values(9.9 * 1024, 38.1 * 1024, 1, 2)
+    a = leg.down_value.minimumWidth()
+    leg.set_values(1.2 * 1024 * 1024, 999.9 * 1024, 10 ** 9, 10 ** 9)
+    b = leg.down_value.minimumWidth()
+    if not (w0 == a == b and w0 >= 80):
+        raise AssertionError(f"value labels must keep a fixed min width, got {w0}/{a}/{b}")
+    leg.deleteLater()
+
+
+def _sparkline_scale_hysteresis() -> None:
+    import os as _o
+    _o.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_tun.gui.sparkline import TrafficSparkline
+    sp = TrafficSparkline()
+    base = sp._scale
+    sp.add_sample(0, 5_000_000)  # one big burst must NOT snap the scale
+    if sp._scale >= 5_000_000 * 0.9:
+        raise AssertionError("scale should EASE toward a burst, not snap")
+    if sp._scale <= base:
+        raise AssertionError("scale should grow toward the burst")
+    for _ in range(25):
+        sp.add_sample(0, 5_000_000)
+    if sp._scale <= 5_000_000 * 0.5:
+        raise AssertionError("a sustained burst should raise the scale")
+    sp.deleteLater()
+
+
+def _teardown_window(w) -> None:
+    for a in ("_poll", "_sub_autorefresh"):
+        o = getattr(w, a, None)
+        if o is not None and hasattr(o, "stop"):
+            try: o.stop()
+            except Exception: pass
+    t = getattr(w, "tray", None)
+    if t is not None and hasattr(t, "hide"):
+        try: t.hide()
+        except Exception: pass
+    w.close()
+    w.deleteLater()
+
+
+def _window_presets() -> None:
+    import os as _o
+    _o.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_tun.gui import main_window as _mw
+    from kapro_tun.core import storage as _st
+    orig = _st.load_settings
+
+    def build(preset):
+        _st.load_settings = lambda: {**_st.DEFAULT_SETTINGS, "window_size_preset": preset}
+        try:
+            return _mw.MainWindow()
+        finally:
+            _st.load_settings = orig
+
+    std = build("standard")
+    try:
+        if (std.width(), std.height()) != (480, 870):
+            raise AssertionError(f"standard must be 480x870, got {std.width()}x{std.height()}")
+        if std._compact_preset:
+            raise AssertionError("standard must not be compact")
+    finally:
+        _teardown_window(std)
+
+    comp = build("compact")
+    try:
+        if (comp.width(), comp.height()) != (460, 720):
+            raise AssertionError(f"compact must be 460x720, got {comp.width()}x{comp.height()}")
+        if not comp._compact_preset:
+            raise AssertionError("compact preset flag must be set")
+        if comp.home_page.circle.property("compact") != "true":
+            raise AssertionError("compact hero circle must carry compact=true")
+        for b in ("btn_home", "btn_stats", "btn_settings", "btn_add"):
+            if not hasattr(comp.nav, b):
+                raise AssertionError(f"compact nav missing {b} (navigation must not break)")
+    finally:
+        _teardown_window(comp)
+
+
+check("ui: connection-state model (6 states, normalize, accents)", _connection_state_model)
+check("ui: typography tokens present + letter-spacing 0", _typography_tokens_in_qss)
+check("ui: traffic legend keeps fixed-width values (no jitter)", _traffic_legend_fixed_width)
+check("ui: sparkline Y-scale eases (hysteresis, no snap)", _sparkline_scale_hysteresis)
+check("ui: window presets standard 480x870 / compact 460x720", _window_presets)
 
 
 # ---------------------------------------------------------------------------

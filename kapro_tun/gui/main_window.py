@@ -58,7 +58,8 @@ from .sparkline import TrafficSparkline
 from .titlebar import TitleBar
 from .toast import show_toast
 from .tray import TrayManager
-from .widgets import CircleConnectButton, ConfigCard, NavBar, StatusLabel
+from .widgets import CircleConnectButton, ConfigCard, NavBar, StatusLabel, TrafficLegend
+from . import connection_state
 
 
 # ----- Pages ---------------------------------------------------------------
@@ -69,16 +70,23 @@ class HomePage(QWidget):
     connect_clicked = Signal()
     card_clicked = Signal()
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, compact: bool = False):
         super().__init__(parent)
         self.setObjectName("page")
+        self._compact = compact
+        # Compact preset (low-height screens): tighter vertical rhythm + a
+        # smaller hero circle / graph. Every key action stays reachable.
+        pad_v = 10 if compact else 16
+        self._gap_circle = 14 if compact else 28
+        self._gap_map = 8 if compact else 14
+        self._gap_bottom = 12 if compact else 24
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 16, 24, 16)
+        layout.setContentsMargins(24, pad_v, 24, pad_v)
         layout.setSpacing(0)
 
         # Title
         title = QLabel("KaproTUN")
-        title.setObjectName("h1")
+        title.setObjectName("title")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
@@ -86,16 +94,14 @@ class HomePage(QWidget):
 
         # Connect button — centered with surrounding stretchers
         self.circle = CircleConnectButton()
+        self.circle.set_compact(compact)
         self.circle.clicked.connect(self.connect_clicked)
         circle_row = QHBoxLayout()
         circle_row.addStretch(1)
         circle_row.addWidget(self.circle)
         circle_row.addStretch(1)
         layout.addLayout(circle_row)
-        # v1.14.5: 20 → 28 — gives more breathing room between the
-        # connect button's halo and the status text so the map+IP
-        # block sits visually lower, as the user requested.
-        layout.addSpacing(28)
+        layout.addSpacing(self._gap_circle)
 
         self.status_label = StatusLabel()
         layout.addWidget(self.status_label)
@@ -107,7 +113,7 @@ class HomePage(QWidget):
         self.public_ip_label = QLabel("")
         self.public_ip_label.setAlignment(Qt.AlignCenter)
         self.public_ip_label.setTextFormat(Qt.RichText)
-        self.public_ip_label.setObjectName("dim")
+        self.public_ip_label.setObjectName("secondary")
         self.public_ip_label.setVisible(False)
         layout.addSpacing(2)
         layout.addWidget(self.public_ip_label)
@@ -126,21 +132,22 @@ class HomePage(QWidget):
         map_row.addStretch(1)
         map_row.addWidget(self.world_map)
         map_row.addStretch(1)
-        layout.addSpacing(14)
+        layout.addSpacing(self._gap_map)
         layout.addLayout(map_row)
         layout.addSpacing(8)
 
-        # Traffic stats — only visible while connected. RichText so we can
-        # tint the two values without nested widgets.
-        self.traffic_label = QLabel("")
-        self.traffic_label.setAlignment(Qt.AlignCenter)
-        self.traffic_label.setTextFormat(Qt.RichText)
+        # Live traffic legend — colour-matched ↑/↓ rates (doubles as the
+        # sparkline legend) with fixed-width values so the numbers don't shift
+        # the layout, plus a session-total caption. Visible only while connected.
+        self.traffic = TrafficLegend()
+        self.traffic.setVisible(False)
         layout.addSpacing(6)
-        layout.addWidget(self.traffic_label)
+        layout.addWidget(self.traffic)
 
-        # Sparkline graph — 1-minute history of bandwidth, shown under the
-        # numbers when connected. Hidden when idle.
+        # Sparkline — 1-minute bandwidth history, shown under the numbers when
+        # connected. Hidden when idle.
         self.sparkline = TrafficSparkline()
+        self.sparkline.set_compact(compact)
         self.sparkline.setVisible(False)
         layout.addSpacing(4)
         layout.addWidget(self.sparkline)
@@ -155,7 +162,7 @@ class HomePage(QWidget):
         # top stretch (line 83) between the title and the connect
         # circle — pushes the circle down to vertical centre and the
         # status/IP/map block hugs the "Прямые сайты" line below.
-        layout.addSpacing(24)
+        layout.addSpacing(self._gap_bottom)
 
         # Info row about split routing
         self._info_label = QLabel()
@@ -173,8 +180,9 @@ class HomePage(QWidget):
     def set_state(self, state: str, detail: str = "") -> None:
         self.circle.set_state(state)
         self.status_label.set_state(state, detail)
-        if state != "connected":
-            self.traffic_label.clear()
+        if connection_state.normalize(state) != connection_state.CONNECTED:
+            self.traffic.clear()
+            self.traffic.setVisible(False)
             self.sparkline.setVisible(False)
             self.sparkline.reset()
             # Public IP banner + map only make sense while connected;
@@ -228,19 +236,9 @@ class HomePage(QWidget):
 
     def set_traffic(self, up_rate: float, down_rate: float,
                     up_total: int, down_total: int) -> None:
-        """Refresh the traffic-rate label. Called once per second."""
-        from ..core.xray_stats import format_bytes, format_rate
-        self.traffic_label.setText(
-            f"<span style='color:#a1a1aa'>↑ </span>"
-            f"<span style='color:#fafafa'>{format_rate(up_rate)}</span>"
-            f"<span style='color:#71717a'>  ·  </span>"
-            f"<span style='color:#a1a1aa'>↓ </span>"
-            f"<span style='color:#fafafa'>{format_rate(down_rate)}</span>"
-            f"<br/>"
-            f"<span style='color:#71717a; font-size:8pt'>"
-            f"за сессию: ↑ {format_bytes(up_total)}  ·  ↓ {format_bytes(down_total)}"
-            f"</span>"
-        )
+        """Refresh the live traffic legend + sparkline. Called once per second."""
+        self.traffic.set_values(up_rate, down_rate, up_total, down_total)
+        self.traffic.setVisible(True)
         self.sparkline.setVisible(True)
         self.sparkline.add_sample(up_rate, down_rate)
 
@@ -1313,11 +1311,19 @@ class MainWindow(QMainWindow):
         # ADVANCED (allow_window_resize=True, opt-in via settings): the old
         # resizable behaviour — restore the persisted size, install the 8 edge
         # handles (below), persist on resize.
-        DEFAULT_W, DEFAULT_H = 480, 870
-        MIN_W, MIN_H = 480, 780
         # storage.load_settings is the canonical reader; manager caches the
         # same dict on .settings later. Read it now, before the manager exists.
         saved_settings = storage.load_settings()
+        # Size preset: 'standard' (full) or 'compact' (shorter + a touch
+        # narrower, for low-resolution / low-DPI screens). 'auto' (default)
+        # picks compact when the screen can't comfortably fit standard.
+        _PRESETS = {"standard": (480, 870), "compact": (460, 720)}
+        preset = str(saved_settings.get("window_size_preset", "auto")).strip().lower()
+        if preset not in _PRESETS:
+            preset = "compact" if self._screen_too_short_for(870) else "standard"
+        self._compact_preset = (preset == "compact")
+        DEFAULT_W, DEFAULT_H = _PRESETS[preset]
+        MIN_W, MIN_H = DEFAULT_W, DEFAULT_H - 90  # floor for advanced resizable mode
         self._allow_resize = self._window_resize_allowed(saved_settings)
         if self._allow_resize:
             self.setMinimumSize(MIN_W, MIN_H)
@@ -1390,7 +1396,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.titlebar)
 
         self.stack = QStackedWidget()
-        self.home_page = HomePage()
+        self.home_page = HomePage(compact=self._compact_preset)
         # World-map needs to know the current theme on every paint —
         # hand it a closure that reads settings live, so a theme switch
         # immediately reflects in the next map paint (no explicit
@@ -1761,11 +1767,27 @@ class MainWindow(QMainWindow):
             self.stats_page.set_live_connected(True)
             self._poll_traffic()
         else:
-            self.home_page.set_state("idle")
-            self.tray.set_state("idle", active_name)
+            # Not connected — but distinguish WHY so the UI is never ambiguous
+            # (instead of always "Не подключено"). Mirrors the crash / reconnect
+            # / kill-switch branches above (which already logged + toasted the
+            # reason); here we set the matching home state, single-source.
+            if self._killswitch_holding():
+                self.home_page.set_state(connection_state.KILLSWITCH_ACTIVE)
+                self.tray.set_state("connecting", active_name)
+            elif self._reconnect_timer.isActive():
+                self.home_page.set_state(
+                    connection_state.RECONNECTING,
+                    f"#{self._reconnect_attempts}/{self._reconnect_max}")
+                self.tray.set_state("connecting", active_name)
+            elif (self._active_config is not None
+                    and self._reconnect_attempts >= self._reconnect_max):
+                self.home_page.set_state(connection_state.ERROR, "VPN не поднялся")
+                self.tray.set_state("idle", active_name)
+            else:
+                self.home_page.set_state(connection_state.DISCONNECTED)
+                self.tray.set_state("idle", active_name)
             self._prev_traffic = None  # reset session counter when disconnected
             # Reset live-block on Stats: sparkline empties + badge greys.
-            # Cheap no-op when already disconnected (page tracks its own flag).
             self.stats_page.set_live_connected(False)
 
         self.home_page.set_config(self._active_config)
@@ -2320,6 +2342,33 @@ class MainWindow(QMainWindow):
         the size-persistence in resizeEvent, so flipping it off guarantees no
         handles are ever created. Pure + unit-testable."""
         return bool(settings.get("allow_window_resize", False))
+
+    @staticmethod
+    def _screen_too_short_for(needed_h: int) -> bool:
+        """True if the primary screen's available height can't comfortably fit
+        a window of `needed_h` px (with headroom for the taskbar/titlebar).
+        Drives the 'auto' compact-preset fallback. Never raises."""
+        try:
+            from PySide6.QtWidgets import QApplication
+            scr = QApplication.primaryScreen()
+            if scr is None:
+                return False
+            return scr.availableGeometry().height() < needed_h + 80
+        except Exception:
+            return False
+
+    def _killswitch_holding(self) -> bool:
+        """True when xray has died but the kill-switch is deliberately holding
+        the TUN up to block any leak — the state where the user is NOT
+        connected yet all foreign traffic is blocked. Surfaced as its own home
+        state so it never looks like a plain disconnect."""
+        return (
+            self._active_config is not None
+            and bool(self.manager.settings.get("kill_switch", False))
+            and self.manager.current_mode() == MODE_TUN
+            and not self.manager.process.is_running()
+            and self.manager.tun_process.is_running()
+        )
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         """Persist size to settings + reposition the 8 edge resize-handles.

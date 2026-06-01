@@ -284,6 +284,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "theme": "auto",  # "auto" (follow OS) / "dark" / "light" — see gui/styles.py
     "window_size": [480, 870],  # [w, h] — restored on launch (advanced resizable mode only)
     "allow_window_resize": False,  # v2.0.3: opt-in. False = fixed-size window (no mouse resize, no drift); True = resizable + edge handles
+    "window_size_preset": "auto",  # v2.1.0: "auto" (compact on low screens) | "standard" | "compact"
 }
 
 

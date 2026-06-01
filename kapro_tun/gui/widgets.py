@@ -101,26 +101,42 @@ class CircleConnectButton(QPushButton):
     # --- state machine ---------------------------------------------------
 
     def set_state(self, state: str) -> None:
-        """state ∈ {'idle', 'connecting', 'connected'}"""
-        if state == self._state:
-            return
-        self._state = state
-
+        """Accepts any canonical OR legacy state (see gui.connection_state);
+        maps it to the three VISUAL states this button animates
+        (idle / connecting / connected) and sets the caption from the state's
+        spec. Caption always updates; the animation only re-fires when the
+        visual actually changes (so e.g. error vs disconnected — both 'idle'
+        visually — don't re-burst)."""
+        from . import connection_state as cs
         from ..core.i18n import tr  # lazy import — avoid circular
-        if state == "connected":
-            self.setText(tr("home.disconnect"))
+
+        sp = cs.spec(state)
+        self.setText(tr(sp.button_text_key))
+        self.setEnabled(sp.button_enabled)
+
+        vis = sp.circle_state  # 'idle' | 'connecting' | 'connected'
+        if vis == self._state:
+            return
+        self._state = vis
+
+        if vis == "connected":
             self.setProperty("state", "connected")
             self._start_burst(settle_to=self.CONNECTED_GLOW, then=None)
-        elif state == "connecting":
-            self.setText(tr("home.connecting"))
+        elif vis == "connecting":
             self.setProperty("state", "connecting")
             self._start_burst(settle_to=self.PULSE_LOW, then=self._pulse.start)
         else:
-            self.setText(tr("home.connect"))
             self.setProperty("state", "idle")
             self._start_burst(settle_to=0.0, then=None)
 
         # Re-polish so QSS property selectors update (border colors, etc.)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def set_compact(self, compact: bool) -> None:
+        """Toggle the compact-preset size (smaller hero circle). Driven by a
+        QSS property selector, so just flip the property + re-polish."""
+        self.setProperty("compact", "true" if compact else "false")
         self.style().unpolish(self)
         self.style().polish(self)
 
@@ -295,12 +311,75 @@ class StatusLabel(QLabel):
         self.setObjectName("muted")
 
     def set_state(self, state: str, detail: str = "") -> None:
-        if state == "connected":
-            self.setText(f"Подключено · {detail}" if detail else "Подключено")
-            self.setStyleSheet(f"color: {styles.ACCENT}; font-size: 10pt; font-weight: 500;")
-        elif state == "connecting":
-            self.setText("Подключение…")
-            self.setStyleSheet(f"color: {styles.TEXT_MUTED}; font-size: 10pt;")
+        """Drive text + colour from the single connection_state spec, so the
+        status line is never out of sync with the button or tray. Prepends a
+        per-state indicator glyph (○ ◌ ● ✕ ■). `detail` is the session timer
+        for CONNECTED, or a short error reason otherwise."""
+        from . import connection_state as cs
+        sp = cs.spec(state)
+        if detail:
+            sep = "·" if sp.state == cs.CONNECTED else "—"
+            text = f"{sp.glyph}  {sp.label} {sep} {detail}"
         else:
-            self.setText(detail or "Не подключено")
-            self.setStyleSheet(f"color: {styles.TEXT_MUTED}; font-size: 10pt;")
+            text = f"{sp.glyph}  {sp.label}"
+        self.setText(text)
+        color = getattr(styles, sp.accent, styles.TEXT_MUTED)
+        weight = 600 if sp.state in (cs.CONNECTED, cs.ERROR, cs.KILLSWITCH_ACTIVE) else 400
+        self.setStyleSheet(f"color: {color}; font-size: 10pt; font-weight: {weight};")
+
+
+class TrafficLegend(QWidget):
+    """Live up/down rates with colour-matched arrows (doubles as the home
+    sparkline's legend) + a session-total caption.
+
+    The value labels have a fixed minimum width and are left-aligned next to
+    their arrow, so the numbers don't shift the layout as they change — that's
+    the 'no width jitter' requirement. Arrows are coloured via QSS
+    (#graphUp / #graphDown) to match the two graph lines."""
+
+    _VALUE_W = 92  # reserves room for the widest realistic rate ("1023.9 КБ/с")
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(2)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addStretch(1)
+        self.down_arrow = QLabel("↓")
+        self.down_arrow.setObjectName("graphDown")
+        self.down_value = QLabel("—")
+        self.down_value.setObjectName("graphValue")
+        self.down_value.setMinimumWidth(self._VALUE_W)
+        self.down_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.up_arrow = QLabel("↑")
+        self.up_arrow.setObjectName("graphUp")
+        self.up_value = QLabel("—")
+        self.up_value.setObjectName("graphValue")
+        self.up_value.setMinimumWidth(self._VALUE_W)
+        self.up_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        for wdg in (self.down_arrow, self.down_value, self.up_arrow, self.up_value):
+            row.addWidget(wdg)
+        row.addStretch(1)
+        v.addLayout(row)
+
+        self.caption = QLabel("")
+        self.caption.setObjectName("caption")
+        self.caption.setAlignment(Qt.AlignCenter)
+        v.addWidget(self.caption)
+
+    def set_values(self, up_rate: float, down_rate: float,
+                   up_total: int, down_total: int) -> None:
+        from ..core.xray_stats import format_bytes, format_rate
+        self.down_value.setText(format_rate(down_rate))
+        self.up_value.setText(format_rate(up_rate))
+        self.caption.setText(
+            f"за сессию: ↓ {format_bytes(down_total)}  ·  ↑ {format_bytes(up_total)}"
+        )
+
+    def clear(self) -> None:
+        self.down_value.setText("—")
+        self.up_value.setText("—")
+        self.caption.setText("")

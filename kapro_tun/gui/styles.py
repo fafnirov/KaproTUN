@@ -167,6 +167,25 @@ QLabel#h2   {{ font-size: 13pt; font-weight: 600; }}
 QLabel#muted {{ color: {p.TEXT_MUTED}; font-size: 9pt; }}
 QLabel#dim  {{ color: {p.TEXT_DIM};  font-size: 9pt; }}
 
+/* --- typography tokens (v2.1.0) — one consistent text scale ---
+   Five roles used app-wide; letter-spacing 0, no viewport-based scaling.
+   The legacy #h1/#h2/#muted/#dim above stay as aliases (same metrics) for
+   screens not yet migrated; new/updated labels use these tokens so sizes
+   and line-heights stop being ad-hoc. Secondary text is TEXT_MUTED (a step
+   brighter than the old TEXT_DIM) for readability on the dark theme. */
+QLabel#title     {{ font-size: 18pt; font-weight: 600; letter-spacing: 0; color: {p.TEXT}; }}
+QLabel#section   {{ font-size: 13pt; font-weight: 600; letter-spacing: 0; color: {p.TEXT}; }}
+QLabel#body      {{ font-size: 10pt; font-weight: 400; letter-spacing: 0; color: {p.TEXT}; }}
+QLabel#secondary {{ font-size:  9pt; font-weight: 400; letter-spacing: 0; color: {p.TEXT_MUTED}; }}
+QLabel#caption   {{ font-size:  8pt; font-weight: 400; letter-spacing: 0; color: {p.TEXT_DIM}; }}
+
+/* Traffic-legend arrows — colour-matched to the home sparkline so the ↑/↓
+   next to the live numbers double as the graph legend. graphValue keeps the
+   numbers in the brighter TEXT for contrast against the muted captions. */
+QLabel#graphDown  {{ color: {p.ACCENT};     font-size: 11pt; font-weight: 700; letter-spacing: 0; }}
+QLabel#graphUp    {{ color: {p.TEXT_MUTED}; font-size: 11pt; font-weight: 700; letter-spacing: 0; }}
+QLabel#graphValue {{ color: {p.TEXT}; font-size: 10pt; font-weight: 500; letter-spacing: 0; }}
+
 /* --- buttons --- */
 
 QPushButton {{
@@ -230,6 +249,15 @@ QPushButton#circleBtn {{
     font-size: 14pt;
     font-weight: 600;
     letter-spacing: 1px;
+}}
+
+/* Compact preset — smaller hero circle for low-height screens.
+   Higher specificity than the base #circleBtn rule, so it wins on size. */
+QPushButton#circleBtn[compact="true"] {{
+    min-width: 168px; max-width: 168px;
+    min-height: 168px; max-height: 168px;
+    border-radius: 84px;
+    font-size: 12pt;
 }}
 
 QPushButton#circleBtn:hover {{
