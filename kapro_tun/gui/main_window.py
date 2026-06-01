@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -437,9 +438,7 @@ class SettingsPage(QWidget):
         # ISPs hand out public v6), apps with AAAA records leak through
         # the real ISP. Default ON because the user is almost always
         # surprised when we explain it ("я думал VPN покрывает всё").
-        self.ipv6_check = QCheckBox(
-            "Защита от IPv6 leak — блокировать v6-трафик в TUN"
-        )
+        self.ipv6_check = QCheckBox("Защита от IPv6-утечек")
         self.ipv6_check.setChecked(
             bool(manager.settings.get("ipv6_leak_protection", True))
         )
@@ -463,9 +462,7 @@ class SettingsPage(QWidget):
         # bypassing the VPN. HTTP-proxy mode is the most exposed
         # (system proxy only catches TCP); TUN mode is technically safe
         # but defence-in-depth is cheap. Default ON for both.
-        self.webrtc_check = QCheckBox(
-            "Защита от WebRTC leak — блокировать STUN UDP-трафик"
-        )
+        self.webrtc_check = QCheckBox("Защита от WebRTC-утечек")
         self.webrtc_check.setChecked(
             bool(manager.settings.get("webrtc_leak_protection", True))
         )
@@ -608,9 +605,7 @@ class SettingsPage(QWidget):
         # in parallel. Result: ISP sees only encrypted VPN bytes.
         # OFF preserves the legacy "direct :53" path for users with
         # Pi-hole / corporate / locally-pinned DNS that they need.
-        self.dns_leak_check = QCheckBox(
-            "Защита от DNS-утечек — заворачивать DNS-запросы в VPN-туннель"
-        )
+        self.dns_leak_check = QCheckBox("Защита от DNS-утечек")
         self.dns_leak_check.setChecked(
             bool(manager.settings.get("dns_leak_protection", True))
         )
@@ -708,29 +703,43 @@ class SettingsPage(QWidget):
         hy_auto_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(hy_auto_hint)
 
-        hy_row = QHBoxLayout()
-        hy_row.addWidget(QLabel("Загрузка:"))
+        # Hysteria2 speed controls — a 2-column grid (label | spinbox) with a
+        # stretch column on the right, and "Перемерить" on its own spanning
+        # row. The old single QHBoxLayout summed two wide spinboxes + the button
+        # into a minimum width that exceeded the fixed 480/460-px window, which
+        # forced the whole scroll content WIDER than the viewport and clipped
+        # every description label on the right (the horizontal scrollbar is off
+        # by design). A grid keeps the minimum width to one label + one spinbox.
+        hy_grid = QGridLayout()
+        hy_grid.setContentsMargins(0, 0, 0, 0)
+        hy_grid.setHorizontalSpacing(10)
+        hy_grid.setVerticalSpacing(8)
+
         self.hy_down_spin = QSpinBox()
         self.hy_down_spin.setRange(0, 10000)
         self.hy_down_spin.setSuffix(" Мбит/с")
+        self.hy_down_spin.setMaximumWidth(150)  # don't balloon / stretch the column
         self.hy_down_spin.setValue(int(manager.settings.get("hysteria_down_mbps", 0) or 0))
         self.hy_down_spin.valueChanged.connect(self._on_hy_down_changed)
-        hy_row.addWidget(self.hy_down_spin)
-        hy_row.addSpacing(12)
-        hy_row.addWidget(QLabel("Отдача:"))
+
         self.hy_up_spin = QSpinBox()
         self.hy_up_spin.setRange(0, 10000)
         self.hy_up_spin.setSuffix(" Мбит/с")
+        self.hy_up_spin.setMaximumWidth(150)
         self.hy_up_spin.setValue(int(manager.settings.get("hysteria_up_mbps", 0) or 0))
         self.hy_up_spin.valueChanged.connect(self._on_hy_up_changed)
-        hy_row.addWidget(self.hy_up_spin)
-        hy_row.addSpacing(12)
+
         self.hy_remeasure_btn = QPushButton("↻ Перемерить")
         self.hy_remeasure_btn.setToolTip("Сбросить замер — приложение измерит скорость заново при следующем подключении")
         self.hy_remeasure_btn.clicked.connect(self._on_hy_remeasure)
-        hy_row.addWidget(self.hy_remeasure_btn)
-        hy_row.addStretch(1)
-        outer.addLayout(hy_row)
+
+        hy_grid.addWidget(QLabel("Загрузка:"), 0, 0)
+        hy_grid.addWidget(self.hy_down_spin, 0, 1)
+        hy_grid.addWidget(QLabel("Отдача:"), 1, 0)
+        hy_grid.addWidget(self.hy_up_spin, 1, 1)
+        hy_grid.addWidget(self.hy_remeasure_btn, 2, 0, 1, 2, Qt.AlignLeft)
+        hy_grid.setColumnStretch(2, 1)  # empty right column absorbs slack
+        outer.addLayout(hy_grid)
 
         hy_hint = QLabel(
             "Только для Hysteria2-серверов. В режиме <b>авто</b> приложение само "

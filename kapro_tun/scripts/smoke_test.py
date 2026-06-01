@@ -1313,6 +1313,47 @@ check("ui: sparkline Y-scale eases (hysteresis, no snap)", _sparkline_scale_hyst
 check("ui: window presets standard 480x870 / compact 460x720", _window_presets)
 
 
+def _settings_no_overlong_controls() -> None:
+    """v2.1.3 regression guard. Offscreen font metrics are unreliable for
+    absolute pixel widths (the same checkbox reads ~338px on the real display
+    vs ~626px offscreen), so instead of a fragile pixel test we assert the
+    STRUCTURAL fix that stops the SettingsPage clipping descriptions on the
+    right:
+
+      * no NON-WRAPPING control (QCheckBox / QRadioButton can't word-wrap) has a
+        label long enough to force the content wider than the compact 460-px
+        viewport. ~54 chars ≈ the 404-px content area at the app font; the old
+        60-char DNS-leak label (which clipped the whole page) is over the limit,
+        the kept labels (≤46) are well under.
+      * the Hysteria2 speed spinboxes are width-capped so their row can't
+        balloon the content width (it's now a grid, not one wide QHBoxLayout).
+    """
+    import os as _o
+    _o.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QCheckBox, QRadioButton
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_tun.core.controller import ConnectionManager
+    from kapro_tun.gui.main_window import SettingsPage
+    sp = SettingsPage(ConnectionManager(on_log=lambda _l: None))
+    LIMIT = 54
+    controls = sp.findChildren(QCheckBox) + sp.findChildren(QRadioButton)
+    over = [c.text() for c in controls if len(c.text()) > LIMIT]
+    if over:
+        raise AssertionError(
+            "non-wrapping label(s) too long (>%d chars) — would force settings "
+            "h-overflow + clip descriptions: %d found" % (LIMIT, len(over)))
+    for spin in (sp.hy_down_spin, sp.hy_up_spin):
+        if spin.maximumWidth() <= 0 or spin.maximumWidth() > 160:
+            raise AssertionError(
+                "hy speed spinbox must be width-capped (got %d)" % spin.maximumWidth())
+    sp.deleteLater()
+
+
+check("ui: settings has no over-long non-wrapping labels (no clip)",
+      _settings_no_overlong_controls)
+
+
 # ---------------------------------------------------------------------------
 # Test 9 — Leak self-test module (v1.16.4)
 # ---------------------------------------------------------------------------
