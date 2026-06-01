@@ -209,7 +209,7 @@ class SubscriptionDialog(QDialog):
                 "Попросите у провайдера HTTPS-ссылку (https://).",
             )
             return
-        if not _subscription.is_https_url(url):
+        if not is_https_url(url):
             QMessageBox.warning(
                 self, "URL", "Введи корректный https:// URL подписки.")
             return

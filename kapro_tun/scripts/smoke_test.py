@@ -2234,6 +2234,102 @@ check("secrets: no silent plaintext fallback when keystore is supported",
       _no_silent_plaintext_on_encrypt_failure)
 
 
+def _https_subscription_fetch_no_nameerror() -> None:
+    """P1 regression (v2.0.2): SubscriptionDialog._on_fetch() with an https://
+    URL must reach the fetcher without NameError. The bug called
+    `_subscription.is_https_url(url)` but only `is_https_url` was imported, so
+    EVERY valid https import crashed. The fetcher is faked so no real network
+    thread starts."""
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_tun.gui import subscription_dialog as _sd
+
+    class _FakeSig:
+        def connect(self, *a, **k): pass
+
+    class _FakeFetcher:
+        constructed = False
+        started = False
+        def __init__(self, *a, **k):
+            self.succeeded = _FakeSig()
+            self.failed = _FakeSig()
+            _FakeFetcher.constructed = True
+        def start(self):
+            _FakeFetcher.started = True
+
+    o_fetch = _sd._SubscriptionFetcher
+    o_warn = QMessageBox.warning
+    _sd._SubscriptionFetcher = _FakeFetcher
+    QMessageBox.warning = lambda *a, **k: 0  # no modal in headless
+    try:
+        dlg = _sd.SubscriptionDialog()
+        dlg.url_edit.setText("https://example.com/api/sub/abc123")
+        dlg._on_fetch()  # must NOT raise NameError
+        if not _FakeFetcher.constructed:
+            raise AssertionError("https URL must pass is_https_url and reach the fetcher")
+        if not _FakeFetcher.started:
+            raise AssertionError("a valid https URL should start the (faked) fetcher")
+        dlg.deleteLater()
+    finally:
+        _sd._SubscriptionFetcher = o_fetch
+        QMessageBox.warning = o_warn
+
+
+check("subscription: https import reaches fetcher (no NameError regression)",
+      _https_subscription_fetch_no_nameerror)
+
+
+def _secret_migration_deferred_not_lost_on_encrypt_failure() -> None:
+    """P2 regression (v2.0.2): if encryption fails during a save, a legacy
+    plaintext subscription_url ALREADY on disk must NOT be deleted from
+    settings.json (migration deferred, no data loss) — AND a brand-new secret
+    that was never on disk must NOT be written to settings.json in plaintext."""
+    from kapro_tun.core import storage as _st, paths as _paths, secrets_store as _ss
+    import json as _json
+    tmp = _SecPath(_tf.mkdtemp(prefix="kt-defer-"))
+    o_app, o_sup, o_enc = _paths.app_data_dir, _ss.is_supported, _ss.encrypt
+    _paths.app_data_dir = lambda: tmp
+    _ss.is_supported = lambda: True
+
+    def _boom(_data):
+        raise OSError("DPAPI down")
+    _ss.encrypt = _boom
+    try:
+        # Un-migrated state: a legacy plaintext subscription_url on disk.
+        legacy = {"listen_port": 2080, "subscription_url": "https://legacy/KEEPME"}
+        _paths.settings_file().write_text(_json.dumps(legacy), encoding="utf-8")
+        # Save carries the legacy url AND a NEW secret that was never on disk.
+        merged = dict(legacy)
+        merged["subscription_urls"] = ["https://new/DONTLEAK"]
+        _st.save_settings(merged)
+
+        on_disk = _json.loads(_paths.settings_file().read_text(encoding="utf-8"))
+        # 1. legacy plaintext preserved — migration deferred, not lost.
+        if on_disk.get("subscription_url") != "https://legacy/KEEPME":
+            raise AssertionError(
+                f"legacy subscription_url must survive an encrypt failure, got {on_disk.get('subscription_url')!r}")
+        # 2. a NEW secret (never on disk) must NOT become plaintext.
+        if "subscription_urls" in on_disk:
+            raise AssertionError("a new secret must not be written to settings.json in plaintext")
+        # 3. nothing leaked into secrets.json either (encrypt failed).
+        blob = _paths.secrets_file()
+        if blob.exists() and b"KEEPME" in blob.read_bytes():
+            raise AssertionError("secret leaked into secrets.json despite encrypt failure")
+        # 4. last_error explains it wasn't persisted.
+        if "not persisted" not in (_st.last_error() or ""):
+            raise AssertionError(f"last_error() must explain the deferral, got {_st.last_error()!r}")
+    finally:
+        _paths.app_data_dir, _ss.is_supported, _ss.encrypt = o_app, o_sup, o_enc
+        _sh.rmtree(tmp, ignore_errors=True)
+
+
+check("secrets: failed-encrypt migration is deferred, never loses legacy URL",
+      _secret_migration_deferred_not_lost_on_encrypt_failure)
+
+
 def _runtime_config_secure_write_and_cleanup() -> None:
     import os as _os
     from kapro_tun.core import paths as _paths

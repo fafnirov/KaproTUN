@@ -286,20 +286,26 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 
-def load_settings() -> dict[str, Any]:
+def _read_settings_file() -> dict[str, Any]:
+    """Read + parse the on-disk settings.json, or {} if absent/corrupt.
+
+    settings.json is the very first file read at launch (main.py ->
+    i18n.init_from_settings). A corrupted byte here would crash before the
+    window ever opens — and a startup crash means the in-app auto-updater
+    never runs. So a parse error falls back to defaults, never raises.
+    """
     f = paths.settings_file()
-    raw_data: dict[str, Any] = {}
-    if f.is_file():
-        try:
-            parsed = json.loads(f.read_text(encoding="utf-8"))
-            if isinstance(parsed, dict):
-                raw_data = parsed
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            # settings.json is the very first file read at launch (main.py ->
-            # i18n.init_from_settings). A corrupted byte here would crash
-            # before the window ever opens — and a startup crash means the
-            # in-app auto-updater never runs. Fall back to defaults instead.
-            raw_data = {}
+    if not f.is_file():
+        return {}
+    try:
+        parsed = json.loads(f.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def load_settings() -> dict[str, Any]:
+    raw_data = _read_settings_file()
     merged = dict(DEFAULT_SETTINGS)
     merged.update(raw_data)
 
@@ -325,15 +331,35 @@ def load_settings() -> dict[str, Any]:
 
 
 def save_settings(settings: dict[str, Any]) -> None:
-    # Subscription secrets go to the encrypted blob, NEVER to settings.json.
+    # Subscription secrets go to the encrypted blob, NEVER to settings.json
+    # (where they'd sit as a plaintext bearer credential).
+    secrets_persisted = True
     try:
         save_subscription_secrets(settings)
     except SecretsError as e:
-        # Encryption supported but failed: the secret is not persisted (it
-        # stays in memory) and is never written to settings.json in plaintext.
+        secrets_persisted = False
         _record_error(f"subscription secrets not persisted this save: {e}")
+
     clean = {k: v for k, v in settings.items()
              if k not in _SUBSCRIPTION_SECRET_KEYS}
+
+    if not secrets_persisted:
+        # Encryption is supported but failed RIGHT NOW. Two rules, both to
+        # avoid data loss WITHOUT introducing new plaintext:
+        #   1. If legacy plaintext secret fields are ALREADY present in the
+        #      on-disk settings.json (un-migrated), keep them there verbatim —
+        #      a transient DPAPI/keystore hiccup must NOT delete the user's
+        #      subscription URL. The migration is genuinely deferred to a later
+        #      save (load_settings retries it).
+        #   2. Secret keys that were NOT already on disk are left out — we never
+        #      write a fresh plaintext secret to settings.json. A brand-new
+        #      secret that only lived in memory simply isn't persisted this
+        #      save; last_error() (recorded above) explains why.
+        existing = _read_settings_file()
+        for k in _SUBSCRIPTION_SECRET_KEYS:
+            if k in existing:
+                clean[k] = existing[k]
+
     _atomic_write_bytes(
         paths.settings_file(),
         json.dumps(clean, indent=2, ensure_ascii=False).encode("utf-8"),
