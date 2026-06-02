@@ -9,8 +9,8 @@ from typing import Callable, Optional
 
 from . import (
     admin, dns_options, dns_health, geoip_ru, hysteria_installer,
-    hysteria_process, ipv6_block, killswitch, paths, storage, tun_recovery,
-    webrtc_block, system_proxy, xray_config,
+    hysteria_process, ipv6_block, killswitch, paths, proc_stats, storage,
+    tun_recovery, webrtc_block, system_proxy, xray_config,
 )
 from .parser import ProxyConfig
 from .xray_process import XrayProcess
@@ -104,6 +104,17 @@ _SERVICE_BYPASS: list[tuple[str, str]] = [
 # Back-compat alias — the full unconditional set (used only in the
 # leak-protection-OFF path, where direct DNS is intended).
 _ALWAYS_BYPASS: list[tuple[str, str]] = _DNS_RESOLVER_BYPASS + _SERVICE_BYPASS
+
+
+# Runaway-memory guard thresholds (v2.1.6). Set well ABOVE healthy use (with
+# the v2.1.6 balanced 1m/1m buffers tun2socks normally sits in the low
+# hundreds of MB) so only a genuine leak / flood trips them — but below the
+# multi-GB levels that wedge the machine. tun2socks is the primary offender;
+# xray gets a higher memory bar and no handle trigger (it legitimately holds
+# many connection handles under load, so a count alone isn't a fault).
+MEM_HEAL_TUN2SOCKS_BYTES = 1_800_000_000     # ~1.8 GB private
+MEM_HEAL_TUN2SOCKS_HANDLES = 12_000          # handle runaway
+MEM_HEAL_XRAY_BYTES = 2_500_000_000          # ~2.5 GB private
 
 
 class ConnectionManager:
@@ -365,6 +376,52 @@ class ConnectionManager:
             and bool(self.settings.get("dns_leak_protection", True))
         )
 
+    # --- runtime memory watchdog (v2.1.6) ---------------------------------
+
+    def sample_runtime_stats(self) -> dict:
+        """Best-effort {name: ProcSample|None} for the helper processes. Cheap
+        (a psutil read per pid); never raises."""
+        return {
+            "tun2socks": proc_stats.sample(self.tun_process.pid()),
+            "xray": proc_stats.sample(self.process.pid()),
+        }
+
+    def format_runtime_stats(self, stats: Optional[dict] = None) -> str:
+        """One human log line of current helper-process memory + handles."""
+        if stats is None:
+            stats = self.sample_runtime_stats()
+        parts = []
+        for name in ("tun2socks", "xray"):
+            s = stats.get(name)
+            if s is None:
+                parts.append(f"{name}: н/д")
+            else:
+                parts.append(
+                    f"{name}: {proc_stats.human_bytes(s.private_bytes)}"
+                    + (f", {s.handles} хэндлов" if s.handles else "")
+                )
+        return "[mem] " + "; ".join(parts)
+
+    def memory_pressure_reason(self, stats: Optional[dict] = None) -> Optional[str]:
+        """If a helper process is in genuine memory/handle runaway, return a
+        short reason string (for logs + heal); else None. Pure threshold logic,
+        unit-testable with synthetic stats."""
+        if stats is None:
+            stats = self.sample_runtime_stats()
+        t = stats.get("tun2socks")
+        x = stats.get("xray")
+        if t is not None:
+            if t.private_bytes >= MEM_HEAL_TUN2SOCKS_BYTES:
+                return (f"tun2socks занял {proc_stats.human_bytes(t.private_bytes)} "
+                        f"(порог {proc_stats.human_bytes(MEM_HEAL_TUN2SOCKS_BYTES)})")
+            if t.handles and t.handles >= MEM_HEAL_TUN2SOCKS_HANDLES:
+                return (f"tun2socks открыл {t.handles} хэндлов "
+                        f"(порог {MEM_HEAL_TUN2SOCKS_HANDLES})")
+        if x is not None and x.private_bytes >= MEM_HEAL_XRAY_BYTES:
+            return (f"xray занял {proc_stats.human_bytes(x.private_bytes)} "
+                    f"(порог {proc_stats.human_bytes(MEM_HEAL_XRAY_BYTES)})")
+        return None
+
     # --- HTTP-proxy mode (browsers only) ----------------------------------
 
     def _connect_http(self, config: ProxyConfig, direct_domains: list[str]) -> None:
@@ -495,7 +552,10 @@ class ConnectionManager:
         # Step 4: launch tun2socks — it creates the TUN device and forwards
         # all packets to xray's SOCKS5 inbound at port+1.
         try:
-            self.tun_process.start(socks_addr=f"{host}:{port + 1}")
+            self.tun_process.start(
+                socks_addr=f"{host}:{port + 1}",
+                buffer_preset=str(self.settings.get("performance_preset", "balanced")),
+            )
         except Exception as e:
             self.process.stop()
             raise ConnectionError(f"Не удалось запустить tun2socks: {e}") from e

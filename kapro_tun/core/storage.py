@@ -281,6 +281,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "hysteria_down_mbps": 0,  # downlink Mbps for hy2 brutal CC — auto-measured (auto mode) or manual; 0 = BBR
     "block_ads": False,  # drop geosite:category-ads-all at the xray routing layer (any DNS) — v1.19.0
     "route_ru_direct": False,  # route all geoip:ru traffic direct (bypass VPN), not just the curated domain list — v1.19.0
+    "performance_preset": "balanced",  # v2.1.6: tun2socks TCP buffer ceiling — economy(512k)/balanced(1m, default)/speed(4m). Caps per-flow memory; default is NOT the old 4m blow-up
     "theme": "auto",  # "auto" (follow OS) / "dark" / "light" — see gui/styles.py
     "window_size": [480, 870],  # [w, h] — restored on launch (advanced resizable mode only)
     "allow_window_resize": False,  # v2.0.3: opt-in. False = fixed-size window (no mouse resize, no drift); True = resizable + edge handles

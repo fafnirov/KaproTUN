@@ -532,6 +532,26 @@ def build_config(
         },
         "stats": {},
         "policy": {
+            # v2.1.6: per-level connection timeouts + a per-connection buffer
+            # cap to bound xray's memory / handle growth under load (observed
+            # ~2.3 GB / ~59k handles). Level 0 is the default level for every
+            # inbound/outbound connection (we never assign explicit user
+            # levels), so this applies to all traffic. connIdle reaps idle
+            # connections — the main driver of handle accumulation when peers
+            # abandon a flow without a clean close — and the half-close
+            # timeouts free FIN-WAIT connections promptly. bufferSize caps how
+            # much each connection may buffer. This is pure resource policy: it
+            # does NOT touch routing, and the stats API below is untouched, so
+            # the UI's traffic graph keeps working.
+            "levels": {
+                "0": {
+                    "connIdle": 300,     # drop idle connections after 5 min
+                    "handshake": 4,      # abort a stalled handshake after 4 s
+                    "uplinkOnly": 2,     # half-closed (peer done sending): 2 s
+                    "downlinkOnly": 5,   # half-closed (we done sending): 5 s
+                    "bufferSize": 512,   # KB per connection — bounds buffering
+                }
+            },
             "system": {
                 "statsInboundUplink": True,
                 "statsInboundDownlink": True,

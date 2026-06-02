@@ -105,6 +105,12 @@ class XrayProcess:
         proc = self._proc
         return proc is not None and proc.poll() is None
 
+    def pid(self) -> Optional[int]:
+        """OS pid of the running xray process, or None — for the memory
+        watchdog to sample its private memory / handle count."""
+        proc = self._proc
+        return proc.pid if (proc is not None and proc.poll() is None) else None
+
     def returncode(self) -> Optional[int]:
         return self._proc.returncode if self._proc else None
 

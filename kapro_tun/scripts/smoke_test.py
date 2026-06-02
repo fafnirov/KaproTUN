@@ -24,6 +24,18 @@ release published, the user's `git push v1.x.x` shows red.
 """
 from __future__ import annotations
 
+# Make the suite runnable straight from the repo root —
+#   python kapro_tun/scripts/smoke_test.py
+# — without requiring PYTHONPATH to be set, while still working under
+#   python -m kapro_tun.scripts.smoke_test
+# __file__ is <repo>/kapro_tun/scripts/smoke_test.py, so three dirnames up is
+# the repo root; prepend it so `import kapro_tun` resolves either way.
+import os as _os
+import sys as _sys
+_REPO_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+
 import json
 import sys
 from typing import Callable
@@ -899,14 +911,141 @@ def _tun2socks_args_have_throughput_tuning() -> None:
     rcv = args[args.index("-tcp-rcvbuf") + 1]
     if not snd or not rcv:
         raise AssertionError("tun2socks buffer sizes must be non-empty")
+    # v2.1.6: the DEFAULT buffers must be the memory-safe preset, NOT the old
+    # 4m/4m that ballooned private memory to multiple GB under many flows.
+    if snd == "4m" or rcv == "4m":
+        raise AssertionError(
+            f"default tun2socks buffers must not be 4m (memory blow-up): {snd}/{rcv}")
+    if (snd, rcv) != ("1m", "1m"):
+        raise AssertionError(f"default buffers expected balanced 1m/1m, got {snd}/{rcv}")
     # base command must still be intact
     for flag in ("-device", "-proxy", "-mtu", "-loglevel"):
         if flag not in args:
             raise AssertionError(f"tun2socks base arg {flag} missing: {args}")
 
 
-check("tun2socks args carry throughput tuning (auto-tuning + buffers)",
+check("tun2socks args carry throughput tuning (auto-tuning + SAFE default buffers)",
       _tun2socks_args_have_throughput_tuning)
+
+
+def _tun2socks_buffer_presets() -> None:
+    """v2.1.6: economy/balanced/speed presets resolve correctly, the default is
+    NOT the memory-hungry 4m, and 4m is reachable ONLY by explicitly asking for
+    'speed' (a typo in settings must fall back to the safe balanced preset)."""
+    from kapro_tun.core import tun2socks_process as t2s
+
+    if t2s.BUFFER_PRESETS.get("economy") != ("512k", "512k"):
+        raise AssertionError("economy preset should be 512k/512k")
+    if t2s.BUFFER_PRESETS.get("balanced") != ("1m", "1m"):
+        raise AssertionError("balanced preset should be 1m/1m")
+    if t2s.BUFFER_PRESETS.get("speed") != ("4m", "4m"):
+        raise AssertionError("speed preset should be 4m/4m")
+
+    if t2s.DEFAULT_BUFFER_PRESET != "balanced":
+        raise AssertionError("default preset must be 'balanced'")
+    if t2s.resolve_buffer_preset(None) == ("4m", "4m"):
+        raise AssertionError("default (None) must not resolve to 4m")
+    if t2s.resolve_buffer_preset("garbage") != ("1m", "1m"):
+        raise AssertionError("unknown preset must fall back to balanced 1m/1m")
+    # 4m only via an explicit 'speed' request.
+    if t2s.resolve_buffer_preset("speed") != ("4m", "4m"):
+        raise AssertionError("'speed' must yield the explicit 4m/4m")
+    only_4m = [k for k, v in t2s.BUFFER_PRESETS.items() if v == ("4m", "4m")]
+    if only_4m != ["speed"]:
+        raise AssertionError(f"4m/4m must be reachable only via 'speed', not {only_4m}")
+
+    # start() must thread the preset onto _build_args via the instance attrs.
+    p = t2s.Tun2socksProcess()
+    p.TCP_SNDBUF, p.TCP_RCVBUF = t2s.resolve_buffer_preset("speed")
+    args = p._build_args("tun2socks", "127.0.0.1:2081", 1500, "warn")
+    if args[args.index("-tcp-sndbuf") + 1] != "4m":
+        raise AssertionError("explicit speed preset not reflected in args")
+
+
+check("tun2socks buffer presets (default safe; 4m only via 'speed')",
+      _tun2socks_buffer_presets)
+
+
+def _performance_preset_default_is_safe() -> None:
+    """The storage default for performance_preset is 'balanced' (not 'speed')."""
+    from kapro_tun.core import storage
+    if storage.DEFAULT_SETTINGS.get("performance_preset") != "balanced":
+        raise AssertionError(
+            f"performance_preset default must be 'balanced', got "
+            f"{storage.DEFAULT_SETTINGS.get('performance_preset')!r}")
+
+
+check("storage: performance_preset defaults to balanced", _performance_preset_default_is_safe)
+
+
+def _memory_pressure_thresholds() -> None:
+    """v2.1.6 runaway-memory guard: memory_pressure_reason fires above the
+    tun2socks memory/handle thresholds and the xray memory threshold, stays
+    quiet at normal levels, and never raises on missing samples."""
+    from kapro_tun.core import controller
+    from kapro_tun.core.controller import ConnectionManager
+    from kapro_tun.core.proc_stats import ProcSample
+
+    mgr = ConnectionManager(on_log=lambda _l: None)
+
+    def reason(tun_mem, tun_h, xray_mem, xray_h):
+        return mgr.memory_pressure_reason({
+            "tun2socks": ProcSample(tun_mem, tun_h),
+            "xray": ProcSample(xray_mem, xray_h),
+        })
+
+    # Healthy → no pressure.
+    if reason(300_000_000, 800, 400_000_000, 5000) is not None:
+        raise AssertionError("healthy usage wrongly flagged as pressure")
+    # tun2socks memory runaway.
+    if not reason(controller.MEM_HEAL_TUN2SOCKS_BYTES + 1, 800, 0, 0):
+        raise AssertionError("tun2socks memory runaway not detected")
+    # tun2socks handle runaway.
+    if not reason(100_000_000, controller.MEM_HEAL_TUN2SOCKS_HANDLES + 1, 0, 0):
+        raise AssertionError("tun2socks handle runaway not detected")
+    # xray memory runaway (no handle trigger for xray by design).
+    if not reason(100_000_000, 500, controller.MEM_HEAL_XRAY_BYTES + 1, 90_000):
+        raise AssertionError("xray memory runaway not detected")
+    # xray huge handle count alone must NOT trip (legit under load).
+    if reason(100_000_000, 500, 500_000_000, 90_000) is not None:
+        raise AssertionError("xray handle count alone should not trip the guard")
+    # Missing samples → no crash, no false positive.
+    if mgr.memory_pressure_reason({"tun2socks": None, "xray": None}) is not None:
+        raise AssertionError("None samples should yield no pressure")
+    # Thresholds are in the sane 1.5–2.5 GB band the task asked for.
+    if not (1_500_000_000 <= controller.MEM_HEAL_TUN2SOCKS_BYTES <= 2_000_000_000):
+        raise AssertionError("tun2socks memory threshold outside 1.5–2 GB band")
+
+
+check("controller: runaway memory/handle thresholds", _memory_pressure_thresholds)
+
+
+def _xray_policy_bounds_resources() -> None:
+    """v2.1.6: xray config gains level-0 connection timeouts + a buffer cap to
+    bound memory/handles, WITHOUT disturbing the stats API the UI graph uses."""
+    from kapro_tun.core import xray_config
+    from kapro_tun.core.parser import parse
+    cfg = parse("vless://aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa@1.2.3.4:443"
+                "?type=tcp&security=reality&pbk=AAAA&sid=01&fp=chrome#T")
+    c = xray_config.build_config(cfg, [], dns_option="system",
+                                 dns_leak_protection=True)
+    pol = c.get("policy") or {}
+    lvl0 = (pol.get("levels") or {}).get("0") or {}
+    for key in ("connIdle", "uplinkOnly", "downlinkOnly"):
+        if key not in lvl0:
+            raise AssertionError(f"xray policy level 0 missing {key}")
+    if not (0 < lvl0["connIdle"] <= 600):
+        raise AssertionError(f"connIdle should be a sane idle timeout, got {lvl0['connIdle']}")
+    # Stats policy MUST remain so the traffic graph keeps working.
+    sysp = pol.get("system") or {}
+    for key in ("statsInboundUplink", "statsOutboundUplink"):
+        if not sysp.get(key):
+            raise AssertionError(f"stats policy {key} disabled — UI graph would break")
+    if c.get("stats") is None or not c.get("api"):
+        raise AssertionError("stats/api block removed — UI graph would break")
+
+
+check("xray: policy bounds resources but keeps stats API", _xray_policy_bounds_resources)
 
 
 # ---------------------------------------------------------------------------

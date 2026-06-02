@@ -32,6 +32,36 @@ LogSink = Callable[[str], None]
 TUN_DEVICE_NAME = "KaproTun" if sys.platform == "win32" else "kaprotun"
 
 
+# --- TCP buffer presets (v2.1.6) -------------------------------------------
+#
+# gVisor's userspace netstack buffers each TCP flow up to (sndbuf + rcvbuf).
+# `-tcp-auto-tuning` means a flow only GROWS toward what its bandwidth-delay
+# product needs — but these values are the CEILING. With many concurrent flows
+# (a busy browser, a torrent, several apps) the old 4 MiB/4 MiB ceiling let
+# tun2socks balloon to multiple GB of private memory. Lowering the default
+# ceiling caps that blow-up while auto-tuning keeps everyday throughput high;
+# only links that are both very fast AND high-latency lose the top end, and
+# those users can opt into the "speed" preset.
+#
+#   economy  512k/512k — lowest memory; fine on typical home links
+#   balanced 1m/1m     — default; good speed, sane memory (was 4m/4m)
+#   speed    4m/4m     — max throughput for fast high-RTT servers, high memory
+BUFFER_PRESETS: dict[str, tuple[str, str]] = {
+    "economy": ("512k", "512k"),
+    "balanced": ("1m", "1m"),
+    "speed": ("4m", "4m"),
+}
+DEFAULT_BUFFER_PRESET = "balanced"
+
+
+def resolve_buffer_preset(name: Optional[str]) -> tuple[str, str]:
+    """(sndbuf, rcvbuf) for a preset name. Unknown / empty → the safe default
+    (balanced), never the memory-hungry 4m/4m — a typo in settings must not
+    silently re-enable the blow-up."""
+    return BUFFER_PRESETS.get(str(name or "").lower().strip(),
+                              BUFFER_PRESETS[DEFAULT_BUFFER_PRESET])
+
+
 def _is_noise_line(line: str) -> bool:
     """True for known-benign tun2socks spam not worth surfacing on the
     user's Logs page.
@@ -74,15 +104,14 @@ def _device_arg() -> str:
 class Tun2socksProcess:
     """Wraps tun2socks as a subprocess."""
 
-    # Throughput tuning (v1.19.2). gVisor's userspace netstack defaults to a
-    # small, fixed TCP receive window; on a link with non-trivial latency
-    # that caps throughput well below the line rate (window < bandwidth-delay
-    # product). `-tcp-auto-tuning` lets the window grow toward the BDP, and
-    # these explicit buffers raise the ceiling for fast / high-RTT servers.
-    # 4 MiB covers ~1 Gbps at 30 ms RTT with headroom; auto-tuning only grows
-    # to what a flow needs, so idle connections don't pay it.
-    TCP_SNDBUF = "4m"
-    TCP_RCVBUF = "4m"
+    # Throughput tuning (v1.19.2). `-tcp-auto-tuning` lets gVisor's TCP window
+    # grow toward the bandwidth-delay product; the buffers below are the CEILING
+    # it can grow to. v2.1.6: the default ceiling is the "balanced" preset
+    # (1m/1m), NOT the old 4m/4m which let private memory balloon to multiple
+    # GB under many concurrent flows. start() overrides these from the user's
+    # performance_preset; they remain instance attributes so _build_args stays
+    # a pure, unit-testable function.
+    TCP_SNDBUF, TCP_RCVBUF = BUFFER_PRESETS[DEFAULT_BUFFER_PRESET]
 
     # v2.0.1: how long an IDLE UDP session is kept in gVisor's netstack. A
     # UDP-heavy app (Telegram calls/QUIC, a game, a torrent's DHT) opens many
@@ -121,9 +150,13 @@ class Tun2socksProcess:
         ]
 
     def start(self, socks_addr: str = "127.0.0.1:2081",
-              mtu: int = 1500, loglevel: str = "warn") -> None:
+              mtu: int = 1500, loglevel: str = "warn",
+              buffer_preset: Optional[str] = None) -> None:
         if self.is_running():
             raise RuntimeError("tun2socks is already running")
+        # Resolve the per-flow TCP buffer ceiling from the chosen preset (None →
+        # balanced default). Set on the instance so _build_args picks it up.
+        self.TCP_SNDBUF, self.TCP_RCVBUF = resolve_buffer_preset(buffer_preset)
         exe = paths.tun2socks_exe()
         if not exe.is_file():
             raise FileNotFoundError(f"tun2socks binary not found at {exe}")
@@ -166,6 +199,12 @@ class Tun2socksProcess:
     def is_running(self) -> bool:
         proc = self._proc
         return proc is not None and proc.poll() is None
+
+    def pid(self) -> Optional[int]:
+        """OS pid of the running tun2socks process, or None. Used by the
+        runtime memory watchdog to sample its private memory / handle count."""
+        proc = self._proc
+        return proc.pid if (proc is not None and proc.poll() is None) else None
 
     def returncode(self) -> Optional[int]:
         return self._proc.returncode if self._proc else None

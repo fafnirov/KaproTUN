@@ -833,6 +833,42 @@ class SettingsPage(QWidget):
         theme_hint.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(theme_hint)
 
+        # --- Performance / memory preset (v2.1.6) ---
+        # tun2socks buffers each TCP flow up to (sndbuf + rcvbuf); the old
+        # 4m/4m default ballooned to multiple GB under many flows. This picks
+        # the per-flow ceiling. Balanced (1m) is the safe default; takes effect
+        # at the next connect (tun2socks reads it at start).
+        _ru = _i18n.current_locale() == "ru"
+        perf_row = QHBoxLayout()
+        perf_row.setContentsMargins(0, 6, 0, 0)
+        perf_label = QLabel("Производительность" if _ru else "Performance")
+        perf_row.addWidget(perf_label)
+        perf_row.addStretch(1)
+        self.perf_combo = QComboBox()
+        self.perf_combo.addItem("Сбалансированно (1 МБ)" if _ru else "Balanced (1 MB)", "balanced")
+        self.perf_combo.addItem("Экономия памяти (512 КБ)" if _ru else "Low memory (512 KB)", "economy")
+        self.perf_combo.addItem("Макс. скорость (4 МБ)" if _ru else "Max speed (4 MB)", "speed")
+        current_perf = str(manager.settings.get("performance_preset", "balanced"))
+        for i in range(self.perf_combo.count()):
+            if self.perf_combo.itemData(i) == current_perf:
+                self.perf_combo.setCurrentIndex(i)
+                break
+        self.perf_combo.currentIndexChanged.connect(self._on_perf_preset_changed)
+        perf_row.addWidget(self.perf_combo)
+        outer.addLayout(perf_row)
+        perf_hint = QLabel(
+            "Размер TCP-буферов tun2socks. Меньше — меньше памяти, больше — "
+            "выше скорость на быстрых каналах. Применяется при следующем "
+            "подключении."
+            if _ru else
+            "tun2socks TCP buffer size. Lower = less memory; higher = more "
+            "speed on fast links. Applies on the next connect."
+        )
+        perf_hint.setObjectName("dim")
+        perf_hint.setWordWrap(True)
+        perf_hint.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(perf_hint)
+
         # Separator
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
@@ -1063,6 +1099,14 @@ class SettingsPage(QWidget):
         if self._ublock_helper is not None:
             self._ublock_helper.setVisible(key == "adguard")
         self.settings_changed.emit()
+
+    def _on_perf_preset_changed(self, _index: int) -> None:
+        """Persist the tun2socks buffer preset. Applied at the next connect
+        (tun2socks reads performance_preset when it starts)."""
+        key = self.perf_combo.currentData()
+        if key:
+            self._manager.update_settings(performance_preset=str(key))
+            self.settings_changed.emit()
 
     def _on_theme_changed(self, _index: int) -> None:
         """Persist theme + apply it live to the running app.
@@ -1473,6 +1517,21 @@ class MainWindow(QMainWindow):
         self._dns_watchdog = _DnsWatchdog(self.manager.tun_dns_guarded, parent=self)
         self._dns_watchdog.unhealthy.connect(self._on_dns_unhealthy)
         self._dns_watchdog.start()
+
+        # Runtime memory watchdog (v2.1.6): sample tun2socks/xray private memory
+        # + handles every 10 s (cheap psutil reads, non-blocking → fine on the
+        # UI thread), log a summary periodically, and on a genuine runaway do a
+        # bounded clean reconnect (which frees the helper processes' memory)
+        # with a cooldown + attempt cap so it can never loop.
+        self._mem_log_tick = 0
+        self._mem_heal_count = 0
+        self._mem_heal_max = 3
+        self._mem_heal_cooldown_s = 180.0
+        self._last_mem_heal_ts = 0.0
+        self._mem_heal_exhausted_notified = False
+        self._mem_timer = QTimer(self)
+        self._mem_timer.timeout.connect(self._check_memory)
+        self._mem_timer.start(10000)
 
         # --- App-shell layout (everything inside the rounded dark frame) ---
         shell = QWidget()
@@ -2191,11 +2250,83 @@ class MainWindow(QMainWindow):
         self._connected_at = 0.0
         self._reconnect_timer.start(delay * 1000)
 
+    def _check_memory(self) -> None:
+        """Periodic (10 s) runtime memory/handle sample for tun2socks + xray.
+        Logs a summary roughly once a minute and, on a genuine runaway, hands
+        off to the bounded self-heal. Only active while a TUN session is up;
+        cheap and non-blocking, so it's fine on the UI thread."""
+        if not self.manager.is_connected() or self.manager.current_mode() != MODE_TUN:
+            return
+        try:
+            stats = self.manager.sample_runtime_stats()
+        except Exception:
+            return
+        # Log a one-line summary ~every 60 s (every 6th 10 s tick) for the Logs
+        # page, so the user/diagnostics can see the trend, not just breaches.
+        self._mem_log_tick = (self._mem_log_tick + 1) % 6
+        if self._mem_log_tick == 0:
+            try:
+                self.logs_page.append(self.manager.format_runtime_stats(stats))
+            except Exception:
+                pass
+        reason = self.manager.memory_pressure_reason(stats)
+        if reason:
+            self._on_memory_pressure(reason)
+
+    def _on_memory_pressure(self, reason: str) -> None:
+        """A helper process is in memory/handle runaway. Do a BOUNDED clean
+        reconnect (disconnect frees its memory; reconnect restarts fresh),
+        gated by a cooldown AND an attempt cap so a persistent leak can't spin
+        an endless reconnect loop. After the cap we stop healing and just keep
+        logging — the user can reconnect manually."""
+        if self._connecting or self._reconnect_timer.isActive():
+            return
+        now = time.time()
+        if now - self._last_mem_heal_ts < self._mem_heal_cooldown_s:
+            # Within cooldown — log the breach but don't act yet (memory grows
+            # slowly; back-to-back reconnects would just thrash).
+            self.logs_page.append(f"[!] Память: {reason} — жду окончания cooldown…")
+            return
+        if self._mem_heal_count >= self._mem_heal_max:
+            if not self._mem_heal_exhausted_notified:
+                self.logs_page.append(
+                    f"[!] Память: {reason}. Авто-восстановление исчерпано "
+                    f"({self._mem_heal_max}) — оставляю как есть, переподключи "
+                    f"вручную, когда удобно."
+                )
+                show_toast(
+                    self,
+                    "VPN: высокое потребление памяти, авто-восстановление "
+                    "исчерпано. Переподключи вручную.",
+                    kind="error", duration_ms=10000,
+                )
+                self._mem_heal_exhausted_notified = True
+            return
+        self._mem_heal_count += 1
+        self._last_mem_heal_ts = now
+        self.logs_page.append(
+            f"[!] Память: {reason} — чистый reconnect #{self._mem_heal_count}/"
+            f"{self._mem_heal_max} для сброса буферов (память освободится)…"
+        )
+        show_toast(self, f"Сброс памяти VPN — переподключение #{self._mem_heal_count}…",
+                   kind="info", duration_ms=4000)
+        # Clean disconnect frees tun2socks/xray memory and restores
+        # DNS/routes/proxy; the timer reconnects to the same server.
+        saved = self._active_config
+        self.manager.disconnect()
+        self._active_config = saved
+        self._connected_at = 0.0
+        self._reconnect_timer.start(1000)
+
     def _do_disconnect(self) -> None:
         # User asked for it — kill the auto-reconnect chain too so we
         # don't bring the VPN back up against their wishes.
         self._reconnect_timer.stop()
         self._reconnect_attempts = 0
+        # Fresh session next time → fresh memory-heal budget.
+        self._mem_heal_count = 0
+        self._mem_heal_exhausted_notified = False
+        self._last_mem_heal_ts = 0.0
         self.manager.disconnect()
         self._connected_at = 0.0
         self.logs_page.append("[*] Отключено, системный прокси восстановлен")
