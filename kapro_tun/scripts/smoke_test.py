@@ -36,6 +36,17 @@ _REPO_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath
 if _REPO_ROOT not in _sys.path:
     _sys.path.insert(0, _REPO_ROOT)
 
+# Windows-console safety: assert messages / labels can contain non-ASCII
+# (Cyrillic, →, ≥). On a cp866/cp1251 console a bare print() of those raises
+# UnicodeEncodeError and crashes the whole suite mid-report. Reconfigure
+# stdout/stderr to UTF-8 with errors="replace" so output degrades to '?'
+# instead of crashing. Best-effort (no-op on streams that can't reconfigure).
+for _stream in (_sys.stdout, _sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import json
 import sys
 from typing import Callable
@@ -978,46 +989,169 @@ def _performance_preset_default_is_safe() -> None:
 check("storage: performance_preset defaults to balanced", _performance_preset_default_is_safe)
 
 
-def _memory_pressure_thresholds() -> None:
-    """v2.1.6 runaway-memory guard: memory_pressure_reason fires above the
-    tun2socks memory/handle thresholds and the xray memory threshold, stays
-    quiet at normal levels, and never raises on missing samples."""
-    from kapro_tun.core import controller
+def _memory_pressure_tiered() -> None:
+    """v2.1.7 tiered guard: memory_pressure_reason classifies tun2socks (mem OR
+    handles OR threads) and xray (mem OR handles) into 'moderate'/'critical',
+    critical taking precedence; quiet when healthy; never raises on None."""
+    from kapro_tun.core import controller as C
     from kapro_tun.core.controller import ConnectionManager
     from kapro_tun.core.proc_stats import ProcSample
 
     mgr = ConnectionManager(on_log=lambda _l: None)
 
-    def reason(tun_mem, tun_h, xray_mem, xray_h):
-        return mgr.memory_pressure_reason({
-            "tun2socks": ProcSample(tun_mem, tun_h),
-            "xray": ProcSample(xray_mem, xray_h),
+    def sev(t_mem, t_h, t_thr, x_mem, x_h):
+        v = mgr.memory_pressure_reason({
+            "tun2socks": ProcSample(t_mem, t_h, t_thr, 0.0),
+            "xray": ProcSample(x_mem, x_h, 0, 0.0),
         })
+        return v[0] if v else None
 
-    # Healthy → no pressure.
-    if reason(300_000_000, 800, 400_000_000, 5000) is not None:
-        raise AssertionError("healthy usage wrongly flagged as pressure")
-    # tun2socks memory runaway.
-    if not reason(controller.MEM_HEAL_TUN2SOCKS_BYTES + 1, 800, 0, 0):
-        raise AssertionError("tun2socks memory runaway not detected")
-    # tun2socks handle runaway.
-    if not reason(100_000_000, controller.MEM_HEAL_TUN2SOCKS_HANDLES + 1, 0, 0):
-        raise AssertionError("tun2socks handle runaway not detected")
-    # xray memory runaway (no handle trigger for xray by design).
-    if not reason(100_000_000, 500, controller.MEM_HEAL_XRAY_BYTES + 1, 90_000):
-        raise AssertionError("xray memory runaway not detected")
-    # xray huge handle count alone must NOT trip (legit under load).
-    if reason(100_000_000, 500, 500_000_000, 90_000) is not None:
-        raise AssertionError("xray handle count alone should not trip the guard")
-    # Missing samples → no crash, no false positive.
+    if sev(300_000_000, 800, 200, 400_000_000, 5_000) is not None:
+        raise AssertionError("healthy usage wrongly flagged")
+    # tun2socks moderate, each facet.
+    if sev(C.MEM_TUN2SOCKS_MOD_BYTES + 1, 0, 0, 0, 0) != "moderate":
+        raise AssertionError("tun mem moderate not classified")
+    if sev(0, C.MEM_TUN2SOCKS_MOD_HANDLES + 1, 0, 0, 0) != "moderate":
+        raise AssertionError("tun handles moderate not classified")
+    if sev(0, 0, C.MEM_TUN2SOCKS_MOD_THREADS + 1, 0, 0) != "moderate":
+        raise AssertionError("tun threads moderate not classified")
+    # tun2socks critical, each facet.
+    if sev(C.MEM_TUN2SOCKS_CRIT_BYTES + 1, 0, 0, 0, 0) != "critical":
+        raise AssertionError("tun mem critical not classified")
+    if sev(0, C.MEM_TUN2SOCKS_CRIT_HANDLES + 1, 0, 0, 0) != "critical":
+        raise AssertionError("tun handles critical not classified")
+    if sev(0, 0, C.MEM_TUN2SOCKS_CRIT_THREADS + 1, 0, 0) != "critical":
+        raise AssertionError("tun threads critical (UDP storm) not classified")
+    # xray moderate + critical.
+    if sev(0, 0, 0, C.MEM_XRAY_MOD_BYTES + 1, 0) != "moderate":
+        raise AssertionError("xray mem moderate not classified")
+    if sev(0, 0, 0, 0, C.MEM_XRAY_MOD_HANDLES + 1) != "moderate":
+        raise AssertionError("xray handles moderate not classified")
+    if sev(0, 0, 0, C.MEM_XRAY_CRIT_BYTES + 1, 0) != "critical":
+        raise AssertionError("xray mem critical not classified")
+    if sev(0, 0, 0, 0, C.MEM_XRAY_CRIT_HANDLES + 1) != "critical":
+        raise AssertionError("xray handles critical not classified")
+    # Critical takes precedence over a co-occurring moderate.
+    if sev(C.MEM_TUN2SOCKS_CRIT_BYTES + 1, C.MEM_TUN2SOCKS_MOD_HANDLES + 1, 0, 0, 0) != "critical":
+        raise AssertionError("critical must outrank moderate")
+    # None samples → no crash, no false positive.
     if mgr.memory_pressure_reason({"tun2socks": None, "xray": None}) is not None:
         raise AssertionError("None samples should yield no pressure")
-    # Thresholds are in the sane 1.5–2.5 GB band the task asked for.
-    if not (1_500_000_000 <= controller.MEM_HEAL_TUN2SOCKS_BYTES <= 2_000_000_000):
-        raise AssertionError("tun2socks memory threshold outside 1.5–2 GB band")
+    # Critical thresholds sit in the band the task asked for (~3 GB / 25k).
+    if not (2_500_000_000 <= C.MEM_TUN2SOCKS_CRIT_BYTES <= 3_500_000_000):
+        raise AssertionError("tun2socks critical mem threshold out of band")
+    if C.MEM_TUN2SOCKS_CRIT_HANDLES != 25_000:
+        raise AssertionError("tun2socks critical handle threshold should be 25k")
 
 
-check("controller: runaway memory/handle thresholds", _memory_pressure_thresholds)
+check("controller: tiered runaway classification (moderate/critical)",
+      _memory_pressure_tiered)
+
+
+def _mem_heal_decision_logic() -> None:
+    """v2.1.7: critical heals bypass cooldown, moderate respects it, the cap
+    stops the loop, and economy escalation kicks in after repeated runaway."""
+    from kapro_tun.core.controller import mem_heal_decision as D
+
+    # Critical heals NOW even though a heal just happened (cooldown bypassed).
+    if not D("critical", 1000.0, 1000.0, 0, max_heals=4, cooldown_s=180.0)["do_heal"]:
+        raise AssertionError("critical must bypass cooldown")
+    # Moderate within cooldown → wait.
+    if D("moderate", 1000.0, 999.0, 0, max_heals=4, cooldown_s=180.0)["do_heal"]:
+        raise AssertionError("moderate must respect cooldown")
+    # Moderate after cooldown → heal.
+    if not D("moderate", 1000.0, 800.0, 0, max_heals=4, cooldown_s=180.0)["do_heal"]:
+        raise AssertionError("moderate should heal once cooldown elapsed")
+    # At the cap → exhausted, no heal (no infinite loop), even for critical.
+    d = D("critical", 1e9, 0.0, 4, max_heals=4)
+    if d["do_heal"] or not d["exhausted"]:
+        raise AssertionError("must be exhausted at the cap (no endless reconnect loop)")
+    # Economy escalation from the escalate_after-th heal, not the first.
+    if D("critical", 1e9, 0.0, 0, max_heals=4, escalate_after=2)["escalate_economy"]:
+        raise AssertionError("must not escalate to economy on the first heal")
+    if not D("critical", 1e9, 0.0, 1, max_heals=4, escalate_after=2)["escalate_economy"]:
+        raise AssertionError("should escalate to economy after repeated runaway")
+    # No severity → no action at all.
+    n = D(None, 1e9, 0.0, 0)
+    if n["do_heal"] or n["exhausted"] or n["escalate_economy"]:
+        raise AssertionError("no severity → no action")
+
+
+check("controller: mem_heal_decision (critical bypass / cooldown / cap / economy)",
+      _mem_heal_decision_logic)
+
+
+def _udp_timeout_presets() -> None:
+    """v2.1.7: the idle-UDP-session timeout is now preset-driven and the
+    default is 10s, NOT the old 30s that let UDP sessions pile up."""
+    from kapro_tun.core import tun2socks_process as t2s
+    if t2s.resolve_udp_timeout(None) == "30s":
+        raise AssertionError("default UDP timeout must not be 30s")
+    if t2s.resolve_udp_timeout("balanced") != "10s":
+        raise AssertionError("balanced UDP timeout should be 10s")
+    if t2s.resolve_udp_timeout("economy") != "5s":
+        raise AssertionError("economy UDP timeout should be 5s")
+    if t2s.resolve_udp_timeout("speed") != "30s":
+        raise AssertionError("speed UDP timeout should be 30s (explicit only)")
+    if t2s.resolve_udp_timeout("garbage") != "10s":
+        raise AssertionError("unknown preset must fall back to balanced 10s")
+    args = t2s.Tun2socksProcess()._build_args("tun2socks", "127.0.0.1:2081", 1500, "warn")
+    udp = args[args.index("-udp-timeout") + 1]
+    if udp == "30s":
+        raise AssertionError("default -udp-timeout must not be 30s")
+    if udp != "10s":
+        raise AssertionError(f"default -udp-timeout should be 10s, got {udp}")
+
+
+check("tun2socks: idle-UDP timeout preset-driven, default 10s (was 30s)",
+      _udp_timeout_presets)
+
+
+def _app_log_redacts_secrets() -> None:
+    """v2.1.7: app.log writes diagnostic lines to disk with rotation, and
+    NEVER leaks share-URLs / UUIDs / keys (redacted defence-in-depth)."""
+    import os
+    import tempfile
+    from pathlib import Path
+    from kapro_tun.core import paths, app_log
+
+    # redact() is pure and strips the named secret kinds.
+    r = app_log.redact(
+        "x vless://u@h?pbk=K 12345678-1234-1234-1234-1234567890ab https://sub.example/p")
+    if "vless://" in r or "https://" in r:
+        raise AssertionError(f"share/URL not redacted: {r}")
+    if "12345678-1234-1234-1234-1234567890ab" in r:
+        raise AssertionError(f"UUID not redacted: {r}")
+
+    tmp = tempfile.mkdtemp(prefix="kaprotun_applog_")
+    logf = os.path.join(tmp, "app.log")
+    orig = paths.app_log_file
+    paths.app_log_file = lambda: Path(logf)
+    app_log._reset_for_test()
+    try:
+        secret = ("vless://00000000-0000-0000-0000-000000000000@host:443"
+                  "?pbk=SECRETKEY#srv")
+        app_log.log("diag line; " + secret)
+        app_log.log("[mem] tun2socks: 1.2 ГБ, 8000 хэндлов, 320 потоков")
+        app_log._reset_for_test()  # close handlers → flush to disk
+        data = Path(logf).read_text(encoding="utf-8", errors="replace")
+        if ("vless://" in data or "SECRETKEY" in data
+                or "00000000-0000-0000-0000-000000000000" in data):
+            raise AssertionError("secret leaked into app.log")
+        if "diag line" not in data or "tun2socks" not in data:
+            raise AssertionError("diagnostic lines were not written to app.log")
+    finally:
+        paths.app_log_file = orig
+        app_log._reset_for_test()
+        try:
+            for f in os.listdir(tmp):
+                os.remove(os.path.join(tmp, f))
+            os.rmdir(tmp)
+        except OSError:
+            pass
+
+
+check("app_log: writes diagnostics to disk, redacts secrets", _app_log_redacts_secrets)
 
 
 def _xray_policy_bounds_resources() -> None:
@@ -3555,29 +3689,47 @@ section("TUN reliability — recovery / DNS health / watchdog")
 
 
 def _dns_health_probe_contract() -> None:
-    """probe() is bounded, never raises, and reads success/failure correctly.
-
-    Deterministic offline: 'localhost' always resolves (loopback / hosts file);
-    a '.invalid' TLD (RFC 6761) never resolves — no network dependency either
-    way."""
+    """probe() reads success/failure from the OS resolver, is bounded, and
+    never raises. DETERMINISTIC via a monkeypatched getaddrinfo — independent of
+    the host's real DNS / TUN state (the old 'localhost' version could fail on a
+    Windows box mid-TUN, which is exactly what broke this test in the field)."""
     from kapro_tun.core import dns_health
 
-    if dns_health.probe(hosts=("localhost",), timeout=2.0, attempts=1) is not True:
-        raise AssertionError("probe() should resolve localhost → True")
+    orig = dns_health.socket.getaddrinfo
+    calls = {"n": 0}
 
-    bad = dns_health.probe(
-        hosts=("nonexistent-kaprotun-xyz.invalid",), timeout=1.0, attempts=1)
-    if bad is not False:
-        raise AssertionError("probe() should return False for an .invalid host")
+    def _ok(*a, **k):
+        return [(2, 1, 6, "", ("1.2.3.4", 0))]
 
-    # Must never raise, whatever it's handed.
-    for kw in ({}, {"hosts": ("localhost",)}, {"timeout": 0.1, "attempts": 1}):
-        r = dns_health.probe(**kw)
-        if not isinstance(r, bool):
-            raise AssertionError(f"probe({kw}) returned non-bool {type(r)}")
+    def _boom(*a, **k):
+        calls["n"] += 1
+        raise OSError("no resolve")
+
+    def _raise_rt(*a, **k):
+        raise RuntimeError("unexpected")
+
+    try:
+        # All lookups succeed → probe True.
+        dns_health.socket.getaddrinfo = _ok
+        if dns_health.probe(hosts=("example.test",), timeout=1.0, attempts=1) is not True:
+            raise AssertionError("probe should be True when getaddrinfo succeeds")
+
+        # All lookups fail (OSError) → probe False, and it actually tried.
+        dns_health.socket.getaddrinfo = _boom
+        if dns_health.probe(hosts=("a.test", "b.test"), timeout=0.5, attempts=2) is not False:
+            raise AssertionError("probe should be False when getaddrinfo fails")
+        if calls["n"] == 0:
+            raise AssertionError("probe never actually invoked getaddrinfo")
+
+        # Never raises — even if the resolver throws a non-OSError.
+        dns_health.socket.getaddrinfo = _raise_rt
+        if not isinstance(dns_health.probe(hosts=("c.test",), timeout=0.5, attempts=1), bool):
+            raise AssertionError("probe must return a bool, never raise")
+    finally:
+        dns_health.socket.getaddrinfo = orig
 
 
-check("dns_health.probe: bounded, never raises, correct verdict",
+check("dns_health.probe: deterministic verdict, bounded, never raises",
       _dns_health_probe_contract)
 
 

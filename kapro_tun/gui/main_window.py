@@ -37,9 +37,10 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..core import (
-    admin, autostart, dns_options, storage, tun2socks_installer,
+    admin, app_log, autostart, dns_options, storage, tun2socks_installer,
     updater, xray_installer, xray_stats,
 )
+from ..core import controller as _controller
 from ..core.controller import MODE_HTTP_PROXY, MODE_TUN
 from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
@@ -1525,7 +1526,7 @@ class MainWindow(QMainWindow):
         # with a cooldown + attempt cap so it can never loop.
         self._mem_log_tick = 0
         self._mem_heal_count = 0
-        self._mem_heal_max = 3
+        self._mem_heal_max = 4          # heal1, heal2→economy, heal3-4 economy, then stop
         self._mem_heal_cooldown_s = 180.0
         self._last_mem_heal_ts = 0.0
         self._mem_heal_exhausted_notified = False
@@ -2068,6 +2069,9 @@ class MainWindow(QMainWindow):
         self.logs_page.append(
             f"[*] Подключено к «{self._active_config.name}» ({mode_tag})"
         )
+        # On-disk lifecycle line — mode + preset only, no server name/secret.
+        app_log.log(f"[connect] подключено, режим {mode_tag}, preset="
+                    f"{self.manager.settings.get('performance_preset', 'balanced')}")
         show_toast(self, f"Подключено к «{self._active_config.name}»", kind="success")
         self._refresh_home()
         # v1.14.3: show country + map immediately based on the config
@@ -2251,67 +2255,101 @@ class MainWindow(QMainWindow):
         self._reconnect_timer.start(delay * 1000)
 
     def _check_memory(self) -> None:
-        """Periodic (10 s) runtime memory/handle sample for tun2socks + xray.
-        Logs a summary roughly once a minute and, on a genuine runaway, hands
-        off to the bounded self-heal. Only active while a TUN session is up;
-        cheap and non-blocking, so it's fine on the UI thread."""
+        """Periodic (10 s) runtime sample for tun2socks + xray. Logs a summary
+        ~once a minute (to Logs page AND on-disk app.log) and, on a genuine
+        runaway, hands off to the tiered self-heal. Only while a TUN session is
+        up; cheap, non-blocking → fine on the UI thread."""
         if not self.manager.is_connected() or self.manager.current_mode() != MODE_TUN:
             return
         try:
             stats = self.manager.sample_runtime_stats()
         except Exception:
             return
-        # Log a one-line summary ~every 60 s (every 6th 10 s tick) for the Logs
-        # page, so the user/diagnostics can see the trend, not just breaches.
         self._mem_log_tick = (self._mem_log_tick + 1) % 6
         if self._mem_log_tick == 0:
             try:
-                self.logs_page.append(self.manager.format_runtime_stats(stats))
+                line = self.manager.format_runtime_stats(stats)
+                self.logs_page.append(line)
+                app_log.log(line)
             except Exception:
                 pass
-        reason = self.manager.memory_pressure_reason(stats)
-        if reason:
-            self._on_memory_pressure(reason)
+        try:
+            verdict = self.manager.memory_pressure_reason(stats)
+        except Exception:
+            verdict = None
+        if verdict:
+            severity, reason = verdict
+            # Always record the breach with full stats on disk, even if a
+            # cooldown defers the actual heal.
+            try:
+                app_log.log(f"[mem-pressure/{severity}] {reason} | "
+                            f"{self.manager.format_runtime_stats(stats)}")
+            except Exception:
+                pass
+            self._on_memory_pressure(severity, reason)
 
-    def _on_memory_pressure(self, reason: str) -> None:
-        """A helper process is in memory/handle runaway. Do a BOUNDED clean
-        reconnect (disconnect frees its memory; reconnect restarts fresh),
-        gated by a cooldown AND an attempt cap so a persistent leak can't spin
-        an endless reconnect loop. After the cap we stop healing and just keep
-        logging — the user can reconnect manually."""
+    def _on_memory_pressure(self, severity: str, reason: str) -> None:
+        """Tiered, BOUNDED self-heal for a memory/handle/thread runaway.
+        CRITICAL heals immediately; MODERATE respects a cooldown; after repeated
+        runaway we force the 'economy' preset (smallest buffers + shortest UDP
+        timeout) for the next connect; after the attempt cap we stop and ask the
+        user to reconnect manually — never an endless loop. A clean disconnect
+        frees both helper processes' memory and restores DNS/routes/proxy."""
         if self._connecting or self._reconnect_timer.isActive():
             return
         now = time.time()
-        if now - self._last_mem_heal_ts < self._mem_heal_cooldown_s:
-            # Within cooldown — log the breach but don't act yet (memory grows
-            # slowly; back-to-back reconnects would just thrash).
-            self.logs_page.append(f"[!] Память: {reason} — жду окончания cooldown…")
-            return
-        if self._mem_heal_count >= self._mem_heal_max:
+        d = _controller.mem_heal_decision(
+            severity, now, self._last_mem_heal_ts, self._mem_heal_count,
+            max_heals=self._mem_heal_max, cooldown_s=self._mem_heal_cooldown_s)
+
+        if d["exhausted"]:
             if not self._mem_heal_exhausted_notified:
-                self.logs_page.append(
-                    f"[!] Память: {reason}. Авто-восстановление исчерпано "
-                    f"({self._mem_heal_max}) — оставляю как есть, переподключи "
-                    f"вручную, когда удобно."
-                )
-                show_toast(
-                    self,
-                    "VPN: высокое потребление памяти, авто-восстановление "
-                    "исчерпано. Переподключи вручную.",
-                    kind="error", duration_ms=10000,
-                )
+                msg = (f"[!] Память: {reason}. Авто-восстановление исчерпано "
+                       f"({self._mem_heal_max}) — оставляю как есть, переподключи "
+                       f"вручную, когда удобно.")
+                self.logs_page.append(msg)
+                app_log.log(msg)
+                show_toast(self, "VPN: высокое потребление памяти, "
+                           "авто-восстановление исчерпано. Переподключи вручную.",
+                           kind="error", duration_ms=10000)
                 self._mem_heal_exhausted_notified = True
             return
+
+        if not d["do_heal"]:
+            # Moderate breach still inside the cooldown — record, wait.
+            msg = f"[!] Память: {reason} — жду окончания cooldown…"
+            self.logs_page.append(msg)
+            app_log.log(msg)
+            return
+
+        # Escalate to economy after repeated runaway, so the restart actually
+        # changes behaviour instead of refilling the same buffers.
+        if (d["escalate_economy"]
+                and str(self.manager.settings.get("performance_preset")) != "economy"):
+            self.manager.update_settings(performance_preset="economy")
+            em = ("[!] Память: повторный runaway — переключаю профиль на "
+                  "«Экономия памяти» (512к буферы, UDP-timeout 5с) для следующих "
+                  "подключений.")
+            self.logs_page.append(em)
+            app_log.log(em)
+            try:                       # keep the Settings combo in sync
+                combo = self.settings_page.perf_combo
+                keys = [combo.itemData(i) for i in range(combo.count())]
+                combo.setCurrentIndex(keys.index("economy"))
+            except Exception:
+                pass
+
         self._mem_heal_count += 1
         self._last_mem_heal_ts = now
-        self.logs_page.append(
-            f"[!] Память: {reason} — чистый reconnect #{self._mem_heal_count}/"
-            f"{self._mem_heal_max} для сброса буферов (память освободится)…"
-        )
+        tag = "КРИТИЧНО" if severity == "critical" else "повышено"
+        when = "немедленно" if severity == "critical" else "после cooldown"
+        msg = (f"[!] Память [{tag}]: {reason} — чистый reconnect "
+               f"#{self._mem_heal_count}/{self._mem_heal_max} ({when}); "
+               f"память helper-процессов освободится.")
+        self.logs_page.append(msg)
+        app_log.log(msg)
         show_toast(self, f"Сброс памяти VPN — переподключение #{self._mem_heal_count}…",
                    kind="info", duration_ms=4000)
-        # Clean disconnect frees tun2socks/xray memory and restores
-        # DNS/routes/proxy; the timer reconnects to the same server.
         saved = self._active_config
         self.manager.disconnect()
         self._active_config = saved
@@ -2330,6 +2368,7 @@ class MainWindow(QMainWindow):
         self.manager.disconnect()
         self._connected_at = 0.0
         self.logs_page.append("[*] Отключено, системный прокси восстановлен")
+        app_log.log("[disconnect] по запросу пользователя")
         show_toast(self, "Отключено", kind="info")
         self._refresh_home()
 

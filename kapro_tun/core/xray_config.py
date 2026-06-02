@@ -544,8 +544,15 @@ def build_config(
             # does NOT touch routing, and the stats API below is untouched, so
             # the UI's traffic graph keeps working.
             "levels": {
+                # Level 0 is the DEFAULT level for every inbound/outbound (we
+                # never assign explicit user levels), so these apply to all
+                # traffic — TCP and the UDP flows tun2socks forwards. v2.1.7:
+                # connIdle tightened 300→180 to reap idle/abandoned sessions
+                # sooner (the handle/flow accumulation that ballooned xray);
+                # still well above Telegram/websocket keepalive intervals
+                # (<60 s) and active calls (never idle), so nothing breaks.
                 "0": {
-                    "connIdle": 300,     # drop idle connections after 5 min
+                    "connIdle": 180,     # drop idle connections after 3 min
                     "handshake": 4,      # abort a stalled handshake after 4 s
                     "uplinkOnly": 2,     # half-closed (peer done sending): 2 s
                     "downlinkOnly": 5,   # half-closed (we done sending): 5 s

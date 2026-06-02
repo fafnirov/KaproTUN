@@ -8,7 +8,7 @@ import time
 from typing import Callable, Optional
 
 from . import (
-    admin, dns_options, dns_health, geoip_ru, hysteria_installer,
+    admin, app_log, dns_options, dns_health, geoip_ru, hysteria_installer,
     hysteria_process, ipv6_block, killswitch, paths, proc_stats, storage,
     tun_recovery, webrtc_block, system_proxy, xray_config,
 )
@@ -106,15 +106,60 @@ _SERVICE_BYPASS: list[tuple[str, str]] = [
 _ALWAYS_BYPASS: list[tuple[str, str]] = _DNS_RESOLVER_BYPASS + _SERVICE_BYPASS
 
 
-# Runaway-memory guard thresholds (v2.1.6). Set well ABOVE healthy use (with
-# the v2.1.6 balanced 1m/1m buffers tun2socks normally sits in the low
-# hundreds of MB) so only a genuine leak / flood trips them — but below the
-# multi-GB levels that wedge the machine. tun2socks is the primary offender;
-# xray gets a higher memory bar and no handle trigger (it legitimately holds
-# many connection handles under load, so a count alone isn't a fault).
-MEM_HEAL_TUN2SOCKS_BYTES = 1_800_000_000     # ~1.8 GB private
-MEM_HEAL_TUN2SOCKS_HANDLES = 12_000          # handle runaway
-MEM_HEAL_XRAY_BYTES = 2_500_000_000          # ~2.5 GB private
+# Runaway-resource guard thresholds (v2.1.7 — two tiers).
+#
+# MODERATE: above healthy use; heal on a cooldown so a slow climb doesn't
+#   thrash the connection.
+# CRITICAL: near the levels that wedge the machine (the reported 4.7 GB / 38k
+#   handles / 900 threads); heal IMMEDIATELY, bypassing the cooldown.
+#
+# tun2socks triggers on memory OR handles OR threads (each a facet of the
+# UDP/session storm). xray triggers on memory OR a HIGH handle count (its 66k
+# in the report); its threads aren't a reliable fault signal so they're logged
+# but not gated on.
+MEM_TUN2SOCKS_MOD_BYTES = 1_800_000_000      # ~1.8 GB
+MEM_TUN2SOCKS_MOD_HANDLES = 12_000
+MEM_TUN2SOCKS_MOD_THREADS = 500
+MEM_TUN2SOCKS_CRIT_BYTES = 3_000_000_000     # ~3 GB
+MEM_TUN2SOCKS_CRIT_HANDLES = 25_000
+MEM_TUN2SOCKS_CRIT_THREADS = 800
+
+MEM_XRAY_MOD_BYTES = 2_500_000_000           # ~2.5 GB
+MEM_XRAY_MOD_HANDLES = 40_000
+MEM_XRAY_CRIT_BYTES = 3_500_000_000          # ~3.5 GB
+MEM_XRAY_CRIT_HANDLES = 60_000
+
+# Back-compat aliases (kept so any external reference still resolves).
+MEM_HEAL_TUN2SOCKS_BYTES = MEM_TUN2SOCKS_MOD_BYTES
+MEM_HEAL_TUN2SOCKS_HANDLES = MEM_TUN2SOCKS_MOD_HANDLES
+MEM_HEAL_XRAY_BYTES = MEM_XRAY_MOD_BYTES
+
+
+def mem_heal_decision(severity: Optional[str], now: float, last_heal_ts: float,
+                      heal_count: int, *, max_heals: int = 4,
+                      cooldown_s: float = 180.0, escalate_after: int = 2) -> dict:
+    """Pure decision for the memory watchdog — no I/O, fully unit-testable.
+
+    Returns {do_heal, exhausted, escalate_economy}:
+      * critical severity heals IMMEDIATELY (ignores cooldown);
+      * moderate heals only once the cooldown since last_heal_ts elapsed;
+      * once heal_count reaches max_heals we stop (exhausted) — no endless loop;
+      * from the escalate_after-th heal onward we ask the caller to drop the
+        performance preset to 'economy' so the next reconnect uses the smallest
+        buffers + shortest UDP timeout.
+    """
+    if not severity:
+        return {"do_heal": False, "exhausted": False, "escalate_economy": False}
+    if heal_count >= max_heals:
+        return {"do_heal": False, "exhausted": True, "escalate_economy": False}
+    if severity == "critical":
+        do_heal = True
+    elif severity == "moderate":
+        do_heal = (now - last_heal_ts) >= cooldown_s
+    else:
+        do_heal = False
+    escalate = do_heal and (heal_count + 1) >= escalate_after
+    return {"do_heal": do_heal, "exhausted": False, "escalate_economy": escalate}
 
 
 class ConnectionManager:
@@ -140,6 +185,9 @@ class ConnectionManager:
         atexit.register(self._atexit_cleanup)
 
     def _log(self, msg: str) -> None:
+        # Mirror every controller diagnostic to the on-disk app.log (redacted),
+        # so a hang/crash leaves a trail beyond the in-memory Logs page.
+        app_log.log(msg)
         if self._on_log:
             self._on_log(msg)
 
@@ -387,39 +435,72 @@ class ConnectionManager:
         }
 
     def format_runtime_stats(self, stats: Optional[dict] = None) -> str:
-        """One human log line of current helper-process memory + handles."""
+        """One diagnostic line: memory, handles, threads, pid, uptime per
+        helper process + the active preset. ASCII-only numbers so it's safe to
+        write anywhere (app.log, Logs page, console)."""
         if stats is None:
             stats = self.sample_runtime_stats()
+        preset = str(self.settings.get("performance_preset", "balanced"))
+        pids = {"tun2socks": self.tun_process.pid(), "xray": self.process.pid()}
+        now = time.time()
         parts = []
         for name in ("tun2socks", "xray"):
             s = stats.get(name)
             if s is None:
                 parts.append(f"{name}: н/д")
-            else:
-                parts.append(
-                    f"{name}: {proc_stats.human_bytes(s.private_bytes)}"
-                    + (f", {s.handles} хэндлов" if s.handles else "")
-                )
-        return "[mem] " + "; ".join(parts)
+                continue
+            seg = f"{name}: {proc_stats.human_bytes(s.private_bytes)}"
+            if s.handles:
+                seg += f", {s.handles} хэндлов"
+            if s.threads:
+                seg += f", {s.threads} потоков"
+            if pids.get(name):
+                seg += f", pid {pids[name]}"
+            if s.create_time:
+                up = max(0, int(now - s.create_time))
+                seg += f", up {up // 60}м{up % 60:02d}с"
+            parts.append(seg)
+        return f"[mem] preset={preset}; " + "; ".join(parts)
 
-    def memory_pressure_reason(self, stats: Optional[dict] = None) -> Optional[str]:
-        """If a helper process is in genuine memory/handle runaway, return a
-        short reason string (for logs + heal); else None. Pure threshold logic,
-        unit-testable with synthetic stats."""
+    def memory_pressure_reason(self, stats: Optional[dict] = None):
+        """Classify runaway. Returns (severity, reason) with severity in
+        {'critical','moderate'}, or None when healthy. CRITICAL is checked
+        first (immediate heal); each helper trips on memory OR handles OR (for
+        tun2socks) threads — different facets of the UDP/session storm. Pure
+        threshold logic, unit-testable with synthetic ProcSamples."""
         if stats is None:
             stats = self.sample_runtime_stats()
         t = stats.get("tun2socks")
         x = stats.get("xray")
+        hb = proc_stats.human_bytes
+
+        # --- CRITICAL (heal immediately, bypass cooldown) ---
         if t is not None:
-            if t.private_bytes >= MEM_HEAL_TUN2SOCKS_BYTES:
-                return (f"tun2socks занял {proc_stats.human_bytes(t.private_bytes)} "
-                        f"(порог {proc_stats.human_bytes(MEM_HEAL_TUN2SOCKS_BYTES)})")
-            if t.handles and t.handles >= MEM_HEAL_TUN2SOCKS_HANDLES:
-                return (f"tun2socks открыл {t.handles} хэндлов "
-                        f"(порог {MEM_HEAL_TUN2SOCKS_HANDLES})")
-        if x is not None and x.private_bytes >= MEM_HEAL_XRAY_BYTES:
-            return (f"xray занял {proc_stats.human_bytes(x.private_bytes)} "
-                    f"(порог {proc_stats.human_bytes(MEM_HEAL_XRAY_BYTES)})")
+            if t.private_bytes >= MEM_TUN2SOCKS_CRIT_BYTES:
+                return ("critical", f"tun2socks {hb(t.private_bytes)} >= {hb(MEM_TUN2SOCKS_CRIT_BYTES)} (критично)")
+            if t.handles >= MEM_TUN2SOCKS_CRIT_HANDLES:
+                return ("critical", f"tun2socks {t.handles} хэндлов >= {MEM_TUN2SOCKS_CRIT_HANDLES} (критично)")
+            if t.threads >= MEM_TUN2SOCKS_CRIT_THREADS:
+                return ("critical", f"tun2socks {t.threads} потоков >= {MEM_TUN2SOCKS_CRIT_THREADS} (критично, UDP-шторм)")
+        if x is not None:
+            if x.private_bytes >= MEM_XRAY_CRIT_BYTES:
+                return ("critical", f"xray {hb(x.private_bytes)} >= {hb(MEM_XRAY_CRIT_BYTES)} (критично)")
+            if x.handles >= MEM_XRAY_CRIT_HANDLES:
+                return ("critical", f"xray {x.handles} хэндлов >= {MEM_XRAY_CRIT_HANDLES} (критично)")
+
+        # --- MODERATE (heal on cooldown) ---
+        if t is not None:
+            if t.private_bytes >= MEM_TUN2SOCKS_MOD_BYTES:
+                return ("moderate", f"tun2socks {hb(t.private_bytes)} >= {hb(MEM_TUN2SOCKS_MOD_BYTES)}")
+            if t.handles >= MEM_TUN2SOCKS_MOD_HANDLES:
+                return ("moderate", f"tun2socks {t.handles} хэндлов >= {MEM_TUN2SOCKS_MOD_HANDLES}")
+            if t.threads >= MEM_TUN2SOCKS_MOD_THREADS:
+                return ("moderate", f"tun2socks {t.threads} потоков >= {MEM_TUN2SOCKS_MOD_THREADS}")
+        if x is not None:
+            if x.private_bytes >= MEM_XRAY_MOD_BYTES:
+                return ("moderate", f"xray {hb(x.private_bytes)} >= {hb(MEM_XRAY_MOD_BYTES)}")
+            if x.handles >= MEM_XRAY_MOD_HANDLES:
+                return ("moderate", f"xray {x.handles} хэндлов >= {MEM_XRAY_MOD_HANDLES}")
         return None
 
     # --- HTTP-proxy mode (browsers only) ----------------------------------

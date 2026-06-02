@@ -62,6 +62,33 @@ def resolve_buffer_preset(name: Optional[str]) -> tuple[str, str]:
                               BUFFER_PRESETS[DEFAULT_BUFFER_PRESET])
 
 
+# --- idle UDP-session timeout per preset (v2.1.7) --------------------------
+#
+# THE primary lever against the UDP/session runaway the TCP-buffer fix alone
+# couldn't stop. tun2socks holds a goroutine + a SOCKS UDP association per
+# distinct UDP 5-tuple; apps that spray UDP to many endpoints (QUIC/HTTP3,
+# WebRTC, BitTorrent DHT, Telegram) open thousands of them, and at the old 30s
+# idle window the abandoned ones piled up into GBs of memory + tens of
+# thousands of handles/threads (xray mirrors each as its own flow). A shorter
+# idle window reaps abandoned flows far sooner. ACTIVE flows keep receiving
+# packets, so they're never idle → never reaped → live calls/streams are
+# unaffected.
+#   economy  5s   — most aggressive
+#   balanced 10s  — default (was 30s)
+#   speed    30s  — old behaviour
+UDP_TIMEOUTS: dict[str, str] = {
+    "economy": "5s",
+    "balanced": "10s",
+    "speed": "30s",
+}
+DEFAULT_UDP_TIMEOUT = UDP_TIMEOUTS[DEFAULT_BUFFER_PRESET]
+
+
+def resolve_udp_timeout(name: Optional[str]) -> str:
+    """Idle UDP-session timeout for a preset (unknown/empty → balanced 10s)."""
+    return UDP_TIMEOUTS.get(str(name or "").lower().strip(), DEFAULT_UDP_TIMEOUT)
+
+
 def _is_noise_line(line: str) -> bool:
     """True for known-benign tun2socks spam not worth surfacing on the
     user's Logs page.
@@ -113,14 +140,11 @@ class Tun2socksProcess:
     # a pure, unit-testable function.
     TCP_SNDBUF, TCP_RCVBUF = BUFFER_PRESETS[DEFAULT_BUFFER_PRESET]
 
-    # v2.0.1: how long an IDLE UDP session is kept in gVisor's netstack. A
-    # UDP-heavy app (Telegram calls/QUIC, a game, a torrent's DHT) opens many
-    # short-lived flows; at the upstream default (~60s) idle sessions pile up,
-    # pressure the netstack (the WSAENOBUFS lines we already filter are a
-    # symptom) and can wedge the whole tunnel under a "UDP storm". 30s reaps
-    # idle flows ~2x sooner. ACTIVE flows keep receiving packets, so they're
-    # never idle -> never reaped -> live Telegram calls/QUIC are unaffected.
-    UDP_TIMEOUT = "30s"
+    # How long an IDLE UDP session is kept in gVisor's netstack. This is the
+    # primary lever against UDP-session runaway (see UDP_TIMEOUTS). v2.1.7
+    # lowered the default from 30s to 10s (balanced); start() overrides it from
+    # the user's preset. Instance attribute so _build_args stays pure/testable.
+    UDP_TIMEOUT = DEFAULT_UDP_TIMEOUT
 
     def __init__(self, on_log: Optional[LogSink] = None, log_buffer: int = 500):
         self._proc: Optional[subprocess.Popen] = None
@@ -154,9 +178,11 @@ class Tun2socksProcess:
               buffer_preset: Optional[str] = None) -> None:
         if self.is_running():
             raise RuntimeError("tun2socks is already running")
-        # Resolve the per-flow TCP buffer ceiling from the chosen preset (None →
-        # balanced default). Set on the instance so _build_args picks it up.
+        # Resolve the per-flow TCP buffer ceiling AND the idle UDP-session
+        # timeout from the chosen preset (None → balanced default). Set on the
+        # instance so _build_args picks them up.
         self.TCP_SNDBUF, self.TCP_RCVBUF = resolve_buffer_preset(buffer_preset)
+        self.UDP_TIMEOUT = resolve_udp_timeout(buffer_preset)
         exe = paths.tun2socks_exe()
         if not exe.is_file():
             raise FileNotFoundError(f"tun2socks binary not found at {exe}")

@@ -168,6 +168,13 @@ def settings_file() -> Path:
     return app_data_dir() / "settings.json"
 
 
+def app_log_file() -> Path:
+    """Rotating runtime log for the GUI/watchdog/connect lifecycle (NOT the raw
+    xray/tun2socks stream — that's log_file()). Diagnostic events only, with
+    secrets redacted. See core/app_log.py."""
+    return app_data_dir() / "app.log"
+
+
 def tun_recovery_file() -> Path:
     """Crash-recovery journal for TUN mode. While a TUN session holds the
     physical NIC's DNS cleared (leak protection), we record which interface

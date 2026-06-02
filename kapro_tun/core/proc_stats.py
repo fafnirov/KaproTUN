@@ -19,7 +19,15 @@ from typing import Optional
 # private_bytes: Windows "private bytes" (PrivateUsage) — the number Task
 #   Manager shows and the one the bug report cited; RSS elsewhere.
 # handles: Windows handle count (0 on platforms without the concept).
-ProcSample = namedtuple("ProcSample", ["private_bytes", "handles"])
+# threads: OS thread count — a UDP/session-storm signal (Go spawns OS threads
+#   per blocked syscall, so thousands of live UDP flows show up as 100s-1000s
+#   of threads).
+# create_time: process start (epoch seconds, 0.0 if unknown) — for uptime.
+# Defaults keep older 2-arg ProcSample(mem, handles) construction valid.
+ProcSample = namedtuple(
+    "ProcSample", ["private_bytes", "handles", "threads", "create_time"],
+    defaults=(0, 0.0),
+)
 
 
 def sample(pid: Optional[int]) -> Optional[ProcSample]:
@@ -38,7 +46,15 @@ def sample(pid: Optional[int]) -> Optional[ProcSample]:
             handles = int(p.num_handles())       # Windows-only API
         except Exception:
             handles = 0
-        return ProcSample(int(private or 0), handles)
+        try:
+            threads = int(p.num_threads())
+        except Exception:
+            threads = 0
+        try:
+            ctime = float(p.create_time())
+        except Exception:
+            ctime = 0.0
+        return ProcSample(int(private or 0), handles, threads, ctime)
     except Exception:
         return None
 
