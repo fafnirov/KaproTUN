@@ -17,6 +17,44 @@ Windows). Android-клиент живёт в отдельном репозито
 
 # Desktop (Windows + Python)
 
+## v2.2.0 — Первопричина авто-переподключений: private/LAN bypass + socket exhaustion
+
+Реальная причина «клиент сам отключается/включается» — НЕ утечка памяти, а
+**исчерпание локальных сокетов** на loopback `tun2socks → xray (127.0.0.1)`:
+```
+[tun2socks] [TCP] dial 172.19.2.109:7680: connect to 127.0.0.1:2081:
+connectex: Only one usage of each socket address ... is normally permitted.
+```
+`172.19.2.109:7680` — это Windows Delivery-Optimization (P2P-раздача обновлений)
+к пиру в Docker/WSL-подсети `172.19.x`. Этот **приватный** трафик не должен идти
+через VPN, но падал в TUN-catch-all, и tun2socks открывал по сокету `127.0.0.1`
+на каждый поток → эфемерные порты заканчивались → росли хэндлы → memory watchdog
+ошибочно лечил это reconnect'ом → цикл.
+
+- **Приватные/LAN/Docker сети теперь всегда мимо TUN.** Добавлены kernel
+  bypass-роуты `10/8, 172.16/12, 192.168/16, 169.254/16, 127/8` через
+  физический шлюз (в обоих режимах защиты DNS). Они менее специфичны, чем
+  реальные on-link маршруты (твой `192.168.x/24`, Docker `172.19.x/16`, сам TUN
+  `10.255.0.0/24`), поэтому настоящий LAN/Docker/TUN-трафик не ломается — а
+  «висящие» приватные адреса (источник флуда) больше не попадают в туннель.
+  Роуты ставятся при connect, подхватываются после краша, снимаются при
+  disconnect. Маршрут до VPN-сервера (/32) не затронут.
+- **Socket exhaustion распознаётся отдельно и НЕ лечится циклом.** tun2socks-лог
+  c `Only one usage of each socket address ... connect to 127.0.0.1:<порт>`
+  классифицируется как `local_socket_exhaustion`; в `app.log` пишется
+  `[socket-exhaustion] tun2socks->xray local SOCKS exhausted (dest=…)`.
+  Допускается **один** чистый reconnect; при повторе — аварийная остановка с
+  понятным сообщением «слишком много локальных соединений / private-трафик
+  попал в TUN», без бесконечного цикла. Memory watchdog при недавнем
+  socket-exhaustion не инициирует reconnect, а делает emergency stop.
+- **Честные причины disconnect.** Больше не пишем `[disconnect] по запросу
+  пользователя`, когда отключение вызвано автоматикой. Причины разделены:
+  `user_requested`, `memory_critical/moderate`, `memory_exhausted_emergency`,
+  `socket_exhaustion`, `dns_watchdog`, `process_crash`, `storm`.
+
+Memory-grace/sustained-пороги из v2.1.9 остаются. Безопасность (TUN/split-
+routing/DNS-WebRTC-IPv6/kill-switch) не затронута.
+
 ## v2.1.9 — Фикс ложного memory-heal: клиент больше не переподключается на ровном месте
 
 Live-проверка показала реальную причину «постоянно отключается/подключается,

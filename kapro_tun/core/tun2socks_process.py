@@ -14,6 +14,7 @@ manager to set IP / metric / DNS on it.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import threading
@@ -105,6 +106,39 @@ def _is_noise_line(line: str) -> bool:
         return False
     low = line.lower()
     return "buffer space" in low or "queue was full" in low
+
+
+# Matches a failed tun2socks dial whose transport leg is the local SOCKS
+# loopback (tun2socks -> xray at 127.0.0.1:<port>). Captures the real
+# destination, e.g. "172.19.2.109:7680", from a line like:
+#   [TCP] dial 172.19.2.109:7680: connect to 127.0.0.1:2081: connectex: ...
+_SOCK_EXHAUST_DEST_RE = re.compile(
+    r"dial\s+(?P<dest>\S+?):\s*connect to\s+127\.0\.0\.1:\d+", re.IGNORECASE)
+
+
+def detect_socket_exhaustion(line: str) -> Optional[dict]:
+    """Classify a tun2socks log line as local ephemeral-port exhaustion on the
+    tun2socks -> xray SOCKS loopback, or return None.
+
+    The signature: a dial that fails connecting to 127.0.0.1:<socks> with the
+    Windows WSAEADDRINUSE message ('Only one usage of each socket address') or
+    the 'connectex' marker. A flood of these means the loopback ran out of
+    ephemeral ports — almost always because a high-churn / private-LAN dest
+    poured thousands of short flows into the tunnel. Returns
+    {"kind": "local_socket_exhaustion", "dest": "<ip:port>"|None}. Pure; never
+    raises."""
+    try:
+        if "127.0.0.1" not in line:
+            return None
+        low = line.lower()
+        if ("only one usage of each socket address" not in low
+                and "connectex" not in low):
+            return None
+        m = _SOCK_EXHAUST_DEST_RE.search(line)
+        return {"kind": "local_socket_exhaustion",
+                "dest": m.group("dest") if m else None}
+    except Exception:
+        return None
 
 
 def _device_arg() -> str:

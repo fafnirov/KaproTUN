@@ -1345,6 +1345,36 @@ def _runtime_safety_branches_via_window() -> None:
             w._check_memory()
         if heals:
             raise AssertionError("a stable sub-threshold baseline must never heal")
+
+        # --- v2.2.0 socket exhaustion: ONE reconnect, then emergency stop ---
+        import time as _t4
+        w.manager.is_connected = lambda: True
+        w.manager.current_mode = lambda: mw.MODE_TUN
+        w._auto_recovery_disabled = False
+        w._connecting = False
+        w._reconnect_timer.stop()
+        w._reconnect_history = []
+        w._sock_exhaust_bursts = 0
+        w._last_sock_exhaust_handled_ts = 0.0
+        calls["disconnect"] = 0
+        # 1st exhaustion event → one clean reconnect (armed), NOT emergency
+        w._on_socket_exhaustion("172.19.2.109:7680")
+        if w._auto_recovery_disabled:
+            raise AssertionError("first socket exhaustion must not emergency-stop")
+        if not w._reconnect_timer.isActive():
+            raise AssertionError("first socket exhaustion must arm exactly one reconnect")
+        # 2nd event (bypass the flood throttle) → emergency stop, no loop
+        w._reconnect_timer.stop()
+        w._connecting = False
+        w._last_sock_exhaust_handled_ts = _t4.time() - 100
+        calls["disconnect"] = 0
+        w._on_socket_exhaustion("2.16.103.96:80")
+        if not w._auto_recovery_disabled:
+            raise AssertionError("recurring socket exhaustion must emergency-stop (no loop)")
+        if calls["disconnect"] < 1:
+            raise AssertionError("socket-exhaustion emergency stop must disconnect helpers")
+        if w._reconnect_timer.isActive():
+            raise AssertionError("socket-exhaustion emergency stop must not arm a reconnect")
     finally:
         mw.show_toast = orig_toast
         app_log.log = orig_applog
@@ -1367,6 +1397,98 @@ def _runtime_safety_branches_via_window() -> None:
 
 check("main_window: critical-exhausted emergency stop + reconnect storm cap",
       _runtime_safety_branches_via_window)
+
+
+def _private_lan_bypass() -> None:
+    """v2.2.0: RFC1918/private/link-local/loopback ranges (incl. 172.16.0.0/12)
+    are in _PRIVATE_BYPASS, 172.19.2.109 (Docker/WSL) classifies as private, and
+    _connect_tun installs the set via the kernel bypass routes."""
+    import ipaddress
+    import inspect
+    from kapro_tun.core import controller as C
+
+    nets = {net: ipaddress.ip_network(f"{net}/{mask}", strict=False)
+            for net, mask in C._PRIVATE_BYPASS}
+    required = {"10.0.0.0", "172.16.0.0", "192.168.0.0", "169.254.0.0", "127.0.0.0"}
+    missing = required - set(nets)
+    if missing:
+        raise AssertionError(f"_PRIVATE_BYPASS missing ranges: {missing}")
+    # The /12 must really be a /12 covering 172.19.x.
+    if nets["172.16.0.0"].prefixlen != 12:
+        raise AssertionError(f"172.16.0.0 must be /12, got /{nets['172.16.0.0'].prefixlen}")
+    addr = ipaddress.ip_address("172.19.2.109")
+    if addr not in nets["172.16.0.0"]:
+        raise AssertionError("172.19.2.109 (Docker/WSL) must be inside 172.16.0.0/12")
+    if not any(addr in n for n in nets.values()):
+        raise AssertionError("172.19.2.109 not covered by any private-bypass range")
+    # Connect path installs it in both leak modes, via add_bypass_cidrs.
+    src = inspect.getsource(C.ConnectionManager._connect_tun)
+    if "list(_PRIVATE_BYPASS)" not in src:
+        raise AssertionError("_connect_tun does not install _PRIVATE_BYPASS")
+    if "add_bypass_cidrs" not in src:
+        raise AssertionError("_connect_tun does not install bypass routes via add_bypass_cidrs")
+
+
+check("controller: private/LAN/Docker ranges bypass the TUN (incl. 172.16/12)",
+      _private_lan_bypass)
+
+
+def _socket_exhaustion_parse() -> None:
+    """v2.2.0: tun2socks log lines for local SOCKS port exhaustion classify as
+    local_socket_exhaustion with the real dest; benign lines don't; never raises."""
+    from kapro_tun.core import tun2socks_process as t2s
+
+    line = ("[tun2socks] [TCP] dial 172.19.2.109:7680: connect to 127.0.0.1:2081: "
+            "connectex: Only one usage of each socket address (protocol/network "
+            "address/port) is normally permitted.")
+    info = t2s.detect_socket_exhaustion(line)
+    if not info or info.get("kind") != "local_socket_exhaustion":
+        raise AssertionError(f"exhaustion line not classified: {info}")
+    if info.get("dest") != "172.19.2.109:7680":
+        raise AssertionError(f"dest mis-parsed: {info.get('dest')!r}")
+    # public dest variant still classifies (dest captured)
+    line2 = ("[tun2socks] [TCP] dial 2.16.103.96:80: connect to 127.0.0.1:2081: "
+             "connectex: Only one usage of each socket address ...")
+    if (t2s.detect_socket_exhaustion(line2) or {}).get("dest") != "2.16.103.96:80":
+        raise AssertionError("second exhaustion variant mis-parsed")
+    # benign lines → None (no false positives)
+    for benign in (
+        "[tun2socks] [TCP] dial 1.2.3.4:443: ok",
+        "[tun2socks] Creating adapter",
+        "[*] Подключено к «сервер» (TUN)",
+        "",
+    ):
+        if t2s.detect_socket_exhaustion(benign) is not None:
+            raise AssertionError(f"benign line misclassified: {benign!r}")
+
+
+check("tun2socks: detects local socket exhaustion (connect to 127.0.0.1:<socks>)",
+      _socket_exhaustion_parse)
+
+
+def _disconnect_reason_honest() -> None:
+    """v2.2.0: disconnect reasons are honest. _do_disconnect logs an explicit
+    reason (default user_requested) and no longer hardcodes 'по запросу
+    пользователя'; auto paths carry their own reasons."""
+    import inspect
+    from kapro_tun.gui.main_window import MainWindow
+
+    dd = inspect.getsource(MainWindow._do_disconnect)
+    if "reason=" not in dd or "user_requested" not in dd:
+        raise AssertionError("_do_disconnect must log an explicit reason (user_requested)")
+    if "по запросу пользователя" in dd:
+        raise AssertionError("misleading hardcoded 'по запросу пользователя' still present")
+    # The socket handler uses its own reason and the storm/emergency path too.
+    sock = inspect.getsource(MainWindow._on_socket_exhaustion)
+    if "socket_exhaustion" not in sock:
+        raise AssertionError("socket handler must use reason=socket_exhaustion")
+    arm = inspect.getsource(MainWindow._arm_reconnect)
+    if "reason=" not in arm:
+        raise AssertionError("_arm_reconnect must log reason= for every reconnect")
+
+
+check("main_window: honest disconnect reasons (no fake user_requested)",
+      _disconnect_reason_honest)
 
 
 def _xray_policy_bounds_resources() -> None:

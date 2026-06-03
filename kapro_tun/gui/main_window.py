@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..core import (
     admin, app_log, autostart, dns_options, storage, tun2socks_installer,
-    updater, xray_installer, xray_stats,
+    tun2socks_process, updater, xray_installer, xray_stats,
 )
 from ..core import controller as _controller
 from ..core.controller import MODE_HTTP_PROXY, MODE_TUN
@@ -1520,6 +1520,18 @@ class MainWindow(QMainWindow):
         self._RECONNECT_STORM_WINDOW_S = 120.0
         self._RECONNECT_STORM_MAX = 5
 
+        # v2.2.0 socket-exhaustion guard. tun2socks->xray loopback port
+        # exhaustion ("Only one usage of each socket address") is a distinct
+        # root cause from memory: reconnecting doesn't fix it, so we allow ONE
+        # reconnect then stop, and the memory watchdog defers to this when an
+        # exhaustion event is recent. Lines flood, so handling is throttled.
+        self._last_sock_exhaust_ts = 0.0
+        self._last_sock_exhaust_handled_ts = 0.0
+        self._sock_exhaust_bursts = 0
+        self._SOCK_EXHAUST_HANDLE_COOLDOWN_S = 8.0
+        self._SOCK_EXHAUST_MAX_RECONNECT = 1
+        self._SOCK_EXHAUST_RECENT_S = 60.0
+
         # Runtime DNS watchdog (v2.1.4): catches the "tunnel up but DNS dead"
         # state the process-death watcher can't see. Self-gates on TUN-with-
         # leak-protection, so it's idle (no probing) in HTTP mode or when the
@@ -1682,6 +1694,9 @@ class MainWindow(QMainWindow):
         self.nav.settings_clicked.connect(lambda: self._goto("settings"))
         self.nav.add_clicked.connect(self._on_open_add_page)
         self.log_received.connect(self.logs_page.append)
+        # v2.2.0: also scan helper logs for socket-exhaustion so we treat it as
+        # its own root cause (not a memory leak to reconnect-loop on).
+        self.log_received.connect(self._scan_log_line)
         # Title-bar window controls (frameless mode)
         self.titlebar.minimize_clicked.connect(self.showMinimized)
         self.titlebar.close_clicked.connect(self._on_close_to_tray)
@@ -2059,6 +2074,9 @@ class MainWindow(QMainWindow):
         self._mem_heal_count = 0
         self._mem_heal_exhausted_notified = False
         self._last_mem_heal_ts = 0.0
+        self._mem_breach_streak = 0
+        self._sock_exhaust_bursts = 0
+        self._last_sock_exhaust_ts = 0.0
         app_log.log(f"[reconnect] reason=user_requested, config={self._active_config.name}")
         self._do_connect()
 
@@ -2350,6 +2368,64 @@ class MainWindow(QMainWindow):
         self._connected_at = 0.0
         self._reconnect_timer.start(delay * 1000)
 
+    def _scan_log_line(self, line: str) -> None:
+        """Watch helper log lines for socket-exhaustion — a root cause distinct
+        from memory. Cheap substring pre-filter before the regex."""
+        if "127.0.0.1" not in line or "[tun2socks]" not in line:
+            return
+        info = tun2socks_process.detect_socket_exhaustion(line)
+        if info:
+            self._on_socket_exhaustion(info.get("dest"))
+
+    def _on_socket_exhaustion(self, dest) -> None:
+        """Local tun2socks->xray ephemeral-port exhaustion ('Only one usage of
+        each socket address'). Reconnecting does NOT fix the cause (a private/
+        LAN flood into the TUN), so: log it, allow at most ONE reconnect, then
+        emergency-stop on recurrence — never loop. These lines flood, so the
+        handling is throttled to once per cooldown."""
+        now = time.time()
+        self._last_sock_exhaust_ts = now
+        if now - self._last_sock_exhaust_handled_ts < self._SOCK_EXHAUST_HANDLE_COOLDOWN_S:
+            return
+        self._last_sock_exhaust_handled_ts = now
+        msg = "[socket-exhaustion] tun2socks->xray local SOCKS exhausted"
+        if dest:
+            msg += f" (dest={dest})"
+        self.logs_page.append("[!] " + msg)
+        app_log.log(msg)
+        if not (self.manager.is_connected()
+                and self.manager.current_mode() == MODE_TUN):
+            return
+        if (self._connecting or self._reconnect_timer.isActive()
+                or self._auto_recovery_disabled):
+            return
+        self._sock_exhaust_bursts += 1
+        if self._sock_exhaust_bursts > self._SOCK_EXHAUST_MAX_RECONNECT:
+            # Recurred after a reconnect — reconnect can't fix a private/LAN
+            # flood. Stop cleanly with an honest reason.
+            self._emergency_stop(
+                "socket_exhaustion",
+                "повторное исчерпание локальных сокетов (слишком много локальных "
+                "соединений / private-трафик попал в TUN) — останавливаю, не "
+                "зацикливаюсь" + (f"; dest={dest}" if dest else ""))
+            return
+        # First burst: one clean reconnect — re-applies the private-bypass routes
+        # and clears the loopback TIME_WAIT backlog.
+        if self._arm_reconnect("socket_exhaustion", self._sock_exhaust_bursts,
+                               self._SOCK_EXHAUST_MAX_RECONNECT):
+            em = (f"[socket-exhaustion] чистый reconnect "
+                  f"#{self._sock_exhaust_bursts}/{self._SOCK_EXHAUST_MAX_RECONNECT} "
+                  f"(reason=socket_exhaustion)")
+            self.logs_page.append("[!] " + em)
+            app_log.log(em)
+            show_toast(self, "Слишком много локальных соединений — "
+                       "переподключаюсь один раз…", kind="info", duration_ms=4000)
+            saved = self._active_config
+            self.manager.disconnect()
+            self._active_config = saved
+            self._connected_at = 0.0
+            self._reconnect_timer.start(1000)
+
     def _check_memory(self) -> None:
         """Periodic (10 s) runtime sample for tun2socks + xray. Logs a summary
         ~once a minute and, on a SUSTAINED runaway, hands off to the tiered
@@ -2425,6 +2501,19 @@ class MainWindow(QMainWindow):
             return
         if self._auto_recovery_disabled:
             return  # a prior emergency stop disabled auto-recovery this session
+        # v2.2.0: if socket exhaustion is the recent root cause, the memory
+        # pressure is just a SYMPTOM (the loopback handles). Don't reconnect-
+        # loop on it — stop cleanly. The socket handler usually fires first;
+        # this guards the race where memory fires first.
+        if (time.time() - self._last_sock_exhaust_ts) < self._SOCK_EXHAUST_RECENT_S:
+            if not self._mem_heal_exhausted_notified:
+                self._mem_heal_exhausted_notified = True
+                self._emergency_stop(
+                    "socket_exhaustion",
+                    "высокое потребление из-за исчерпания локальных сокетов "
+                    "(private/LAN-трафик в TUN) — останавливаю вместо "
+                    "reconnect-цикла")
+            return
         now = time.time()
         d = _controller.mem_heal_decision(
             severity, now, self._last_mem_heal_ts, self._mem_heal_count,
@@ -2510,22 +2599,27 @@ class MainWindow(QMainWindow):
         self._connected_at = 0.0
         self._reconnect_timer.start(1000)
 
-    def _do_disconnect(self) -> None:
-        # User asked for it — kill the auto-reconnect chain too so we
-        # don't bring the VPN back up against their wishes.
+    def _do_disconnect(self, reason: str = "user_requested") -> None:
+        # Disconnect with an HONEST reason. Default 'user_requested' — this is
+        # only called from the user's connect/disconnect button and the tray
+        # server-switch; auto paths (memory/DNS/socket/crash) tear down via
+        # manager.disconnect()/_emergency_stop with their OWN reason, never this.
         self._reconnect_timer.stop()
         self._reconnect_attempts = 0
         # Fresh session next time → fresh memory-heal budget + auto-recovery
-        # re-enabled + storm history cleared.
+        # re-enabled + storm/socket history cleared.
         self._mem_heal_count = 0
         self._mem_heal_exhausted_notified = False
         self._last_mem_heal_ts = 0.0
+        self._mem_breach_streak = 0
         self._auto_recovery_disabled = False
         self._reconnect_history = []
+        self._sock_exhaust_bursts = 0
+        self._last_sock_exhaust_ts = 0.0
         self.manager.disconnect()
         self._connected_at = 0.0
         self.logs_page.append("[*] Отключено, системный прокси восстановлен")
-        app_log.log("[disconnect] по запросу пользователя")
+        app_log.log(f"[disconnect] reason={reason}")
         show_toast(self, "Отключено", kind="info")
         self._refresh_home()
 

@@ -105,6 +105,31 @@ _SERVICE_BYPASS: list[tuple[str, str]] = [
 # leak-protection-OFF path, where direct DNS is intended).
 _ALWAYS_BYPASS: list[tuple[str, str]] = _DNS_RESOLVER_BYPASS + _SERVICE_BYPASS
 
+# Private / LAN / Docker / link-local / loopback ranges that must ALWAYS stay
+# off the TUN (v2.2.0), in EITHER leak mode. Routed direct via the physical
+# gateway so they never fall into the 0.0.0.0/1 TUN catch-all.
+#
+# Why this matters: traffic to an otherwise-unrouted private dest — e.g. a
+# Windows Delivery-Optimization peer on a Docker/WSL subnet like 172.19.2.109,
+# or any RFC1918 host with no on-link route — would hit the TUN catch-all, and
+# tun2socks opens a FRESH 127.0.0.1:<socks> socket per flow → ephemeral-port
+# exhaustion ("Only one usage of each socket address") + handle blow-up, which
+# the memory watchdog then mistook for a leak and reconnect-looped.
+#
+# Safety: each /8../16 is LESS specific than a real on-link subnet route (your
+# 192.168.x /24, Docker's 172.19.x /16, the TUN's own 10.255.0.0/24), so
+# genuine LAN/Docker/TUN traffic keeps using its own adapter; only unrouted
+# private dests get sent to the physical gw, which drops them instead of
+# flooding the loopback. The VPN-server host-route (/32) is separate and
+# unaffected.
+_PRIVATE_BYPASS: list[tuple[str, str]] = [
+    ("10.0.0.0",    "255.0.0.0"),     # RFC1918 /8
+    ("172.16.0.0",  "255.240.0.0"),   # RFC1918 /12  (Docker/WSL 172.19.x lives here)
+    ("192.168.0.0", "255.255.0.0"),   # RFC1918 /16
+    ("169.254.0.0", "255.255.0.0"),   # link-local /16
+    ("127.0.0.0",   "255.0.0.0"),     # loopback /8
+]
+
 
 # Runaway-resource guard thresholds (v2.1.7 — two tiers).
 #
@@ -753,12 +778,16 @@ class ConnectionManager:
             #               direct in this mode — no behaviour change).
             dns_opt = dns_options.get(str(self.settings.get("dns_option", "system")))
             leak = bool(self.settings.get("dns_leak_protection", True))
+            # Private / LAN / Docker / link-local ALWAYS bypass the TUN (v2.2.0),
+            # in either leak mode — this is what keeps 172.19.x-style private
+            # dests out of the loopback flood that caused socket exhaustion.
+            bypass_list: list[tuple[str, str]] = list(_PRIVATE_BYPASS)
             if leak:
-                bypass_list: list[tuple[str, str]] = list(_SERVICE_BYPASS)
+                bypass_list += list(_SERVICE_BYPASS)
                 self._log("[*] Защита DNS включена: публичные резолверы НЕ "
                           "байпасятся — DNS идёт в туннель (без утечки на ISP).")
             else:
-                bypass_list = list(_ALWAYS_BYPASS)
+                bypass_list += list(_ALWAYS_BYPASS)
                 existing_ips = {entry[0] for entry in bypass_list}
                 for ip in dns_opt.bypass_ips:
                     if ip not in existing_ips:
@@ -766,7 +795,8 @@ class ConnectionManager:
             added_always, adopted_always = session.add_bypass_cidrs(
                 bypass_list, real.gateway, real.index, metric=bypass_metric,
             )
-            self._log(f"[*] Bypass-роуты ({'сервисы РФ' if leak else 'DNS + сервисы РФ'}): "
+            self._log(f"[*] Bypass-роуты (приватные/LAN + "
+                      f"{'сервисы РФ' if leak else 'DNS + сервисы РФ'}): "
                       f"{added_always} новых"
                       + (f", {adopted_always} уже было (подхвачены для очистки)"
                          if adopted_always else ""))
