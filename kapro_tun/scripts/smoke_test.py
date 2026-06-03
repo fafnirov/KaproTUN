@@ -126,6 +126,7 @@ def _import_core() -> None:
         ip_probe, dns_options, secrets_store, ipv6_block,
         bandwidth_history, webrtc_block, leak_test, crash_handler,
         hysteria_installer, hysteria_process,
+        sing_box_config, sing_box_installer, sing_box_process,
     )
 
 
@@ -1316,6 +1317,12 @@ def _runtime_safety_branches_via_window() -> None:
         w._on_memory_pressure = lambda sev, rsn: heals.append((sev, rsn))
         w.manager.is_connected = lambda: True
         w.manager.current_mode = lambda: mw.MODE_TUN
+        # The memory watchdog heals the CLASSIC engine (restart tun2socks, force
+        # economy buffers). Pin the engine to classic so the v3 sing-box guard in
+        # _check_memory doesn't short-circuit this classic-only path. A sibling
+        # assertion below covers the sing-box skip (softer watchdog).
+        from kapro_tun.core import controller as _Cmem
+        w.manager.current_engine = lambda: _Cmem.ENGINE_CLASSIC
         crit_stats = {"tun2socks": ProcSample(5_000_000_000, 0, 0, 0.0), "xray": None}
         w.manager.sample_runtime_stats = lambda: crit_stats
         # within grace → no heal even though the sample is critical
@@ -1345,6 +1352,22 @@ def _runtime_safety_branches_via_window() -> None:
             w._check_memory()
         if heals:
             raise AssertionError("a stable sub-threshold baseline must never heal")
+
+        # v3.0.0 softer sing-box watchdog: under the sing-box engine the
+        # tun2socks-oriented heal must NEVER run, even on a sample that WOULD be
+        # critical for the classic engine — sing-box is a single native-TUN
+        # process with no loopback SOCKS bridge, so the UDP-session storm the
+        # heal targets can't occur, and the heal would wrongly restart a
+        # tun2socks that isn't running.
+        heals.clear()
+        w._mem_breach_streak = 0
+        w.manager.current_engine = lambda: _Cmem.ENGINE_SING_BOX
+        w.manager.sample_runtime_stats = lambda: crit_stats
+        w._connected_at = _t2.time() - (w._MEM_GRACE_S + 30)
+        for _k in range(w._MEM_SUSTAIN_CRITICAL + 2):
+            w._check_memory()
+        if heals:
+            raise AssertionError("sing-box engine must not run the tun2socks memory heal")
 
         # --- v2.2.0 socket exhaustion: ONE reconnect, then emergency stop ---
         import time as _t4
@@ -1422,7 +1445,7 @@ def _private_lan_bypass() -> None:
     if not any(addr in n for n in nets.values()):
         raise AssertionError("172.19.2.109 not covered by any private-bypass range")
     # Connect path installs it in both leak modes, via add_bypass_cidrs.
-    src = inspect.getsource(C.ConnectionManager._connect_tun)
+    src = inspect.getsource(C.ConnectionManager._connect_tun_classic)
     if "list(_PRIVATE_BYPASS)" not in src:
         raise AssertionError("_connect_tun does not install _PRIVATE_BYPASS")
     if "add_bypass_cidrs" not in src:
@@ -1550,7 +1573,7 @@ def _direct_outbound_bound_to_egress() -> None:
         raise AssertionError("direct outbound bound in HTTP mode (should be unbound)")
 
     # The TUN connect path actually passes the physical interface name.
-    src = inspect.getsource(ConnectionManager._connect_tun)
+    src = inspect.getsource(ConnectionManager._connect_tun_classic)
     if "egress_interface=real.name" not in src:
         raise AssertionError("_connect_tun does not bind the direct outbound to the egress NIC")
 
@@ -1984,8 +2007,19 @@ def _settings_no_overlong_controls() -> None:
     if QApplication.instance() is None:
         QApplication([])
     from kapro_tun.core.controller import ConnectionManager
+    from kapro_tun.core import controller as _ctl_ui
     from kapro_tun.gui.main_window import SettingsPage
     sp = SettingsPage(ConnectionManager(on_log=lambda _l: None))
+    # v3.0.0 engine picker: present, defaults to sing-box, offers exactly the
+    # two engines (sing-box primary + legacy), and persists the choice via
+    # update_settings(tun_engine=...).
+    if not hasattr(sp, "engine_combo"):
+        raise AssertionError("SettingsPage missing the v3 engine picker")
+    datas = {sp.engine_combo.itemData(i) for i in range(sp.engine_combo.count())}
+    if datas != {_ctl_ui.ENGINE_SING_BOX, _ctl_ui.ENGINE_CLASSIC}:
+        raise AssertionError(f"engine picker must offer both engines, got {datas}")
+    if sp.engine_combo.currentData() != _ctl_ui.ENGINE_SING_BOX:
+        raise AssertionError("engine picker must default to sing-box")
     LIMIT = 54
     controls = sp.findChildren(QCheckBox) + sp.findChildren(QRadioButton)
     over = [c.text() for c in controls if len(c.text()) > LIMIT]
@@ -4230,7 +4264,7 @@ def _connect_tun_has_dns_rollback_wiring() -> None:
     if not hasattr(controller, "dns_health") or not hasattr(controller, "tun_recovery"):
         raise AssertionError("controller missing dns_health / tun_recovery imports")
 
-    src = inspect.getsource(ConnectionManager._connect_tun)
+    src = inspect.getsource(ConnectionManager._connect_tun_classic)
     mark_i = src.find("tun_recovery.mark(")
     clear_dns_i = src.find("session.set_dns(real.name, [])")
     # v2.1.5: the DNS health-check moved into _verify_tunnel_or_raise, which
@@ -4441,7 +4475,7 @@ def _leak_on_does_not_bypass_resolvers() -> None:
 
     # Source-level: _connect_tun must choose the service-only set when leak on.
     import inspect
-    src = inspect.getsource(controller.ConnectionManager._connect_tun)
+    src = inspect.getsource(controller.ConnectionManager._connect_tun_classic)
     if "list(_SERVICE_BYPASS)" not in src or "list(_ALWAYS_BYPASS)" not in src:
         raise AssertionError("_connect_tun no longer branches bypass on leak mode")
 
@@ -4523,7 +4557,7 @@ def _dead_tunnel_connect_rolls_back() -> None:
 
     # Source invariant: the except still restores routes AND clears the journal.
     import inspect
-    src = inspect.getsource(ConnectionManager._connect_tun)
+    src = inspect.getsource(ConnectionManager._connect_tun_classic)
     exc = src[src.rfind("except Exception"):]
     if "session.restore()" not in exc or "tun_recovery.clear()" not in exc:
         raise AssertionError("rollback path lost restore()/journal-clear")
@@ -4558,6 +4592,271 @@ def _no_regression_leak_off() -> None:
 
 
 check("invariant: no regression when leak protection is OFF", _no_regression_leak_off)
+
+
+# ---------------------------------------------------------------------------
+# Test — v3.0.0 sing-box native-TUN engine
+# ---------------------------------------------------------------------------
+# sing-box replaces classic xray+tun2socks as the DEFAULT TUN dataplane. These
+# lock in: the migration default, the (near-free) protocol mapping, the
+# routing/DNS/private-bypass invariants, the "offer legacy, never silently
+# switch" contract, the firewall/cleanup wiring, and the architectural win —
+# no 127.0.0.1 SOCKS bridge, so the loopback ephemeral-port exhaustion that
+# wedged long classic sessions is structurally impossible. No process starts.
+
+section("v3.0.0 — sing-box TUN engine")
+
+import inspect as _inspect_v3
+
+from kapro_tun.core import (  # noqa: E402
+    controller as _ctl_v3,
+    killswitch as _ks_v3,
+    paths as _paths_v3,
+    sing_box_config as _sb_v3,
+    sing_box_installer as _sbi_v3,  # noqa: F401  (import-smoke for the new module)
+    sing_box_process as _sbp_v3,    # noqa: F401
+    storage as _storage_v3,
+)
+
+
+def _v3_migration_default() -> None:
+    # 1) Default engine is sing-box; a pre-v3 settings file (no tun_engine key)
+    #    migrates to it via the same DEFAULT_SETTINGS merge load_settings uses —
+    #    never a hard error, never left unset.
+    if _storage_v3.DEFAULT_SETTINGS.get("tun_engine") != _ctl_v3.ENGINE_SING_BOX:
+        raise AssertionError("DEFAULT_SETTINGS.tun_engine must be sing_box_tun")
+    old = {"mode": "tun", "kill_switch": True}  # representative v2.x settings
+    merged = dict(_storage_v3.DEFAULT_SETTINGS)
+    merged.update(old)
+    if merged.get("tun_engine") != _ctl_v3.ENGINE_SING_BOX:
+        raise AssertionError("pre-v3 settings must migrate to sing_box_tun")
+    # resolve_engine normalises unknown/empty to the safe default; only an
+    # explicit legacy request flips it.
+    re = _ctl_v3.resolve_engine
+    for val in (None, "", "garbage", "SING_BOX", 123):
+        if re(val) != _ctl_v3.ENGINE_SING_BOX:
+            raise AssertionError(f"resolve_engine({val!r}) must be sing_box_tun")
+    if re(_ctl_v3.ENGINE_CLASSIC) != _ctl_v3.ENGINE_CLASSIC:
+        raise AssertionError("explicit legacy must resolve to classic")
+
+
+def _v3_config_structure() -> None:
+    # 2) Config gen: serialisable native-TUN config, proxy outbound first +
+    #    server pinned to the resolved IP, all four outbound tags, route.final
+    #    proxy + auto_detect_interface (the freedom→TUN loop killer).
+    full = _sb_v3.build_config(
+        parsed["vless"], ["example.com", "gosuslugi.ru"], server_ip="1.2.3.4",
+        dns_option="system", dns_leak_protection=True,
+    )
+    json.dumps(full, ensure_ascii=False)  # must be writable
+    inb = full["inbounds"]
+    if not inb or inb[0].get("type") != "tun":
+        raise AssertionError("missing native tun inbound")
+    if not inb[0].get("auto_route"):
+        raise AssertionError("tun inbound must auto_route")
+    if inb[0].get("interface_name") != _sb_v3.TUN_DEVICE_NAME:
+        raise AssertionError("tun interface_name mismatch")
+    obs = full["outbounds"]
+    if obs[0].get("tag") != "proxy":
+        raise AssertionError("first outbound must be tagged proxy")
+    if obs[0].get("server") != "1.2.3.4":
+        raise AssertionError("proxy server must be pinned to the resolved IP")
+    tags = {o.get("tag") for o in obs}
+    # Modern (1.12+) grammar: only proxy + direct outbounds. The legacy `block`
+    # and `dns` outbound TYPES are deprecated (1.11) / removed (1.13) — DNS is
+    # answered by the dns module via a `hijack-dns` route action instead.
+    if tags != {"proxy", "direct"}:
+        raise AssertionError(f"outbounds must be exactly proxy+direct, got {tags}")
+    obtypes = {o.get("type") for o in obs}
+    if "block" in obtypes or "dns" in obtypes:
+        raise AssertionError("legacy block/dns outbound types must not be emitted")
+    if full["route"].get("final") != "proxy":
+        raise AssertionError("route.final must be proxy")
+    if not full["route"].get("auto_detect_interface"):
+        raise AssertionError("auto_detect_interface must be true (loop killer)")
+
+
+def _v3_private_bypass() -> None:
+    # 3) Private/LAN/Docker never tunnel. The user's Docker host 172.19.2.109
+    #    lives in 172.16.0.0/12 — assert that net is in the direct rule AND
+    #    actually covers the reported IP (the v2.2.0 regression).
+    import ipaddress
+    full = _sb_v3.build_config(parsed["vless"], [], server_ip="1.2.3.4")
+    priv = None
+    for r in full["route"]["rules"]:
+        if r.get("outbound") == "direct" and isinstance(r.get("ip_cidr"), list) \
+                and "172.16.0.0/12" in r["ip_cidr"]:
+            priv = r["ip_cidr"]
+            break
+    if priv is None:
+        raise AssertionError("no private ip_cidr → direct rule")
+    for need in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8"):
+        if need not in priv:
+            raise AssertionError(f"private bypass missing {need}")
+    if ipaddress.ip_address("172.19.2.109") not in ipaddress.ip_network("172.16.0.0/12"):
+        raise AssertionError("172.19.2.109 not covered by the shipped bypass net")
+
+
+def _v3_dns_hijack_and_leak() -> None:
+    # 4) DNS: all :53 hijacked to dns-out. Leak ON → upstream rides the proxy
+    #    (ISP-blind); leak OFF → upstream goes direct (ISP-visible), never proxy.
+    on = _sb_v3.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                             dns_leak_protection=True)
+    # Modern grammar: DNS hijack is a route ACTION, not a route-to-outbound.
+    if not any(r.get("protocol") == "dns" and r.get("action") == "hijack-dns"
+               for r in on["route"]["rules"]):
+        raise AssertionError("missing DNS hijack rule (protocol:dns → hijack-dns)")
+    if not any(s.get("detour") == "proxy" for s in on["dns"]["servers"]):
+        raise AssertionError("leak-ON DNS upstream must detour through proxy")
+    # Typed DNS servers (1.12+) — the legacy {"address": ...} shape is fatal on
+    # current binaries, so every server must carry an explicit type + server.
+    for s in on["dns"]["servers"]:
+        if "address" in s or not s.get("type") or not s.get("server"):
+            raise AssertionError("DNS servers must use the 1.12+ typed format")
+    off = _sb_v3.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                              dns_leak_protection=False)
+    if any(s.get("detour") == "proxy" for s in off["dns"]["servers"]):
+        raise AssertionError("leak-OFF DNS must not ride the proxy")
+    if not any(s.get("detour") == "direct" for s in off["dns"]["servers"]):
+        raise AssertionError("leak-OFF DNS must go direct")
+
+
+def _v3_unsupported_raises() -> None:
+    # 5) Anything sing-box can't faithfully do raises UnsupportedBySingBox so the
+    #    caller can OFFER legacy — never mis-handshake.
+    class _Fake:
+        outbound = {"type": "wireguard", "server": "1.2.3.4"}
+
+    class _FakeSS:
+        outbound = {"type": "shadowsocks", "server": "1.2.3.4", "plugin": "obfs-local"}
+
+    for bad, why in ((_Fake(), "unknown protocol"), (_FakeSS(), "ss+plugin")):
+        try:
+            _sb_v3.build_config(bad, [], server_ip="1.2.3.4")
+        except _sb_v3.UnsupportedBySingBox:
+            pass
+        else:
+            raise AssertionError(f"{why} must raise UnsupportedBySingBox")
+
+
+def _v3_dispatch_no_silent_switch() -> None:
+    # 5b) The controller dispatcher turns UnsupportedBySingBox into a 'switch to
+    #     legacy' ConnectionError and must NOT silently run the classic engine.
+    cm = _ctl_v3.ConnectionManager()
+    cm.settings["tun_engine"] = _ctl_v3.ENGINE_SING_BOX
+    classic_called = {"n": 0}
+
+    def _boom(config, direct_domains):
+        raise _sb_v3.UnsupportedBySingBox("nope")
+
+    def _classic(config, direct_domains):
+        classic_called["n"] += 1
+
+    cm._connect_tun_sing_box = _boom
+    cm._connect_tun_classic = _classic
+    try:
+        cm._connect_tun(object(), [])
+    except _ctl_v3.ConnectionError as e:
+        if "legacy" not in str(e).lower():
+            raise AssertionError("dispatch error must point the user to legacy")
+    else:
+        raise AssertionError("unsupported must raise, not silently switch")
+    if classic_called["n"] != 0:
+        raise AssertionError("must NOT silently fall back to the classic engine")
+
+
+def _v3_no_loopback_bridge() -> None:
+    # 6) The architectural win: sing-box owns the TUN, so there is NO local SOCKS
+    #    inbound and nothing bound to 127.0.0.1:2081 — the loopback port the
+    #    classic engine exhausted. Its absence is the regression guard.
+    full = _sb_v3.build_config(parsed["vless"], [], server_ip="1.2.3.4")
+    blob = json.dumps(full)
+    if "2081" in blob:
+        raise AssertionError("sing-box config must not reference the 2081 SOCKS bridge")
+    if "127.0.0.1" in blob:
+        raise AssertionError("sing-box config must not bind/loop through loopback")
+    if any(i.get("type") in ("socks", "http", "mixed") for i in full["inbounds"]):
+        raise AssertionError("sing-box must not open a local SOCKS/HTTP inbound")
+
+
+def _v3_runtime_cleanup() -> None:
+    # 7) The sing-box runtime config carries the server UUID/password; it MUST be
+    #    wiped on disconnect by remove_runtime_configs (no secret left at rest).
+    src = _inspect_v3.getsource(_paths_v3.remove_runtime_configs)
+    if "sing_box_runtime_config_file" not in src:
+        raise AssertionError("remove_runtime_configs must clean the sing-box config")
+    if "sing-box-runtime" not in str(_paths_v3.sing_box_runtime_config_file()):
+        raise AssertionError("unexpected sing-box runtime config path")
+
+
+def _v3_killswitch_singbox() -> None:
+    # 8) Kill-switch must allow sing-box.exe out (else its own transport is
+    #    blocked) and tear that rule down on remove (no orphan firewall rule).
+    sig = _inspect_v3.signature(_ks_v3.install)
+    if "sing_box_exe_path" not in sig.parameters:
+        raise AssertionError("killswitch.install missing sing_box_exe_path param")
+    if "_RULE_ALLOW_SINGBOX" not in _inspect_v3.getsource(_ks_v3.install):
+        raise AssertionError("install() must add the sing-box allow rule")
+    if "_RULE_ALLOW_SINGBOX" not in _inspect_v3.getsource(_ks_v3.remove):
+        raise AssertionError("remove() must delete the sing-box allow rule")
+
+
+def _v3_stats_include_singbox() -> None:
+    # 9) Runtime stats sample the sing-box process too, and the diagnostic line
+    #    formats without crashing when nothing is running.
+    cm = _ctl_v3.ConnectionManager()
+    stats = cm.sample_runtime_stats()
+    if "sing-box" not in stats:
+        raise AssertionError("sample_runtime_stats must include the sing-box process")
+    line = cm.format_runtime_stats(stats)
+    if "preset=" not in line:
+        raise AssertionError("format_runtime_stats lost its preset segment")
+
+
+def _v3_legacy_unaffected() -> None:
+    # 10) The legacy engine stays selectable and its xray config is untouched —
+    #     v3 is additive, not a removal.
+    if _ctl_v3.resolve_engine("classic_xray_tun2socks") != _ctl_v3.ENGINE_CLASSIC:
+        raise AssertionError("legacy engine must remain selectable")
+    full = build_config(parsed["vless"], direct_domains=["example.com"])
+    if full["outbounds"][0]["tag"] != "proxy":
+        raise AssertionError("classic xray config regressed")
+
+
+def _v3_real_singbox_check() -> None:
+    # 11) When a sing-box binary is present (dev/local; absent on the CI runner),
+    #     the GENERATED config must pass the real `sing-box check`. This is the
+    #     guard that caught the 1.12/1.13 schema break — a structurally-valid
+    #     dict that sing-box itself rejects is worthless. No-op (pass) when the
+    #     binary isn't installed so CI stays green.
+    if not _sbi_v3.is_installed():
+        print("       (skip — sing-box binary not installed on this host)")
+        return
+    for leak in (True, False):
+        for ru in (True, False):
+            path = _sb_v3.write_config(
+                parsed["vless"], ["example.com"], server_ip="1.2.3.4",
+                dns_leak_protection=leak, route_ru_direct=ru,
+            )
+            ok, msg = _sb_v3.check_config(path)
+            if not ok:
+                raise AssertionError(
+                    f"sing-box rejected the generated config "
+                    f"(leak={leak} ru={ru}): {msg[:200]}")
+
+
+check("migration: default engine sing-box; old settings migrate", _v3_migration_default)
+check("config: native-TUN structure + pinned server + loop killer", _v3_config_structure)
+check("config: private/LAN/Docker (172.19.2.109) bypass", _v3_private_bypass)
+check("config: DNS hijack + leak ON via proxy / OFF direct", _v3_dns_hijack_and_leak)
+check("config: unsupported protocol/plugin raises", _v3_unsupported_raises)
+check("dispatch: unsupported → legacy error, no silent switch", _v3_dispatch_no_silent_switch)
+check("config: no 127.0.0.1:2081 SOCKS bridge (no loopback exhaustion)", _v3_no_loopback_bridge)
+check("cleanup: sing-box runtime config wiped on disconnect", _v3_runtime_cleanup)
+check("kill-switch: allows + removes sing-box.exe rule", _v3_killswitch_singbox)
+check("stats: sample/format include sing-box process", _v3_stats_include_singbox)
+check("legacy: classic engine still selectable + valid", _v3_legacy_unaffected)
+check("config: real `sing-box check` accepts generated config", _v3_real_singbox_check)
 
 
 # ---------------------------------------------------------------------------

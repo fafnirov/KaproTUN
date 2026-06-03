@@ -57,6 +57,9 @@ _RULE_ALLOW_XRAY = f"{_RULE_PREFIX}-allow-xray"
 # kill-switch's block-all would drop the hy2 transport and the tunnel never
 # comes up. Only added when a hy2 transport is in play (see install()).
 _RULE_ALLOW_HYSTERIA = f"{_RULE_PREFIX}-allow-hysteria"
+# v3.0.0: the sing-box engine is a single process that reaches the VPN server
+# itself (no xray). Its own allow-rule, added only for a sing-box session.
+_RULE_ALLOW_SINGBOX = f"{_RULE_PREFIX}-allow-singbox"
 
 # Private networks + loopback + link-local — these stay reachable
 # under kill-switch so the user's LAN doesn't die alongside their VPN.
@@ -75,7 +78,8 @@ def is_supported() -> bool:
 
 
 def install(xray_exe_path: Path,
-            hysteria_exe_path: Optional[Path] = None) -> bool:
+            hysteria_exe_path: Optional[Path] = None,
+            sing_box_exe_path: Optional[Path] = None) -> bool:
     """Install the kill-switch firewall rules. Returns True on success.
 
     `hysteria_exe_path` — pass the hysteria client binary ONLY for a
@@ -136,6 +140,17 @@ def install(xray_exe_path: Path,
             remove()
             return False
 
+    # 5. sing-box engine — the single process that reaches the VPN server in
+    # sing-box TUN mode. Added only for a sing-box session.
+    if sing_box_exe_path is not None:
+        if not _add_rule(_RULE_ALLOW_SINGBOX, [
+            "dir=out", "action=allow", "enable=yes",
+            "profile=any",
+            f"program={sing_box_exe_path}",
+        ]):
+            remove()
+            return False
+
     return True
 
 
@@ -149,7 +164,7 @@ def remove() -> None:
     if not is_supported():
         return
     for name in (_RULE_BLOCK_ALL, _RULE_ALLOW_LAN, _RULE_ALLOW_XRAY,
-                 _RULE_ALLOW_HYSTERIA):
+                 _RULE_ALLOW_HYSTERIA, _RULE_ALLOW_SINGBOX):
         try:
             subprocess.run(
                 ["netsh", "advfirewall", "firewall", "delete", "rule",

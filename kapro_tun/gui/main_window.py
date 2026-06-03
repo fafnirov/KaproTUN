@@ -37,8 +37,8 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..core import (
-    admin, app_log, autostart, dns_options, storage, tun2socks_installer,
-    tun2socks_process, updater, xray_installer, xray_stats,
+    admin, app_log, autostart, dns_options, sing_box_installer, storage,
+    tun2socks_installer, tun2socks_process, updater, xray_installer, xray_stats,
 )
 from ..core import controller as _controller
 from ..core.controller import MODE_HTTP_PROXY, MODE_TUN
@@ -54,7 +54,8 @@ from .stats_page import StatsPage
 from .world_map import WorldMapWidget
 from . import window_resize
 from .configs_picker import ConfigsPickerDialog
-from .installer_dialog import ensure_geoip_ru_cached, ensure_tun2socks_installed, ensure_xray_installed
+from .installer_dialog import (ensure_geoip_ru_cached, ensure_sing_box_installed,
+                               ensure_tun2socks_installed, ensure_xray_installed)
 from .sites_dialog import SitesDialog
 from .sparkline import TrafficSparkline
 from .titlebar import TitleBar
@@ -870,6 +871,46 @@ class SettingsPage(QWidget):
         perf_hint.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(perf_hint)
 
+        # --- TUN engine (v3.0.0) ---
+        # sing-box owns the TUN device natively (no 127.0.0.1:2081 SOCKS bridge,
+        # no tun2socks) which removes the loopback ephemeral-port exhaustion that
+        # could wedge long classic sessions. The legacy xray+tun2socks engine
+        # stays available as a fallback for the rare configs sing-box can't
+        # faithfully reproduce. Takes effect at the next connect.
+        engine_row = QHBoxLayout()
+        engine_row.setContentsMargins(0, 6, 0, 0)
+        engine_label = QLabel("Движок TUN" if _ru else "TUN engine")
+        engine_row.addWidget(engine_label)
+        engine_row.addStretch(1)
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItem(
+            "Основной: sing-box" if _ru else "Primary: sing-box",
+            _controller.ENGINE_SING_BOX)
+        self.engine_combo.addItem(
+            "Legacy: Xray + tun2socks" if _ru else "Legacy: Xray + tun2socks",
+            _controller.ENGINE_CLASSIC)
+        current_engine = _controller.resolve_engine(manager.settings.get("tun_engine"))
+        for i in range(self.engine_combo.count()):
+            if self.engine_combo.itemData(i) == current_engine:
+                self.engine_combo.setCurrentIndex(i)
+                break
+        self.engine_combo.currentIndexChanged.connect(self._on_tun_engine_changed)
+        engine_row.addWidget(self.engine_combo)
+        outer.addLayout(engine_row)
+        engine_hint = QLabel(
+            "sing-box — основной движок: один процесс владеет TUN, без моста "
+            "tun2socks. Legacy включай, только если конкретный конфиг не "
+            "поддержан в sing-box. Применяется при следующем подключении."
+            if _ru else
+            "sing-box is the primary engine: a single process owns the TUN with "
+            "no tun2socks bridge. Switch to legacy only if a specific config "
+            "isn't supported on sing-box. Applies on the next connect."
+        )
+        engine_hint.setObjectName("dim")
+        engine_hint.setWordWrap(True)
+        engine_hint.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(engine_hint)
+
         # Separator
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
@@ -910,7 +951,11 @@ class SettingsPage(QWidget):
 
         engine_version = xray_installer.get_installed_version() or "не установлен"
         tun_version = tun2socks_installer.get_installed_version() or "не установлен"
-        tun_row = f"<div style='color:#71717a; font-size:9pt'>tun2socks: {tun_version}</div>"
+        sb_version = sing_box_installer.get_installed_version() or "не установлен"
+        tun_row = (
+            f"<div style='color:#71717a; font-size:9pt'>sing-box: {sb_version}</div>"
+            f"<div style='color:#71717a; font-size:9pt'>tun2socks: {tun_version}</div>"
+        )
         # Xray's version string is long ("Xray 26.3.27 ... go1.26.1 windows/amd64")
         # — word-wrap so we don't clip the right edge of the panel.
         about = QLabel(
@@ -1107,6 +1152,15 @@ class SettingsPage(QWidget):
         key = self.perf_combo.currentData()
         if key:
             self._manager.update_settings(performance_preset=str(key))
+            self.settings_changed.emit()
+
+    def _on_tun_engine_changed(self, _index: int) -> None:
+        """Persist the TUN engine choice (sing-box primary / legacy fallback).
+        Applied at the next connect — the controller reads tun_engine when it
+        dispatches the TUN connect."""
+        key = self.engine_combo.currentData()
+        if key:
+            self._manager.update_settings(tun_engine=str(key))
             self.settings_changed.emit()
 
     def _on_theme_changed(self, _index: int) -> None:
@@ -1841,6 +1895,19 @@ class MainWindow(QMainWindow):
                         "снять галку «Авто-замер скорости».")
             self.logs_page.append(msg + (f" Лог: {tail}" if tail else ""))
 
+    def _engine_tag(self) -> str:
+        """Short status-line label for the active dataplane: 'HTTP' for proxy
+        mode, 'TUN · sing-box' / 'TUN · legacy' for the two TUN engines. Reads
+        the controller's *active* engine when connected so the label reflects
+        reality (e.g. an UnsupportedBySingBox fallback), and the configured
+        engine otherwise."""
+        if self.manager.current_mode() != MODE_TUN:
+            return "HTTP"
+        engine = self.manager.current_engine()
+        if engine == _controller.ENGINE_CLASSIC:
+            return "TUN · legacy"
+        return "TUN · sing-box"
+
     def _refresh_home(self) -> None:
         # Don't fight the connect worker for the button state — the
         # "connecting" pulse keeps animating until the worker finishes
@@ -1943,8 +2010,7 @@ class MainWindow(QMainWindow):
             mm, ss = divmod(elapsed, 60)
             hh, mm = divmod(mm, 60)
             timer = f"{hh:d}:{mm:02d}:{ss:02d}" if hh else f"{mm:02d}:{ss:02d}"
-            mode_tag = "TUN" if self.manager.current_mode() == MODE_TUN else "HTTP"
-            self.home_page.set_state("connected", f"{timer} · {mode_tag}")
+            self.home_page.set_state("connected", f"{timer} · {self._engine_tag()}")
             self.tray.set_state("connected", active_name)
             # v1.15.3: flip the Stats live-block badge based on the
             # connection-manager truth BEFORE attempting to poll xray
@@ -2083,10 +2149,15 @@ class MainWindow(QMainWindow):
     def _do_connect(self) -> None:
         if not ensure_xray_installed(self):
             return
-        # In TUN mode we additionally need tun2socks + wintun.dll + geoip:ru list
+        # In TUN mode we additionally need the engine's binary + geoip:ru list.
         if self.manager.current_mode() == MODE_TUN:
-            if not ensure_tun2socks_installed(self):
-                return
+            engine = _controller.resolve_engine(self.manager.settings.get("tun_engine"))
+            if engine == _controller.ENGINE_SING_BOX:
+                if not ensure_sing_box_installed(self):
+                    return
+            else:
+                if not ensure_tun2socks_installed(self):
+                    return
             # Soft-required — TUN works without it but RU split-routing is
             # less comprehensive. Don't gate connection on it.
             ensure_geoip_ru_cached(self)
@@ -2116,13 +2187,14 @@ class MainWindow(QMainWindow):
         self._reconnect_attempts = 0
         self.manager.update_settings(last_config_name=self._active_config.name)
         self._connected_at = time.time()
-        mode_tag = "TUN" if self.manager.current_mode() == MODE_TUN else "HTTP"
+        mode = self.manager.current_mode()
         self.logs_page.append(
-            f"[*] Подключено к «{self._active_config.name}» ({mode_tag})"
+            f"[*] Подключено к «{self._active_config.name}» ({self._engine_tag()})"
         )
-        # On-disk lifecycle line — mode + preset only, no server name/secret.
-        app_log.log(f"[connect] подключено, режим {mode_tag}, preset="
-                    f"{self.manager.settings.get('performance_preset', 'balanced')}")
+        # On-disk lifecycle line — mode + engine, no server name/secret.
+        engine = self.manager.current_engine() if mode == MODE_TUN else "http_proxy"
+        app_log.log(f"[connect] mode={'TUN' if mode == MODE_TUN else 'HTTP'} "
+                    f"engine={engine}")
         show_toast(self, f"Подключено к «{self._active_config.name}»", kind="success")
         self._refresh_home()
         # v1.14.3: show country + map immediately based on the config
@@ -2453,6 +2525,16 @@ class MainWindow(QMainWindow):
                 app_log.log(line)
             except Exception:
                 pass
+
+        # v3.0.0 — softer sing-box watchdog. The self-heal (_on_memory_pressure)
+        # restarts tun2socks and forces the 'economy' buffer preset; both are
+        # classic-engine concepts. sing-box is a single native-TUN process with
+        # no loopback SOCKS bridge, so the UDP-session storm the heal targets
+        # can't occur. We keep sampling/logging the [mem] line above for
+        # diagnostics, but never run the tun2socks heal against sing-box.
+        if self.manager.current_engine() != _controller.ENGINE_CLASSIC:
+            self._mem_breach_streak = 0
+            return
         try:
             verdict = self.manager.memory_pressure_reason(stats)
         except Exception:

@@ -35,9 +35,9 @@ All app state is in `%LOCALAPPDATA%\KaproTUN\` on Windows,
 | `secrets.json` | Subscription URLs + last-seen usage info (traffic/expiry) | **Same encryption as configs.json** (2.0.0). A subscription URL is a bearer credential, so it is **no longer kept in settings.json** |
 | `settings.json` | App preferences only — **no secrets** | Plaintext, 0600. Subscription fields were moved out into `secrets.json` in 2.0.0 (auto-migrated on first launch) |
 | `sites.json` | Domains routed direct (your custom additions) | Plaintext (just hostnames) |
-| `xray-runtime.json`, `hysteria-client.yaml` | The xray / hysteria configs we generate on connect — these embed the server UUID / password / auth | Written 0600, atomically; **deleted on every disconnect/exit** after the processes stop; never logged (2.0.0) |
+| `xray-runtime.json`, `hysteria-client.yaml`, `sing-box-runtime.json` | The xray / hysteria / sing-box configs we generate on connect — these embed the server UUID / password / auth (the sing-box config is the v3.0.0 native-TUN engine's runtime config) | Written 0600, atomically; **deleted on every disconnect/exit** after the processes stop; never logged (2.0.0; sing-box 3.0.0) |
 | `xray.log` | Error-level xray output, last ~1 MB | Plaintext (no per-connection logging — see below) |
-| `xray/`, `tun/`, `hysteria/` | xray-core + tun2socks + hysteria binaries we downloaded | Standard executables |
+| `xray/`, `tun/`, `hysteria/`, `sing-box/` | xray-core + tun2socks + hysteria + sing-box binaries we downloaded | Standard executables |
 
 ### Encryption: when plaintext is (and isn't) possible
 
@@ -73,9 +73,10 @@ In normal operation:
    silently 2 seconds after launch, then once a day. To detect new
    versions. Returns a small JSON, no IP/User-Agent of your providers.
 3. **`kaprovpn.pro/files`** — our mirror for xray-core / tun2socks /
-   WinTUN driver / geoip-CIDR list. Falls back to upstream
-   (github.com/XTLS/Xray-core, wintun.net, ipdeny.com) if mirror is
-   down. Downloaded once on first launch, cached forever.
+   sing-box / WinTUN driver / geoip-CIDR list. Falls back to upstream
+   (github.com/XTLS/Xray-core, github.com/SagerNet/sing-box, wintun.net,
+   ipdeny.com) if mirror is down. Downloaded once on first launch, cached
+   forever.
 4. **Your subscription URL** — fetched once when you import, then every
    12 hours if `subscription_auto_refresh` is on (default). Can be
    disabled in Settings.
@@ -159,10 +160,12 @@ separate and always applied.
 
 Optional (Settings → kill-switch), **Windows-only** today, needs admin. When
 on, it installs Windows Firewall rules that block ALL outbound except: your
-LAN (so printers / NAS / router UI keep working), `xray.exe`, and — for
-Hysteria2 sessions — `hysteria.exe` (the process that actually egresses for
-hy2; 2.0.0 closed a gap where it was blocked and hy2 wouldn't connect under
-the kill-switch). If the tunnel process dies, traffic stops rather than
+LAN (so printers / NAS / router UI keep working), `xray.exe`, for Hysteria2
+sessions — `hysteria.exe` (the process that actually egresses for hy2; 2.0.0
+closed a gap where it was blocked and hy2 wouldn't connect under the
+kill-switch), and — for the v3.0.0 sing-box TUN engine — `sing-box.exe` (the
+single native-TUN process that egresses to the server in that mode). If the
+tunnel process dies, traffic stops rather than
 silently falling back to your ISP. All KaproTUN firewall rules are removed on
 disconnect and swept on the next launch if the app crashed.
 

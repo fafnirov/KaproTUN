@@ -4,7 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
-from ..core import geoip_ru, tun2socks_installer, xray_installer
+from ..core import geoip_ru, sing_box_installer, tun2socks_installer, xray_installer
 
 
 class _DownloadThread(QThread):
@@ -88,6 +88,20 @@ def ensure_tun2socks_installed(parent) -> bool:
         f"- https://www.wintun.net/\n"
         f"и положи tun2socks.exe и wintun.dll в:\n{tun2socks_installer.paths.tun_dir()}",
     ) and tun2socks_installer.is_installed()
+
+
+def ensure_sing_box_installed(parent) -> bool:
+    """Download sing-box (+ wintun.dll on Windows) if missing. For the v3.0.0
+    sing-box TUN engine."""
+    if sing_box_installer.is_installed():
+        return True
+    return _run_download(
+        parent, "sing-box + WinTUN", sing_box_installer.download_and_install,
+        f"Скачай вручную:\n"
+        f"- https://github.com/SagerNet/sing-box/releases\n"
+        f"- https://www.wintun.net/\n"
+        f"и положи sing-box.exe в:\n{sing_box_installer.paths.sing_box_dir()}",
+    ) and sing_box_installer.is_installed()
 
 
 def ensure_geoip_ru_cached(parent) -> bool:

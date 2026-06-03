@@ -27,6 +27,8 @@ MAX_TUN2SOCKS_ZIP = 40 * 1024 * 1024
 MAX_WINTUN_ZIP = 16 * 1024 * 1024
 MAX_HYSTERIA_BIN = 80 * 1024 * 1024
 MAX_SETUP_EXE = 150 * 1024 * 1024
+# sing-box archive ~15-25 MB (binary ~30 MB unpacked); cap generously.
+MAX_SINGBOX_ARCHIVE = 80 * 1024 * 1024
 
 # Bypass system proxy — we're fetching our own deps, not user traffic, and a
 # stale 127.0.0.1:2080 proxy from a crashed session would otherwise break it.

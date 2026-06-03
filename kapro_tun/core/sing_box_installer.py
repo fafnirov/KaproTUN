@@ -1,0 +1,200 @@
+"""Downloads the sing-box binary (SagerNet/sing-box) per-OS.
+
+v3.0.0 makes sing-box the primary TUN dataplane: a single process that owns the
+TUN device natively and routes/proxies itself — no separate tun2socks.exe and
+no local SOCKS bridge (127.0.0.1:2081), which is what exhausted loopback
+ephemeral ports under load in the classic engine.
+
+Release assets (SagerNet/sing-box):
+  Windows  → sing-box-<ver>-windows-amd64.zip     (sing-box.exe inside a folder)
+  macOS    → sing-box-<ver>-darwin-amd64.tar.gz / -arm64
+  Linux    → sing-box-<ver>-linux-amd64.tar.gz   / -arm64
+
+On Windows sing-box uses the same WinTUN driver as tun2socks (wintun.dll lives
+in tun_dir() and sing-box finds it via PATH/cwd). Mirror-first download with a
+strict size cap and streaming to disk — same pattern as xray/tun2socks.
+"""
+from __future__ import annotations
+
+import io
+import platform
+import stat
+import sys
+import tarfile
+import zipfile
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+import requests
+
+from . import net_download, paths
+
+SINGBOX_LATEST = "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+# Pinned fallback used only if the GitHub API is unreachable. The asset
+# filename drops the leading "v" from the tag.
+#
+# MUST be >= 1.12.0: sing_box_config emits the modern config grammar (typed DNS
+# servers, `hijack-dns`/`sniff`/`route` rule actions, route.default_domain_
+# resolver). The old 1.11 fallback would REJECT that config — the legacy DNS
+# server shape it understood is deprecated in 1.12 and fatal in 1.13. Pinned to
+# a release validated end-to-end with `sing-box check` against the generated
+# config for every supported protocol.
+SINGBOX_PINNED_VERSION = "v1.13.12"
+
+KAPROTUN_MIRROR_BASE = "https://kaprovpn.pro/files"
+
+# Bypass system proxy on our own downloads (a stale 127.0.0.1:2080 registry
+# entry from a crashed HTTP-mode session otherwise kills every fetch).
+_NO_PROXY = {"http": "", "https": ""}
+
+ProgressCb = Optional[Callable[[int, int], None]]
+
+
+@dataclass
+class ReleaseInfo:
+    version: str
+    url: str
+    filename: str
+
+
+def _asset_marker() -> str:
+    machine = platform.machine().lower()
+    is_arm64 = machine in ("arm64", "aarch64")
+    if sys.platform == "win32":
+        return "windows-arm64" if is_arm64 else "windows-amd64"
+    if sys.platform == "darwin":
+        return "darwin-arm64" if is_arm64 else "darwin-amd64"
+    return "linux-arm64" if is_arm64 else "linux-amd64"
+
+
+def _asset_ext() -> str:
+    # Windows ships .zip; the other platforms ship .tar.gz.
+    return ".zip" if sys.platform == "win32" else ".tar.gz"
+
+
+def _pinned_filename() -> str:
+    ver = SINGBOX_PINNED_VERSION.lstrip("v")
+    return f"sing-box-{ver}-{_asset_marker()}{_asset_ext()}"
+
+
+def _pinned_fallback_url() -> str:
+    return (f"https://github.com/SagerNet/sing-box/releases/download/"
+            f"{SINGBOX_PINNED_VERSION}/{_pinned_filename()}")
+
+
+def is_installed() -> bool:
+    if not paths.sing_box_exe().is_file():
+        return False
+    # On Windows sing-box (like tun2socks) needs the WinTUN driver.
+    if sys.platform == "win32":
+        return paths.wintun_dll().is_file()
+    return True
+
+
+def get_installed_version() -> Optional[str]:
+    if not paths.sing_box_exe().is_file():
+        return None
+    import subprocess
+    try:
+        proc = subprocess.run(
+            [str(paths.sing_box_exe()), "version"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        out = (proc.stdout or proc.stderr or "").strip().splitlines()
+        return out[0].strip() if out else None
+    except Exception:
+        return None
+
+
+def _fetch_release() -> ReleaseInfo:
+    marker = _asset_marker()
+    ext = _asset_ext()
+    try:
+        r = requests.get(SINGBOX_LATEST, timeout=10, proxies=_NO_PROXY)
+        r.raise_for_status()
+        data = r.json()
+        version = data.get("tag_name", "unknown")
+        for asset in data.get("assets", []):
+            name = asset.get("name", "")
+            if marker in name and name.endswith(ext):
+                return ReleaseInfo(version, asset["browser_download_url"], name)
+    except Exception:
+        pass
+    return ReleaseInfo(SINGBOX_PINNED_VERSION, _pinned_fallback_url(),
+                       _pinned_filename())
+
+
+def _download(url: str, progress: ProgressCb, attempts: int = 3) -> bytes:
+    last_err: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            return net_download.download_to_memory(
+                url, net_download.MAX_SINGBOX_ARCHIVE, progress)
+        except net_download.DownloadTooLarge:
+            raise
+        except (requests.exceptions.RequestException, OSError) as e:
+            last_err = e
+            if attempt < attempts - 1:
+                continue
+    raise RuntimeError(f"Не удалось скачать sing-box после {attempts} попыток: {last_err}")
+
+
+def _download_with_fallback(filename: str, upstream_url: str,
+                            progress: ProgressCb) -> bytes:
+    """Mirror first, upstream fallback — same as the other installers."""
+    try:
+        return _download(f"{KAPROTUN_MIRROR_BASE}/{filename}", progress, attempts=2)
+    except RuntimeError:
+        pass
+    return _download(upstream_url, progress, attempts=2)
+
+
+def _extract_binary(data: bytes, target) -> None:
+    """Pull the sing-box[.exe] out of the release archive (zip or tar.gz)."""
+    want = "sing-box.exe" if sys.platform == "win32" else "sing-box"
+    if sys.platform == "win32":
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            member = next(
+                (n for n in zf.namelist()
+                 if not n.endswith("/") and n.rsplit("/", 1)[-1].lower() == want),
+                None,
+            )
+            if not member:
+                raise RuntimeError("sing-box.exe not found in the archive")
+            target.write_bytes(zf.read(member))
+        return
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        member = next(
+            (m for m in tf.getmembers()
+             if m.isfile() and m.name.rsplit("/", 1)[-1] == want),
+            None,
+        )
+        if not member:
+            raise RuntimeError("sing-box binary not found in the archive")
+        src = tf.extractfile(member)
+        if src is None:
+            raise RuntimeError("sing-box binary unreadable in the archive")
+        target.write_bytes(src.read())
+    try:
+        st = target.stat()
+        target.chmod(st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError:
+        pass
+
+
+def download_and_install(progress: ProgressCb = None) -> None:
+    """Install sing-box (and the WinTUN driver on Windows, reusing the
+    tun2socks installer so the two engines share one driver)."""
+    if not paths.sing_box_exe().is_file():
+        release = _fetch_release()
+        data = _download_with_fallback(release.filename, release.url, progress)
+        _extract_binary(data, paths.sing_box_exe())
+    if sys.platform == "win32" and not paths.wintun_dll().is_file():
+        from . import tun2socks_installer
+        tun2socks_installer._install_wintun(progress)
+
+
+def ensure_installed(progress: ProgressCb = None) -> None:
+    if not is_installed():
+        download_and_install(progress)

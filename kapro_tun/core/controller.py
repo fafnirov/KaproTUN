@@ -24,6 +24,8 @@ from .hysteria_process import HysteriaProcess
 # in the connect flow.
 from . import tun2socks_process
 from .tun2socks_process import Tun2socksProcess
+from .sing_box_process import SingBoxProcess
+from . import sing_box_config, sing_box_installer
 if sys.platform == "win32":
     from . import network_routes
 else:
@@ -37,6 +39,21 @@ class ConnectionError(Exception):
 # Connection modes
 MODE_HTTP_PROXY = "http"   # Browser-only, sets Windows system HTTP proxy. No admin needed.
 MODE_TUN = "tun"           # System-wide TUN tunnel. Needs admin. Works for all apps incl. Telegram, Steam.
+
+# TUN dataplane engines (v3.0.0)
+ENGINE_SING_BOX = "sing_box_tun"            # primary: native TUN, no tun2socks bridge
+ENGINE_CLASSIC = "classic_xray_tun2socks"   # legacy fallback: xray + tun2socks
+
+
+def resolve_engine(value) -> str:
+    """Normalise the tun_engine setting → a known engine id. Unknown/empty →
+    the sing-box default (this is also the migration for old settings that
+    predate the engine choice)."""
+    return ENGINE_CLASSIC if str(value or "") == ENGINE_CLASSIC else ENGINE_SING_BOX
+
+
+class UnsupportedBySingBox(sing_box_config.UnsupportedBySingBox):
+    """Re-export so callers can catch it from the controller namespace."""
 
 
 # TUN-side IPs — these live on the virtual interface, not on any real network
@@ -218,10 +235,16 @@ class ConnectionManager:
         self.hysteria_process = HysteriaProcess(
             on_log=(lambda l: on_log(f"[hysteria] {l}")) if on_log else None,
         )
+        # v3.0.0 primary TUN engine — single native-TUN process, no bridge.
+        self.sing_box_process = SingBoxProcess(
+            on_log=(lambda l: on_log(f"[sing-box] {l}")) if on_log else None,
+        )
         self.settings = storage.load_settings()
         self._saved_proxy_state: Optional[dict] = None
         self._route_session: Optional[network_routes.RouteSession] = None
         self._active: Optional[ProxyConfig] = None
+        # Which TUN engine the live session is using (None when disconnected).
+        self._active_engine: Optional[str] = None
         # Belt-and-braces: if Python exits uncleanly with TUN routes active,
         # the user's network is broken until reboot. Best-effort cleanup here.
         atexit.register(self._atexit_cleanup)
@@ -391,6 +414,11 @@ class ConnectionManager:
         tun_recovery.clear()
         if self.tun_process.is_running():
             self.tun_process.stop()
+        # sing-box engine: stop the single native-TUN process. It removes the
+        # routes it added (auto_route) on clean shutdown; remove_runtime_configs
+        # below deletes its credential-bearing runtime config.
+        if self.sing_box_process.is_running():
+            self.sing_box_process.stop()
         if self._saved_proxy_state is not None:
             try:
                 system_proxy.restore(self._saved_proxy_state)
@@ -435,11 +463,14 @@ class ConnectionManager:
         except Exception as e:
             self._log(f"[!] WebRTC-block: не удалось снять правило: {e}")
         self._active = None
+        self._active_engine = None
 
     def is_connected(self) -> bool:
-        # In TUN mode, the active session is tun_process + xray both up.
-        # In HTTP mode, just xray.
-        return self.process.is_running() or self.tun_process.is_running()
+        # Classic TUN: tun_process + xray. HTTP: xray only. sing-box TUN:
+        # the single sing-box process.
+        return (self.process.is_running()
+                or self.tun_process.is_running()
+                or self.sing_box_process.is_running())
 
     def active_config(self) -> Optional[ProxyConfig]:
         return self._active if self.is_connected() else None
@@ -470,23 +501,36 @@ class ConnectionManager:
 
     def sample_runtime_stats(self) -> dict:
         """Best-effort {name: ProcSample|None} for the helper processes. Cheap
-        (a psutil read per pid); never raises."""
+        (a psutil read per pid); never raises. Includes the sing-box process so
+        the [mem] diagnostic line covers the v3 engine too — but note the
+        memory-pressure heal (see memory_pressure_reason) intentionally does NOT
+        act on sing-box: it's a single native-TUN process without the loopback
+        UDP-session storm the tun2socks heal was built for."""
         return {
             "tun2socks": proc_stats.sample(self.tun_process.pid()),
             "xray": proc_stats.sample(self.process.pid()),
+            "sing-box": proc_stats.sample(self.sing_box_process.pid()),
         }
 
     def format_runtime_stats(self, stats: Optional[dict] = None) -> str:
         """One diagnostic line: memory, handles, threads, pid, uptime per
         helper process + the active preset. ASCII-only numbers so it's safe to
-        write anywhere (app.log, Logs page, console)."""
+        write anywhere (app.log, Logs page, console). Only processes that are
+        actually running (non-None sample) are shown, so a sing-box session
+        doesn't print 'tun2socks: н/д' noise and vice-versa."""
         if stats is None:
             stats = self.sample_runtime_stats()
         preset = str(self.settings.get("performance_preset", "balanced"))
-        pids = {"tun2socks": self.tun_process.pid(), "xray": self.process.pid()}
+        pids = {
+            "tun2socks": self.tun_process.pid(),
+            "xray": self.process.pid(),
+            "sing-box": self.sing_box_process.pid(),
+        }
         now = time.time()
         parts = []
-        for name in ("tun2socks", "xray"):
+        names = [n for n in ("tun2socks", "xray", "sing-box")
+                 if stats.get(n) is not None] or ["tun2socks", "xray"]
+        for name in names:
             s = stats.get(name)
             if s is None:
                 parts.append(f"{name}: н/д")
@@ -584,6 +628,23 @@ class ConnectionManager:
     # --- TUN mode (system-wide) -------------------------------------------
 
     def _connect_tun(self, config: ProxyConfig, direct_domains: list[str]) -> None:
+        """Dispatch to the selected TUN engine (v3.0.0). sing-box is the
+        default; classic xray+tun2socks is the legacy fallback. An unsupported
+        config raises a clear error suggesting legacy — NEVER a silent switch."""
+        engine = resolve_engine(self.settings.get("tun_engine"))
+        if engine == ENGINE_SING_BOX:
+            try:
+                self._connect_tun_sing_box(config, direct_domains)
+            except sing_box_config.UnsupportedBySingBox as e:
+                raise ConnectionError(
+                    f"{e}\n\nЭтот конфиг пока не поддержан движком sing-box. "
+                    f"Переключи движок на «Legacy (Xray + tun2socks)» в "
+                    f"Настройках и подключись снова."
+                ) from e
+            return
+        self._connect_tun_classic(config, direct_domains)
+
+    def _connect_tun_classic(self, config: ProxyConfig, direct_domains: list[str]) -> None:
         if not admin.is_admin():
             # Per-OS phrasing — the elevation path differs enough to be
             # worth a tailored hint each time.
@@ -920,6 +981,115 @@ class ConnectionManager:
 
         self._route_session = session
         self._active = config
+        self._active_engine = ENGINE_CLASSIC
+
+    def _connect_tun_sing_box(self, config: ProxyConfig, direct_domains: list[str]) -> None:
+        """sing-box native-TUN connect (v3.0.0 primary). sing-box owns the TUN
+        device, manages routes (auto_route), proxies and resolves DNS itself —
+        so there's NO tun2socks process and NO 127.0.0.1 SOCKS bridge. Much less
+        to set up than the classic path: no manual route session, no physical-
+        DNS clearing (sing-box hijacks :53 to its own tunnelled resolver)."""
+        if not admin.is_admin():
+            raise ConnectionError(self._tun_admin_message())
+        if not sing_box_installer.is_installed():
+            raise ConnectionError(
+                "Движок sing-box ещё не установлен. Дай приложению докачать "
+                "его (Настройки → переподключись) или выбери legacy-движок.")
+
+        server_host = str(config.outbound.get("server", "")).strip()
+        if not server_host:
+            raise ConnectionError("В конфиге нет адреса сервера.")
+        try:
+            server_ip = socket.gethostbyname(server_host)
+        except socket.gaierror as e:
+            raise ConnectionError(
+                f"Не удалось резолвнуть VPN-сервер «{server_host}»: {e}") from e
+
+        self._log("[*] Движок: sing-box (нативный TUN, без tun2socks/SOCKS-моста)")
+        dns_option = str(self.settings.get("dns_option", "system"))
+        dns_leak = bool(self.settings.get("dns_leak_protection", True))
+        block_ads = bool(self.settings.get("block_ads", False))
+        route_ru_direct = bool(self.settings.get("route_ru_direct", False))
+
+        # Generate + write the runtime config (may raise UnsupportedBySingBox,
+        # which the dispatcher turns into a 'use legacy' message — no process
+        # has started yet, so nothing to roll back).
+        cfg_path = sing_box_config.write_config(
+            config, direct_domains, server_ip=server_ip,
+            dns_option=dns_option, dns_leak_protection=dns_leak,
+            block_ads=block_ads, route_ru_direct=route_ru_direct,
+            on_log=self._log,
+        )
+        ok, msg = sing_box_config.check_config(cfg_path)
+        if not ok:
+            paths.remove_runtime_configs()
+            raise ConnectionError(f"sing-box отверг конфиг:\n{msg}")
+
+        # Kill-switch BEFORE the tunnel comes up, allowing sing-box.exe out.
+        self._maybe_arm_killswitch(sing_box=True)
+
+        try:
+            self.sing_box_process.start(cfg_path)
+        except Exception as e:
+            try:
+                killswitch.remove()
+            except Exception:
+                pass
+            paths.remove_runtime_configs()
+            raise ConnectionError(f"Не удалось запустить sing-box: {e}") from e
+
+        try:
+            # Did it die immediately (bad config / driver)?
+            time.sleep(1.5)
+            if not self.sing_box_process.is_running():
+                tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
+                raise ConnectionError(
+                    "sing-box завершился сразу после старта"
+                    + (f":\n{tail}" if tail else "."))
+            # Liveness: OS resolution now travels through the sing-box TUN →
+            # its tunnelled resolver. If it answers, the tunnel carries traffic.
+            self._log("[*] Проверяю, что туннель sing-box живой…")
+            if not dns_health.probe(timeout=2.0, attempts=4):
+                raise ConnectionError(
+                    "sing-box поднялся, но DNS через туннель не отвечает. "
+                    "Откатываю. Проверь сервер/подписку, либо переключи движок "
+                    "на legacy (Xray + tun2socks).")
+            self._log("[*] sing-box TUN активен — трафик и DNS проходят.")
+        except Exception:
+            self.sing_box_process.stop()
+            try:
+                killswitch.remove()
+            except Exception:
+                pass
+            paths.remove_runtime_configs()
+            raise
+
+        self._active = config
+        self._active_engine = ENGINE_SING_BOX
+
+    def _tun_admin_message(self) -> str:
+        """Per-OS 'TUN needs admin' message (shared by both engines)."""
+        if sys.platform == "win32":
+            return (
+                "TUN-режим требует прав администратора.\n"
+                "Перезапусти KaproTUN от имени администратора "
+                "(правый клик по ярлыку → «Запуск от имени администратора») "
+                "или переключи в Настройках режим на «HTTP-прокси».")
+        if sys.platform == "darwin":
+            return (
+                "TUN-режиму нужен root для создания utun-интерфейса.\n"
+                "Запусти из терминала через sudo, или переключи режим на "
+                "«HTTP-прокси».")
+        return (
+            "TUN-режиму нужен root для управления маршрутами.\n"
+            "Запусти через sudo / pkexec, или переключи режим на «HTTP-прокси».")
+
+    def current_engine(self) -> str:
+        """The engine of the live session, or the configured default when idle.
+        Used by the UI to show 'TUN · sing-box' vs 'TUN · legacy'."""
+        if self._active_engine:
+            return self._active_engine
+        return resolve_engine(self.settings.get("tun_engine"))
 
     def _wait_for_mac_tun_name(self, timeout: float = 8.0) -> Optional[str]:
         """macOS-only: poll tun2socks for the kernel-assigned utunN name.
@@ -1050,8 +1220,11 @@ class ConnectionManager:
             "«Защиту от DNS-утечек»."
         )
 
-    def _maybe_arm_killswitch(self) -> None:
+    def _maybe_arm_killswitch(self, sing_box: bool = False) -> None:
         """If user enabled kill-switch in settings, install firewall rules.
+
+        `sing_box=True` (the sing-box TUN engine) also allows sing-box.exe out —
+        in that mode sing-box, not xray, reaches the VPN server.
 
         Silent no-op when:
           - Setting is off
@@ -1059,8 +1232,7 @@ class ConnectionManager:
           - Not running as admin (rule install would fail anyway)
 
         We DON'T raise on failure — kill-switch is defence-in-depth, the
-        connection itself works either way. A `[!] Kill-switch не
-        активирован` log line is enough signal.
+        connection itself works either way.
         """
         if not self.settings.get("kill_switch", False):
             return
@@ -1077,9 +1249,11 @@ class ConnectionManager:
         # a hy2 session — so its running state is the signal. Non-hy2 sessions
         # pass None and don't widen the allow-list.
         hy_exe = paths.hysteria_exe() if self.hysteria_process.is_running() else None
-        if killswitch.install(xray_exe, hy_exe):
-            self._log("[*] Kill-switch активирован (firewall блок весь трафик "
-                      + ("мимо xray + hysteria)" if hy_exe else "мимо xray)"))
+        sb_exe = paths.sing_box_exe() if sing_box else None
+        if killswitch.install(xray_exe, hy_exe, sing_box_exe_path=sb_exe):
+            who = "sing-box" if sing_box else ("xray + hysteria" if hy_exe else "xray")
+            self._log(f"[*] Kill-switch активирован (firewall блокирует весь "
+                      f"трафик мимо {who})")
         else:
             self._log("[!] Не удалось установить firewall-правила kill-switch "
                       "— продолжаю без него")

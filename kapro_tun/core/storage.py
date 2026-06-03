@@ -286,6 +286,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "window_size": [480, 870],  # [w, h] — restored on launch (advanced resizable mode only)
     "allow_window_resize": False,  # v2.0.3: opt-in. False = fixed-size window (no mouse resize, no drift); True = resizable + edge handles
     "window_size_preset": "auto",  # v2.1.0: "auto" (compact on low screens) | "standard" | "compact"
+    # v3.0.0: TUN dataplane engine. "sing_box_tun" (default — native TUN, no
+    # tun2socks bridge) or "classic_xray_tun2socks" (legacy fallback). Old
+    # settings without this key migrate to the sing-box default automatically
+    # (DEFAULT_SETTINGS fills the gap); an explicit choice is preserved.
+    "tun_engine": "sing_box_tun",
 }
 
 

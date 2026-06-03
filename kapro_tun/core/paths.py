@@ -132,6 +132,27 @@ def wintun_dll() -> Path:
     return tun_dir() / "wintun.dll"
 
 
+def sing_box_dir() -> Path:
+    """Houses the sing-box binary — the v3.0.0 primary TUN dataplane (native
+    TUN, no separate tun2socks + local-SOCKS bridge). On Windows it uses the
+    same WinTUN driver as tun2socks (kept in tun_dir())."""
+    path = app_data_dir() / "sing-box"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def sing_box_exe() -> Path:
+    name = "sing-box.exe" if _is_windows() else "sing-box"
+    return sing_box_dir() / name
+
+
+def sing_box_runtime_config_file() -> Path:
+    """Generated sing-box JSON config written before each sing-box TUN launch.
+    Carries the server UUID/password — written user-only and deleted on
+    disconnect, same lifecycle as xray-runtime.json."""
+    return app_data_dir() / "sing-box-runtime.json"
+
+
 def hysteria_dir() -> Path:
     """Houses the hysteria client binary (Hysteria2 transport).
 
@@ -248,7 +269,8 @@ def remove_runtime_configs() -> list[str]:
     files count as success.
     """
     failed: list[str] = []
-    for f in (runtime_config_file(), hysteria_config_file()):
+    for f in (runtime_config_file(), hysteria_config_file(),
+              sing_box_runtime_config_file()):
         try:
             f.unlink(missing_ok=True)
         except OSError:
