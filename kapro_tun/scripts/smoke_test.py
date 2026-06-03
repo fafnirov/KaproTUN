@@ -1154,6 +1154,178 @@ def _app_log_redacts_secrets() -> None:
 check("app_log: writes diagnostics to disk, redacts secrets", _app_log_redacts_secrets)
 
 
+def _mem_exhausted_action_pure() -> None:
+    """v2.1.8: mem_exhausted_action forces a shutdown only for a CRITICAL
+    runaway; moderate (and 'no severity') are survivable."""
+    from kapro_tun.core.controller import mem_exhausted_action as A
+    if A("critical") != {"force_shutdown": True}:
+        raise AssertionError("critical+exhausted must force shutdown")
+    if A("moderate") != {"force_shutdown": False}:
+        raise AssertionError("moderate+exhausted must NOT force shutdown")
+    if A(None) != {"force_shutdown": False}:
+        raise AssertionError("None severity must NOT force shutdown")
+
+
+check("controller: mem_exhausted_action (critical → force shutdown)",
+      _mem_exhausted_action_pure)
+
+
+def _auto_reconnect_same_config_no_switch() -> None:
+    """v2.1.8: auto-reconnect must reuse the SAME _active_config and never
+    silently fall back to a different server; _do_auto_reconnect stops when
+    there's no active config instead of picking configs[0]."""
+    import inspect
+    from kapro_tun.gui.main_window import MainWindow
+
+    ar = inspect.getsource(MainWindow._do_auto_reconnect)
+    if "self._active_config" not in ar:
+        raise AssertionError("_do_auto_reconnect must use self._active_config")
+    if "configs[0]" in ar or "self.configs[" in ar:
+        raise AssertionError("_do_auto_reconnect must NOT pick a different server")
+    if "no_active_config" not in ar:
+        raise AssertionError("_do_auto_reconnect must stop+log when no active config")
+    dc = inspect.getsource(MainWindow._do_connect)
+    if "self._active_config" not in dc:
+        raise AssertionError("_do_connect must connect to self._active_config")
+    # Every reconnect initiator routes through _arm_reconnect (reason logging +
+    # storm cap) — guard against a future path bypassing it.
+    arm = inspect.getsource(MainWindow._arm_reconnect)
+    for token in ("reason=", "no_active_config", "storm", "_emergency_stop"):
+        if token not in arm:
+            raise AssertionError(f"_arm_reconnect missing {token}")
+
+
+check("main_window: auto-reconnect keeps same server (no silent switch)",
+      _auto_reconnect_same_config_no_switch)
+
+
+def _runtime_safety_branches_via_window() -> None:
+    """v2.1.8 runtime behaviour, driven on a real (offscreen) MainWindow:
+      * critical + exhausted → manager.disconnect() called, NO reconnect timer,
+        auto-recovery disabled, '[mem-critical] exhausted' logged;
+      * moderate + exhausted → NO forced disconnect;
+      * _arm_reconnect: no active config → blocked; storm cap → emergency stop;
+        a normal arm logs reason=.
+    """
+    import os as _os2
+    _os2.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from kapro_tun.gui import main_window as mw
+    from kapro_tun.core import app_log
+    from kapro_tun.core.parser import ProxyConfig
+    if QApplication.instance() is None:
+        QApplication([])
+
+    orig_toast = mw.show_toast
+    orig_applog = app_log.log
+    logged = []
+    mw.show_toast = lambda *a, **k: None
+    app_log.log = lambda m: logged.append(str(m))
+    w = None
+    try:
+        w = mw.MainWindow()
+        try:
+            w._dns_watchdog.stop()
+        except Exception:
+            pass
+        for t in ("_mem_timer", "_poll", "_reconnect_timer", "_sub_autorefresh"):
+            try:
+                getattr(w, t).stop()
+            except Exception:
+                pass
+
+        cfg = ProxyConfig(name="🇩🇪 T", protocol="vless", raw_url="vless://x@1.2.3.4:1",
+                          outbound={"server": "1.2.3.4", "server_port": 1})
+        calls = {"disconnect": 0}
+        w.manager.disconnect = lambda: calls.__setitem__("disconnect", calls["disconnect"] + 1)
+
+        # --- critical + exhausted → emergency shutdown ---
+        w._active_config = cfg
+        w._auto_recovery_disabled = False
+        w._reconnect_history = []
+        w._mem_heal_count = w._mem_heal_max          # exhausted
+        w._mem_heal_exhausted_notified = False
+        w._reconnect_timer.stop()
+        logged.clear()
+        w._on_memory_pressure("critical", "tun2socks 3.0 ГБ >= 3.0 ГБ (критично)")
+        if calls["disconnect"] < 1:
+            raise AssertionError("critical+exhausted must call manager.disconnect()")
+        if w._reconnect_timer.isActive():
+            raise AssertionError("critical+exhausted must NOT start a reconnect")
+        if not w._auto_recovery_disabled:
+            raise AssertionError("critical+exhausted must disable auto-recovery")
+        if not any("mem-critical" in m and "emergency disconnect" in m for m in logged):
+            raise AssertionError("critical+exhausted must log the emergency stop")
+
+        # --- moderate + exhausted → NO forced shutdown ---
+        calls["disconnect"] = 0
+        w._active_config = cfg
+        w._auto_recovery_disabled = False
+        w._mem_heal_count = w._mem_heal_max
+        w._mem_heal_exhausted_notified = False
+        w._reconnect_timer.stop()
+        w._on_memory_pressure("moderate", "tun2socks 1.9 ГБ >= 1.8 ГБ")
+        if calls["disconnect"] != 0:
+            raise AssertionError("moderate+exhausted must NOT force a disconnect")
+        if w._auto_recovery_disabled:
+            raise AssertionError("moderate+exhausted must NOT disable auto-recovery")
+
+        # --- _arm_reconnect: no active config → blocked, no random server ---
+        w._auto_recovery_disabled = False
+        w._reconnect_history = []
+        w._active_config = None
+        if w._arm_reconnect("dns_watchdog", 1, 3) is not False:
+            raise AssertionError("no active config must block reconnect")
+
+        # --- _arm_reconnect: a normal arm logs reason= and is allowed ---
+        w._active_config = cfg
+        w._auto_recovery_disabled = False
+        w._reconnect_history = []
+        logged.clear()
+        if w._arm_reconnect("process_crash", 1, 3) is not True:
+            raise AssertionError("first reconnect within budget must be allowed")
+        if not any("reason=process_crash" in m for m in logged):
+            raise AssertionError("reconnect reason not logged")
+
+        # --- _arm_reconnect: storm cap → emergency stop, returns False ---
+        calls["disconnect"] = 0
+        w._auto_recovery_disabled = False
+        w._reconnect_history = []
+        last = None
+        for i in range(1, w._RECONNECT_STORM_MAX + 3):
+            last = w._arm_reconnect("memory_critical", i, 9)
+            if w._auto_recovery_disabled:
+                break
+        if last is not False:
+            raise AssertionError("storm cap must eventually block reconnect")
+        if not w._auto_recovery_disabled:
+            raise AssertionError("storm must trigger emergency stop")
+        if calls["disconnect"] < 1:
+            raise AssertionError("storm emergency stop must disconnect helpers")
+    finally:
+        mw.show_toast = orig_toast
+        app_log.log = orig_applog
+        if w is not None:
+            for t in ("_dns_watchdog",):
+                try:
+                    getattr(w, t).stop()
+                except Exception:
+                    pass
+            for t in ("_mem_timer", "_poll", "_reconnect_timer"):
+                try:
+                    getattr(w, t).stop()
+                except Exception:
+                    pass
+            try:
+                w.deleteLater()
+            except Exception:
+                pass
+
+
+check("main_window: critical-exhausted emergency stop + reconnect storm cap",
+      _runtime_safety_branches_via_window)
+
+
 def _xray_policy_bounds_resources() -> None:
     """v2.1.6: xray config gains level-0 connection timeouts + a buffer cap to
     bound memory/handles, WITHOUT disturbing the stats API the UI graph uses."""

@@ -1509,6 +1509,17 @@ class MainWindow(QMainWindow):
         self._reconnect_timer.setSingleShot(True)
         self._reconnect_timer.timeout.connect(self._do_auto_reconnect)
 
+        # v2.1.8 stability guard. Auto-recovery (crash/DNS/memory reconnects) is
+        # disabled after a hard stop until the user manually connects again, so
+        # nothing can loop forever. The history is a reconnect-storm detector:
+        # more than _RECONNECT_STORM_MAX reconnects inside the window — from ANY
+        # combination of triggers — forces a clean emergency stop instead of
+        # thrashing connect/disconnect.
+        self._auto_recovery_disabled = False
+        self._reconnect_history: list[float] = []
+        self._RECONNECT_STORM_WINDOW_S = 120.0
+        self._RECONNECT_STORM_MAX = 5
+
         # Runtime DNS watchdog (v2.1.4): catches the "tunnel up but DNS dead"
         # state the process-death watcher can't see. Self-gates on TUN-with-
         # leak-protection, so it's idle (no probing) in HTTP mode or when the
@@ -1845,26 +1856,31 @@ class MainWindow(QMainWindow):
                 # crashes are transient — a brief network blip or xray
                 # config-reload glitch.
                 if (self._reconnect_attempts < self._reconnect_max
-                        and not self._reconnect_timer.isActive()):
+                        and not self._reconnect_timer.isActive()
+                        and not self._auto_recovery_disabled):
                     delay = self._reconnect_backoff[self._reconnect_attempts]
                     self._reconnect_attempts += 1
-                    self.logs_page.append(
-                        f"[!] Xray-core упал (код {rc}). "
-                        f"Авто-переподключение #{self._reconnect_attempts}/"
-                        f"{self._reconnect_max} через {delay} с…"
-                    )
-                    show_toast(
-                        self,
-                        f"VPN упал. Переподключение #{self._reconnect_attempts}…",
-                        kind="info", duration_ms=delay * 1000,
-                    )
-                    # Tear down xray/proxy state but DON'T clear self._active —
-                    # the timer will reuse it for the reconnect attempt.
-                    saved = self._active_config
-                    self.manager.disconnect()
-                    self._active_config = saved
-                    self._connected_at = 0.0
-                    self._reconnect_timer.start(delay * 1000)
+                    # Gate + log (reason=process_crash); aborts on no-config /
+                    # storm without starting another reconnect.
+                    if self._arm_reconnect("process_crash",
+                                           self._reconnect_attempts, self._reconnect_max):
+                        self.logs_page.append(
+                            f"[!] Xray-core упал (код {rc}). "
+                            f"Авто-переподключение #{self._reconnect_attempts}/"
+                            f"{self._reconnect_max} через {delay} с…"
+                        )
+                        show_toast(
+                            self,
+                            f"VPN упал. Переподключение #{self._reconnect_attempts}…",
+                            kind="info", duration_ms=delay * 1000,
+                        )
+                        # Tear down xray/proxy state but DON'T clear self._active
+                        # — the timer reuses the SAME config for the reconnect.
+                        saved = self._active_config
+                        self.manager.disconnect()
+                        self._active_config = saved
+                        self._connected_at = 0.0
+                        self._reconnect_timer.start(delay * 1000)
                 elif self._reconnect_attempts >= self._reconnect_max:
                     if not self._crash_notified:
                         self.logs_page.append(
@@ -2027,6 +2043,15 @@ class MainWindow(QMainWindow):
                 "Сначала добавь конфиг — нажми «+» в нижней панели или тапни карточку.",
             )
             return
+        # User-initiated connect → clear any auto-recovery lockout + storm
+        # history and reset the memory-heal budget (a fresh session gets a
+        # fresh chance; only the USER re-enables auto-recovery).
+        self._auto_recovery_disabled = False
+        self._reconnect_history = []
+        self._mem_heal_count = 0
+        self._mem_heal_exhausted_notified = False
+        self._last_mem_heal_ts = 0.0
+        app_log.log(f"[reconnect] reason=user_requested, config={self._active_config.name}")
         self._do_connect()
 
     def _do_connect(self) -> None:
@@ -2179,18 +2204,78 @@ class MainWindow(QMainWindow):
             return
         QMessageBox.critical(self, "Не удалось подключиться", msg)
 
+    def _arm_reconnect(self, reason: str, attempt: int, total: int) -> bool:
+        """Gate + log EVERY auto-reconnect initiation. Returns True if the
+        caller may proceed, False if it must abort. Centralises:
+          * the reason trail in app.log (reason=dns_watchdog/process_crash/
+            memory_*/user_requested);
+          * the 'no active server → don't pick a random one, stop' rule;
+          * the reconnect-storm cap → emergency stop.
+        This is what stops the unexplained reconnect/server-switch churn."""
+        if self._auto_recovery_disabled:
+            app_log.log(f"[reconnect] stopped: reason=disabled (trigger={reason})")
+            return False
+        if self._active_config is None:
+            self.logs_page.append("[!] Авто-переподключение остановлено: нет "
+                                  "активного сервера (вручную выбери сервер).")
+            app_log.log(f"[reconnect] stopped: reason=no_active_config (trigger={reason})")
+            return False
+        now = time.time()
+        self._reconnect_history = [t for t in self._reconnect_history
+                                   if now - t <= self._RECONNECT_STORM_WINDOW_S]
+        self._reconnect_history.append(now)
+        if len(self._reconnect_history) > self._RECONNECT_STORM_MAX:
+            self._emergency_stop(
+                "reconnect",
+                f"stopped: reason=storm ({len(self._reconnect_history)} reconnects "
+                f"in {int(self._RECONNECT_STORM_WINDOW_S)}s; trigger={reason})")
+            return False
+        # config NAME only — never a URL/UUID (app_log redacts those anyway).
+        name = self._active_config.name if self._active_config else "?"
+        app_log.log(f"[reconnect] reason={reason}, attempt={attempt}/{total}, config={name}")
+        return True
+
+    def _emergency_stop(self, reason_tag: str, detail: str) -> None:
+        """Hard, SAFE stop: tear down tun2socks/xray/hysteria + restore
+        routes/DNS/proxy/firewall (a normal disconnect), reset connected state,
+        and disable further auto-recovery this session so nothing re-arms a
+        loop. The user can reconnect manually. Used for critical-runaway-
+        exhausted and the reconnect-storm cap."""
+        self._reconnect_timer.stop()
+        self._auto_recovery_disabled = True
+        try:
+            self.manager.disconnect()   # stops helpers; restores routes/DNS/proxy/firewall
+        except Exception:
+            pass
+        self._connected_at = 0.0
+        line = f"[{reason_tag}] {detail}"
+        self.logs_page.append("[!] " + line)
+        app_log.log(line)
+        show_toast(self, "VPN остановлен. Автовосстановление прекращено — "
+                   "переподключи вручную.", kind="error", duration_ms=12000)
+        self._refresh_home()
+
     def _do_auto_reconnect(self) -> None:
         """Fired by self._reconnect_timer after backoff elapses.
 
-        Re-runs _do_connect with the same active config. _do_connect
-        spawns its own worker and routes the result through
-        _on_connect_success / _on_connect_failed — those handlers know
-        about self._reconnect_attempts and continue the chain.
+        Re-runs _do_connect with the SAME active config (never a different
+        server). _do_connect spawns its own worker and routes the result
+        through _on_connect_success / _on_connect_failed.
         """
-        if self._active_config is None or self._connecting:
+        if self._auto_recovery_disabled:
+            app_log.log("[reconnect] stopped: reason=disabled (timer)")
+            return
+        if self._connecting:
+            return
+        if self._active_config is None:
+            # Never silently fall back to a different/first server — just stop.
+            self.logs_page.append("[!] Авто-переподключение остановлено: нет "
+                                  "активного сервера.")
+            app_log.log("[reconnect] stopped: reason=no_active_config (timer)")
             return
         self.logs_page.append(
-            f"[*] Авто-переподключение: попытка #{self._reconnect_attempts}…"
+            f"[*] Авто-переподключение к «{self._active_config.name}»: "
+            f"попытка #{self._reconnect_attempts}…"
         )
         self._do_connect()
 
@@ -2235,6 +2320,9 @@ class MainWindow(QMainWindow):
 
         delay = self._reconnect_backoff[self._reconnect_attempts]
         self._reconnect_attempts += 1
+        if not self._arm_reconnect("dns_watchdog",
+                                   self._reconnect_attempts, self._reconnect_max):
+            return  # disabled / no-config / storm — _arm_reconnect handled it
         self.logs_page.append(
             f"[!] Watchdog: нет резолва DNS через туннель — самовосстановление "
             f"#{self._reconnect_attempts}/{self._reconnect_max} через {delay} с "
@@ -2246,7 +2334,7 @@ class MainWindow(QMainWindow):
             kind="info", duration_ms=delay * 1000,
         )
         # Same tear-down-but-keep-config dance as the crash path, so the timer
-        # reconnects to the same server. disconnect() restores DNS/routes/proxy
+        # reconnects to the SAME server. disconnect() restores DNS/routes/proxy
         # and clears the recovery journal; the reconnect re-marks it.
         saved = self._active_config
         self.manager.disconnect()
@@ -2297,12 +2385,34 @@ class MainWindow(QMainWindow):
         frees both helper processes' memory and restores DNS/routes/proxy."""
         if self._connecting or self._reconnect_timer.isActive():
             return
+        if self._auto_recovery_disabled:
+            return  # a prior emergency stop disabled auto-recovery this session
         now = time.time()
         d = _controller.mem_heal_decision(
             severity, now, self._last_mem_heal_ts, self._mem_heal_count,
             max_heals=self._mem_heal_max, cooldown_s=self._mem_heal_cooldown_s)
 
         if d["exhausted"]:
+            # v2.1.8 — exhausted is NOT the end of the story for a CRITICAL
+            # runaway: leaving tun2socks/xray at 3-4 GB can wedge/crash the
+            # client. mem_exhausted_action() says whether we must force a stop.
+            action = _controller.mem_exhausted_action(severity)
+            if action["force_shutdown"]:
+                if not self._mem_heal_exhausted_notified:
+                    self._mem_heal_exhausted_notified = True
+                    stats = ""
+                    try:
+                        stats = self.manager.format_runtime_stats()
+                    except Exception:
+                        pass
+                    # Hard, safe stop: helpers killed, routes/DNS/proxy/firewall
+                    # restored, auto-recovery disabled — no "leave it running".
+                    self._emergency_stop(
+                        "mem-critical",
+                        "exhausted: emergency disconnect, helpers stopped — "
+                        + reason + (f" | {stats}" if stats else ""))
+                return
+            # MODERATE + exhausted: survivable — leave as-is, ask the user.
             if not self._mem_heal_exhausted_notified:
                 msg = (f"[!] Память: {reason}. Авто-восстановление исчерпано "
                        f"({self._mem_heal_max}) — оставляю как есть, переподключи "
@@ -2348,6 +2458,12 @@ class MainWindow(QMainWindow):
                f"память helper-процессов освободится.")
         self.logs_page.append(msg)
         app_log.log(msg)
+        # Gate + log (reason=memory_critical/memory_moderate) through the storm
+        # cap. If it aborts (storm), _emergency_stop already tore everything
+        # down — don't start another reconnect.
+        if not self._arm_reconnect(f"memory_{severity}",
+                                   self._mem_heal_count, self._mem_heal_max):
+            return
         show_toast(self, f"Сброс памяти VPN — переподключение #{self._mem_heal_count}…",
                    kind="info", duration_ms=4000)
         saved = self._active_config
@@ -2361,10 +2477,13 @@ class MainWindow(QMainWindow):
         # don't bring the VPN back up against their wishes.
         self._reconnect_timer.stop()
         self._reconnect_attempts = 0
-        # Fresh session next time → fresh memory-heal budget.
+        # Fresh session next time → fresh memory-heal budget + auto-recovery
+        # re-enabled + storm history cleared.
         self._mem_heal_count = 0
         self._mem_heal_exhausted_notified = False
         self._last_mem_heal_ts = 0.0
+        self._auto_recovery_disabled = False
+        self._reconnect_history = []
         self.manager.disconnect()
         self._connected_at = 0.0
         self.logs_page.append("[*] Отключено, системный прокси восстановлен")

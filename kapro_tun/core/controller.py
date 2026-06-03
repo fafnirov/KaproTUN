@@ -162,6 +162,15 @@ def mem_heal_decision(severity: Optional[str], now: float, last_heal_ts: float,
     return {"do_heal": do_heal, "exhausted": False, "escalate_economy": escalate}
 
 
+def mem_exhausted_action(severity: Optional[str]) -> dict:
+    """What to do once the heal budget is spent. A CRITICAL runaway must NOT be
+    left running — a tun2socks/xray sitting at 3-4 GB can wedge or crash the
+    whole client — so force a clean emergency shutdown of the helpers. A
+    moderate runaway is survivable, so we leave it and ask the user to act.
+    Pure + testable."""
+    return {"force_shutdown": severity == "critical"}
+
+
 class ConnectionManager:
     """Single source of truth for the connect/disconnect lifecycle."""
 
