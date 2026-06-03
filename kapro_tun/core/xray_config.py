@@ -306,6 +306,7 @@ def build_config(
     block_ads: bool = False,
     route_ru_direct: bool = False,
     hysteria_socks_port: Optional[int] = None,
+    egress_interface: Optional[str] = None,
 ) -> dict[str, Any]:
     """Build a complete Xray-core client config with split routing.
 
@@ -606,7 +607,21 @@ def build_config(
         ],
         "outbounds": [
             proxy_outbound,
-            {"tag": "direct", "protocol": "freedom"},
+            # The `direct`/freedom outbound carries everything we route OFF the
+            # tunnel (geoip:private, geoip:ru when route_ru_direct, direct-list
+            # domains, DNS carve-outs). In TUN mode its packets otherwise hit
+            # the kernel routing table, whose default is the TUN — so any direct
+            # dest NOT covered by a /32 kernel bypass (CDN IP rotation, a
+            # geoip:ru IP missing from the route set) loops straight back into
+            # the TUN -> tun2socks -> xray -> direct -> ... draining loopback
+            # ephemeral ports ("Only one usage of each socket address"). Binding
+            # freedom to the physical interface (v2.2.1, IP_UNICAST_IF on
+            # Windows) forces direct traffic out the real NIC regardless of the
+            # routing table, so it can NEVER re-enter the TUN. No-op in HTTP mode
+            # (egress_interface is None there).
+            {"tag": "direct", "protocol": "freedom",
+             **({"streamSettings": {"sockopt": {"interface": egress_interface}}}
+                if egress_interface else {})},
             {"tag": "block", "protocol": "blackhole"},
             # v1.16.8: dns-out present whenever leak-protection is on
             # (regardless of DNS option). Upstream IP comes from the
@@ -648,6 +663,7 @@ def write_config(
     block_ads: bool = False,
     route_ru_direct: bool = False,
     hysteria_socks_port: Optional[int] = None,
+    egress_interface: Optional[str] = None,
 ) -> str:
     config = build_config(
         proxy, direct_domains, listen_host, listen_port,
@@ -656,6 +672,7 @@ def write_config(
         block_ads=block_ads,
         route_ru_direct=route_ru_direct,
         hysteria_socks_port=hysteria_socks_port,
+        egress_interface=egress_interface,
     )
     # Runtime config carries the server UUID/password — write it atomically
     # with user-only perms and never log its contents.

@@ -649,8 +649,12 @@ class ConnectionManager:
         # the static route added below keeps its QUIC off the TUN once the
         # default route flips to the tunnel.
         hy_port = self._maybe_start_hysteria(config)
+        # TUN mode: bind xray's `direct`/freedom outbound to the physical NIC
+        # (real.name) so direct traffic exits the real interface and can never
+        # loop back into the TUN. No-op in HTTP mode. v2.2.1.
         self._write_and_check(config, direct_domains, host, port,
-                              hysteria_socks_port=hy_port)
+                              hysteria_socks_port=hy_port,
+                              egress_interface=real.name)
         # Remember where xray's error log ends right now, so the connect-time
         # liveness check can scan ONLY this session's lines for REALITY/transport
         # failures (the log is appended across runs). v2.1.5.
@@ -937,7 +941,8 @@ class ConnectionManager:
 
     def _write_and_check(self, config: ProxyConfig, direct_domains: list[str],
                          host: str, port: int,
-                         hysteria_socks_port: Optional[int] = None) -> str:
+                         hysteria_socks_port: Optional[int] = None,
+                         egress_interface: Optional[str] = None) -> str:
         dns_option = str(self.settings.get("dns_option", "system"))
         dns_leak_protection = bool(self.settings.get("dns_leak_protection", True))
         block_ads = bool(self.settings.get("block_ads", False))
@@ -950,6 +955,7 @@ class ConnectionManager:
                 block_ads=block_ads,
                 route_ru_direct=route_ru_direct,
                 hysteria_socks_port=hysteria_socks_port,
+                egress_interface=egress_interface,
             )
         except (ValueError, NotImplementedError) as e:
             raise ConnectionError(f"Конфиг не поддерживается: {e}") from e

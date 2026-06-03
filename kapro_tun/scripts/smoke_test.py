@@ -1519,6 +1519,46 @@ def _xray_policy_bounds_resources() -> None:
 check("xray: policy bounds resources but keeps stats API", _xray_policy_bounds_resources)
 
 
+def _direct_outbound_bound_to_egress() -> None:
+    """v2.2.1: in TUN mode the direct/freedom outbound binds to the physical
+    interface (sockopt.interface) so direct-routed traffic exits the real NIC
+    and can never loop back into the TUN (the loop that drained loopback
+    ephemeral ports). HTTP mode (no egress_interface) leaves it unbound."""
+    import inspect
+    from kapro_tun.core import xray_config
+    from kapro_tun.core.controller import ConnectionManager
+    from kapro_tun.core.parser import parse
+
+    cfg = parse("vless://aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa@1.2.3.4:443"
+                "?type=tcp&security=reality&pbk=AAAA&sid=01&fp=chrome#T")
+    # TUN mode (egress bound), with route_ru_direct so geoip:ru → direct exists.
+    c = xray_config.build_config(cfg, ["sber.ru"], dns_leak_protection=True,
+                                 route_ru_direct=True, egress_interface="Ethernet")
+    direct = next(o for o in c["outbounds"] if o.get("tag") == "direct")
+    iface = ((direct.get("streamSettings") or {}).get("sockopt") or {}).get("interface")
+    if iface != "Ethernet":
+        raise AssertionError(f"direct/freedom outbound not bound to egress iface: {direct}")
+    # geoip:ru / direct-domains still route to the (now-bound) direct outbound.
+    rules = c["routing"]["rules"]
+    if not any(r.get("outboundTag") == "direct" and r.get("ip") == ["geoip:ru"] for r in rules):
+        raise AssertionError("geoip:ru no longer routed direct under route_ru_direct")
+
+    # HTTP mode → no egress binding (freedom can't loop without a TUN).
+    c2 = xray_config.build_config(cfg, [], dns_leak_protection=True)
+    direct2 = next(o for o in c2["outbounds"] if o.get("tag") == "direct")
+    if "streamSettings" in direct2:
+        raise AssertionError("direct outbound bound in HTTP mode (should be unbound)")
+
+    # The TUN connect path actually passes the physical interface name.
+    src = inspect.getsource(ConnectionManager._connect_tun)
+    if "egress_interface=real.name" not in src:
+        raise AssertionError("_connect_tun does not bind the direct outbound to the egress NIC")
+
+
+check("xray: direct/freedom bound to physical NIC in TUN (no route loop)",
+      _direct_outbound_bound_to_egress)
+
+
 # ---------------------------------------------------------------------------
 # Test 5.7 — WebRTC leak block (v1.16.0)
 # ---------------------------------------------------------------------------
