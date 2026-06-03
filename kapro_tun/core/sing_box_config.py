@@ -85,6 +85,31 @@ def ensure_supported(outbound: dict[str, Any]) -> None:
             "legacy-движке.")
 
 
+# Transports sing-box implements as a v2ray-transport. Anything outside this
+# set that isn't plain TCP (e.g. XHTTP / splithttp — Xray-only) cannot be
+# faithfully reproduced; sing-box would silently fall back to plain TCP and
+# mis-handshake the REALITY/TLS server ("unknown version: N" on the data
+# channel). We must reject such configs, not ship a half-working outbound.
+_SING_BOX_TRANSPORTS = {"ws", "grpc", "h2", "http", "httpupgrade"}
+_TCP_LIKE_NETWORKS = {"", "tcp", "raw", "none"}
+
+
+def ensure_transport_supported(proxy) -> None:
+    """Raise UnsupportedBySingBox if the config's transport can't be faithfully
+    reproduced by sing-box. The parser records the raw `network` (type=) on the
+    ProxyConfig; plain-TCP and the v2ray transports sing-box implements pass,
+    everything else (XHTTP/splithttp and any future Xray-only transport) is
+    refused with a clear 'switch to legacy' message — NEVER silently downgraded
+    to TCP."""
+    network = str(getattr(proxy, "network", "") or "").strip().lower()
+    if network in _TCP_LIKE_NETWORKS or network in _SING_BOX_TRANSPORTS:
+        return
+    raise UnsupportedBySingBox(
+        f"Транспорт «{network}» (например XHTTP/splithttp) поддержан только в "
+        f"Xray. Переключи движок на «Legacy (Xray + tun2socks)» в Настройках и "
+        f"подключись снова.")
+
+
 def _dns_block(dns_option: str, dns_leak_protection: bool) -> dict[str, Any]:
     opt = dns_options.get(dns_option)
     # Plain-DNS upstream IP (no DoH → no TLS-in-tunnel stalls; matches the
@@ -137,6 +162,10 @@ def build_config(
     human notices about limitations (e.g. ad-block)."""
     outbound = dict(proxy.outbound)
     ensure_supported(outbound)
+    # Transport gate: reject XHTTP/splithttp etc. that the parser can't render
+    # as a sing-box transport (it would otherwise become a plain-TCP outbound
+    # that mis-handshakes the server). Raises UnsupportedBySingBox → 'use legacy'.
+    ensure_transport_supported(proxy)
     outbound["tag"] = "proxy"
     # Pin the connect target to the resolved IP so sing-box needs no DNS to
     # reach the server (TLS/REALITY SNI stays in outbound["tls"]). Falls back to

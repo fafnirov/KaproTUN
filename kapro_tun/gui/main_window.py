@@ -1908,6 +1908,27 @@ class MainWindow(QMainWindow):
             return "TUN · legacy"
         return "TUN · sing-box"
 
+    def _engine_is_sing_box(self) -> bool:
+        """True when the ACTIVE session is the sing-box native-TUN engine —
+        i.e. TUN mode with the sing-box engine. In that mode xray/tun2socks are
+        never started; the single sing-box process IS the dataplane."""
+        return (self.manager.current_mode() == MODE_TUN
+                and self.manager.current_engine() == _controller.ENGINE_SING_BOX)
+
+    def _primary_process(self):
+        """The dataplane 'core' process whose death means the tunnel core
+        crashed, for the ACTIVE engine. sing-box TUN → the single sing-box
+        process (xray is never started in that mode); classic TUN / HTTP →
+        xray. Checking the wrong process makes the crash-watchdog mis-read a
+        healthy sing-box session as an Xray crash and reconnect-loop (v3.0.2)."""
+        if self._engine_is_sing_box():
+            return self.manager.sing_box_process
+        return self.manager.process
+
+    def _primary_process_name(self) -> str:
+        """Human label for the active engine's core process, for crash logs."""
+        return "sing-box" if self._engine_is_sing_box() else "Xray-core"
+
     def _refresh_home(self) -> None:
         # Don't fight the connect worker for the button state — the
         # "connecting" pulse keeps animating until the worker finishes
@@ -1916,19 +1937,29 @@ class MainWindow(QMainWindow):
             self.tray.set_state("connecting", self._active_config.name if self._active_config else "")
             return
 
-        # Detect external crash
-        if self.manager._active is not None and not self.manager.process.is_running():
+        # Detect external crash of the ACTIVE engine's core process. The core
+        # is engine-specific: sing-box TUN runs a single sing-box process (xray
+        # is never started), classic TUN / HTTP runs xray. Checking the wrong
+        # process would mis-read a healthy sing-box session as an Xray crash and
+        # reconnect-loop, then tempt the user into legacy (v3.0.2).
+        primary = self._primary_process()
+        core_name = self._primary_process_name()
+        if self.manager._active is not None and not primary.is_running():
             kill_switch = bool(self.manager.settings.get("kill_switch", False))
             mode_is_tun = self.manager.current_mode() == MODE_TUN
-            rc = self.manager.process.returncode()
+            rc = primary.returncode()
 
             if kill_switch and mode_is_tun and self.manager.tun_process.is_running():
                 # Kill-switch holds: leave TUN up so foreign traffic gets
                 # dropped instead of leaking out via the real interface.
-                # The user manually reconnects when ready.
+                # The user manually reconnects when ready. (Classic only —
+                # sing-box has no separate tun2socks process to keep the TUN
+                # alive, so a sing-box death falls through to the reconnect
+                # path below, where the firewall rules still block leaks until
+                # the reconnect re-arms them.)
                 if not self._crash_notified:
                     self.logs_page.append(
-                        f"[!] Xray-core упал (код {rc}). "
+                        f"[!] {core_name} упал (код {rc}). "
                         f"Kill-switch активен — туннель удерживается, "
                         f"иностранный трафик блокируется."
                     )
@@ -1955,7 +1986,7 @@ class MainWindow(QMainWindow):
                     if self._arm_reconnect("process_crash",
                                            self._reconnect_attempts, self._reconnect_max):
                         self.logs_page.append(
-                            f"[!] Xray-core упал (код {rc}). "
+                            f"[!] {core_name} упал (код {rc}). "
                             f"Авто-переподключение #{self._reconnect_attempts}/"
                             f"{self._reconnect_max} через {delay} с…"
                         )

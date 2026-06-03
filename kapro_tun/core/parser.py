@@ -30,6 +30,13 @@ class ProxyConfig:
     protocol: str            # trojan, vless, vmess, shadowsocks, hysteria2
     raw_url: str
     outbound: dict[str, Any] = field(default_factory=dict)
+    # Raw transport/network from the share URL (`type=` / vmess "net"): tcp,
+    # raw, ws, grpc, h2/http, httpupgrade, xhttp, splithttp, … Recorded so the
+    # sing-box config generator can reject transports it can't faithfully
+    # reproduce (XHTTP/splithttp are Xray-only) instead of silently emitting a
+    # plain-TCP outbound that mis-handshakes the server. Empty = not applicable
+    # (Shadowsocks, Hysteria2).
+    network: str = ""
 
 
 # --- helpers --------------------------------------------------------------
@@ -148,7 +155,8 @@ def parse_trojan(url: str) -> ProxyConfig:
         outbound["transport"] = transport
 
     name = unquote(u.fragment) or f"trojan-{u.hostname}"
-    return ProxyConfig(name=name, protocol="trojan", raw_url=url, outbound=outbound)
+    return ProxyConfig(name=name, protocol="trojan", raw_url=url,
+                       outbound=outbound, network=net)
 
 
 # --- vless ----------------------------------------------------------------
@@ -192,7 +200,8 @@ def parse_vless(url: str) -> ProxyConfig:
         outbound["transport"] = transport
 
     name = unquote(u.fragment) or f"vless-{u.hostname}"
-    return ProxyConfig(name=name, protocol="vless", raw_url=url, outbound=outbound)
+    return ProxyConfig(name=name, protocol="vless", raw_url=url,
+                       outbound=outbound, network=net)
 
 
 # --- vmess ----------------------------------------------------------------
@@ -243,7 +252,8 @@ def parse_vmess(url: str) -> ProxyConfig:
         outbound["transport"] = transport
 
     name = str(data.get("ps") or f"vmess-{server}")
-    return ProxyConfig(name=name, protocol="vmess", raw_url=url, outbound=outbound)
+    return ProxyConfig(name=name, protocol="vmess", raw_url=url,
+                       outbound=outbound, network=net)
 
 
 # --- shadowsocks ----------------------------------------------------------

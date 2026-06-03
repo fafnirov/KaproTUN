@@ -2008,8 +2008,21 @@ def _settings_no_overlong_controls() -> None:
         QApplication([])
     from kapro_tun.core.controller import ConnectionManager
     from kapro_tun.core import controller as _ctl_ui
+    from kapro_tun.core import storage as _st_ui
     from kapro_tun.gui.main_window import SettingsPage
-    sp = SettingsPage(ConnectionManager(on_log=lambda _l: None))
+    # Pin a deterministic settings baseline: DEFAULT_SETTINGS WITHOUT tun_engine,
+    # simulating a pre-v3 (or freshly-migrated) settings.json. The picker must
+    # still default to sing-box — resolve_engine treats absent/unknown values as
+    # sing-box. This makes the test independent of whatever tun_engine the dev's
+    # real settings.json happens to hold (e.g. classic after a manual switch),
+    # which is what made this assertion flap on a real machine (v3.0.2).
+    _old = {k: v for k, v in _st_ui.DEFAULT_SETTINGS.items() if k != "tun_engine"}
+    _orig_load = _st_ui.load_settings
+    _st_ui.load_settings = lambda: dict(_old)
+    try:
+        sp = SettingsPage(ConnectionManager(on_log=lambda _l: None))
+    finally:
+        _st_ui.load_settings = _orig_load
     # v3.0.0 engine picker: present, defaults to sing-box, offers exactly the
     # two engines (sing-box primary + legacy), and persists the choice via
     # update_settings(tun_engine=...).
@@ -2019,7 +2032,8 @@ def _settings_no_overlong_controls() -> None:
     if datas != {_ctl_ui.ENGINE_SING_BOX, _ctl_ui.ENGINE_CLASSIC}:
         raise AssertionError(f"engine picker must offer both engines, got {datas}")
     if sp.engine_combo.currentData() != _ctl_ui.ENGINE_SING_BOX:
-        raise AssertionError("engine picker must default to sing-box")
+        raise AssertionError("engine picker must default to sing-box "
+                             "(absent/old tun_engine → sing-box)")
     LIMIT = 54
     controls = sp.findChildren(QCheckBox) + sp.findChildren(QRadioButton)
     over = [c.text() for c in controls if len(c.text()) > LIMIT]
@@ -4891,6 +4905,134 @@ def _v3_real_singbox_check() -> None:
                     f"(leak={leak} ru={ru}): {msg[:200]}")
 
 
+def _v3_xhttp_unsupported() -> None:
+    # 12) XHTTP / splithttp are Xray-only transports. The sing-box parser can't
+    #     render them, so the engine must REJECT them (UnsupportedBySingBox →
+    #     'use legacy') instead of silently emitting a plain-TCP outbound that
+    #     mis-handshakes the REALITY server ('unknown version: N'). ws/grpc and
+    #     plain TCP still build.
+    from kapro_tun.core.parser import parse as _parse
+    base = "vless://aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa@1.2.3.4:443"
+    for net in ("xhttp", "splithttp"):
+        cfg = _parse(f"{base}?type={net}&security=reality&pbk=AAAA&sid=01&fp=chrome#x")
+        if cfg.network != net:
+            raise AssertionError(f"parser must record network={net!r}, got {cfg.network!r}")
+        try:
+            _sb_v3.build_config(cfg, [], server_ip="1.2.3.4")
+        except _sb_v3.UnsupportedBySingBox as e:
+            if "legacy" not in str(e).lower():
+                raise AssertionError(f"{net} rejection must point the user to legacy")
+        else:
+            raise AssertionError(f"{net} transport must raise UnsupportedBySingBox")
+    # Supported transports still build a real sing-box transport.
+    for net, extra in (("ws", "&host=ex.com&path=/w"), ("grpc", "&serviceName=g")):
+        cfg = _parse(f"{base}?type={net}&security=tls{extra}#x")
+        full = _sb_v3.build_config(cfg, [], server_ip="1.2.3.4")
+        if "transport" not in full["outbounds"][0]:
+            raise AssertionError(f"{net} must produce a sing-box transport")
+    # Plain TCP (no transport) must NOT be rejected.
+    tcp = _parse(f"{base}?type=tcp&security=reality&pbk=AAAA&sid=01&fp=chrome#x")
+    _sb_v3.build_config(tcp, [], server_ip="1.2.3.4")  # must not raise
+
+
+def _v3_singbox_watchdog_engine_aware() -> None:
+    # 13) The crash-watchdog must be engine-aware (v3.0.2). In sing-box TUN mode
+    #     xray (manager.process) is NEVER started, so the OLD watchdog read a
+    #     healthy sing-box session as an 'Xray-core crash' and reconnect-looped.
+    #     (a) healthy sing-box (xray down, sing-box up) → NO process_crash arm.
+    #     (b) classic xray death → reconnect still arms.
+    #     (c) sing-box death → log blames sing-box, not Xray.
+    import os as _o3
+    _o3.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from kapro_tun.gui import main_window as mw
+    from kapro_tun.core import app_log
+    from kapro_tun.core import controller as _C
+    from kapro_tun.core.parser import ProxyConfig
+    if QApplication.instance() is None:
+        QApplication([])
+    orig_toast, orig_applog = mw.show_toast, app_log.log
+    mw.show_toast = lambda *a, **k: None
+    app_log.log = lambda m: None
+    _timers = ("_dns_watchdog", "_mem_timer", "_poll", "_reconnect_timer",
+               "_sub_autorefresh", "_tray_pinger")
+    w = None
+    try:
+        w = mw.MainWindow()
+        for t in _timers:
+            try: getattr(w, t).stop()
+            except Exception: pass
+        w._poll_traffic = lambda: None
+        w._connecting = False
+        cfg = ProxyConfig(name="T", protocol="vless", raw_url="vless://x@1.2.3.4:1",
+                          outbound={"server": "1.2.3.4", "server_port": 1})
+        w._active_config = cfg
+        m = w.manager
+        m._active = cfg
+        m.current_mode = lambda: mw.MODE_TUN
+        m.disconnect = lambda: None
+        logs = []
+        w.logs_page.append = lambda s: logs.append(str(s))
+        arm = []
+        w._arm_reconnect = lambda reason, a, t: (arm.append(reason) or True)
+
+        # (a) healthy sing-box: xray NOT running, sing-box running.
+        m.current_engine = lambda: _C.ENGINE_SING_BOX
+        m.process.is_running = lambda: False
+        m.sing_box_process.is_running = lambda: True
+        m.is_connected = lambda: True
+        logs.clear(); arm.clear(); w._reconnect_attempts = 0
+        w._refresh_home()
+        if arm:
+            raise AssertionError(f"healthy sing-box must NOT arm a reconnect: {arm}")
+        if any("упал" in l for l in logs):
+            raise AssertionError(f"healthy sing-box must not log a crash: {logs}")
+
+        # (b) classic xray death → reconnect still works.
+        m.current_engine = lambda: _C.ENGINE_CLASSIC
+        m.process.is_running = lambda: False
+        m.process.returncode = lambda: 1
+        m.tun_process.is_running = lambda: False
+        m.is_connected = lambda: False
+        logs.clear(); arm.clear()
+        w._auto_recovery_disabled = False; w._reconnect_attempts = 0
+        w._reconnect_timer.stop()
+        w._refresh_home()
+        w._reconnect_timer.stop()
+        if "process_crash" not in arm:
+            raise AssertionError("classic xray death must still arm process_crash")
+        if not any("Xray-core упал" in l for l in logs):
+            raise AssertionError(f"classic crash must blame Xray-core: {logs}")
+
+        # (c) sing-box death → log blames sing-box, not Xray.
+        m.current_engine = lambda: _C.ENGINE_SING_BOX
+        m.process.is_running = lambda: False
+        m.sing_box_process.is_running = lambda: False
+        m.sing_box_process.returncode = lambda: 1
+        m.tun_process.is_running = lambda: False
+        m.is_connected = lambda: False
+        logs.clear(); arm.clear()
+        w._auto_recovery_disabled = False; w._reconnect_attempts = 0
+        w._reconnect_timer.stop()
+        w._refresh_home()
+        w._reconnect_timer.stop()
+        if not any("sing-box упал" in l for l in logs):
+            raise AssertionError(f"sing-box death must log 'sing-box упал': {logs}")
+        if any("Xray-core упал" in l for l in logs):
+            raise AssertionError(f"sing-box death must NOT blame Xray: {logs}")
+    finally:
+        mw.show_toast, app_log.log = orig_toast, orig_applog
+        if w is not None:
+            for t in _timers:
+                try: getattr(w, t).stop()
+                except Exception: pass
+            tray = getattr(w, "tray", None)
+            if tray is not None and hasattr(tray, "hide"):
+                try: tray.hide()
+                except Exception: pass
+            w.close(); w.deleteLater()
+
+
 check("migration: default engine sing-box; old settings migrate", _v3_migration_default)
 check("config: native-TUN structure + pinned server + loop killer", _v3_config_structure)
 check("config: private/LAN/Docker (172.19.2.109) bypass", _v3_private_bypass)
@@ -4905,6 +5047,10 @@ check("kill-switch: allows + removes sing-box.exe rule", _v3_killswitch_singbox)
 check("stats: sample/format include sing-box process", _v3_stats_include_singbox)
 check("legacy: classic engine still selectable + valid", _v3_legacy_unaffected)
 check("config: real `sing-box check` accepts generated config", _v3_real_singbox_check)
+check("config: XHTTP/splithttp → UnsupportedBySingBox (no half-working TCP)",
+      _v3_xhttp_unsupported)
+check("watchdog: engine-aware crash detection (no false Xray crash on sing-box)",
+      _v3_singbox_watchdog_engine_aware)
 
 
 # ---------------------------------------------------------------------------
