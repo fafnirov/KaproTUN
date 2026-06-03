@@ -4715,10 +4715,20 @@ def _v3_dns_hijack_and_leak() -> None:
             raise AssertionError("DNS servers must use the 1.12+ typed format")
     off = _sb_v3.build_config(parsed["vless"], [], server_ip="1.2.3.4",
                               dns_leak_protection=False)
-    if any(s.get("detour") == "proxy" for s in off["dns"]["servers"]):
-        raise AssertionError("leak-OFF DNS must not ride the proxy")
-    if not any(s.get("detour") == "direct" for s in off["dns"]["servers"]):
-        raise AssertionError("leak-OFF DNS must go direct")
+    # Leak-OFF: DNS must NOT ride the proxy. It must also carry NO detour at
+    # all — sing-box 1.13 rejects `"detour": "direct"` ("detour to an empty
+    # direct outbound makes no sense"); a detour-less server already resolves
+    # over the default (direct) path, which is the leak-off behaviour.
+    off_servers = off["dns"]["servers"]
+    if not off_servers:
+        raise AssertionError("leak-OFF must still define a DNS server")
+    for s in off_servers:
+        if s.get("detour") == "proxy":
+            raise AssertionError("leak-OFF DNS must not ride the proxy")
+        if "detour" in s:
+            raise AssertionError(
+                "leak-OFF DNS server must have NO detour (1.13 rejects "
+                "detour=direct to the empty direct outbound)")
 
 
 def _v3_unsupported_raises() -> None:
@@ -4763,6 +4773,42 @@ def _v3_dispatch_no_silent_switch() -> None:
         raise AssertionError("unsupported must raise, not silently switch")
     if classic_called["n"] != 0:
         raise AssertionError("must NOT silently fall back to the classic engine")
+
+
+def _v3_dispatch_routes_to_singbox_and_no_runtime_fallback() -> None:
+    # 5c) With engine=sing_box the dispatcher must call the sing-box path (not
+    #     classic), and a RUNTIME sing-box failure (e.g. sing-box.exe starts and
+    #     dies — the 1.13 DNS-detour crash) must propagate and stay disconnected,
+    #     NEVER silently fall back to classic. (5b covers the config-level
+    #     UnsupportedBySingBox case; this covers a live start failure.)
+    cm = _ctl_v3.ConnectionManager()
+    cm.settings["tun_engine"] = _ctl_v3.ENGINE_SING_BOX
+    calls = {"singbox": 0, "classic": 0}
+
+    # Positive routing: a successful sing-box connect must NOT touch classic.
+    cm._connect_tun_sing_box = lambda c, d: calls.__setitem__("singbox", calls["singbox"] + 1)
+    cm._connect_tun_classic = lambda c, d: calls.__setitem__("classic", calls["classic"] + 1)
+    cm._connect_tun(object(), [])
+    if calls["singbox"] != 1 or calls["classic"] != 0:
+        raise AssertionError("engine=sing_box must dispatch to sing-box, not classic")
+
+    # Runtime failure: a generic ConnectionError from the sing-box path must
+    # propagate; classic must remain untouched.
+    calls["classic"] = 0
+
+    def _runtime_die(config, direct_domains):
+        raise _ctl_v3.ConnectionError("sing-box завершился сразу после старта")
+
+    cm._connect_tun_sing_box = _runtime_die
+    try:
+        cm._connect_tun(object(), [])
+    except _ctl_v3.ConnectionError:
+        pass
+    else:
+        raise AssertionError("a sing-box runtime failure must propagate, not be swallowed")
+    if calls["classic"] != 0:
+        raise AssertionError(
+            "a sing-box runtime failure must NOT silently fall back to classic")
 
 
 def _v3_no_loopback_bridge() -> None:
@@ -4851,6 +4897,8 @@ check("config: private/LAN/Docker (172.19.2.109) bypass", _v3_private_bypass)
 check("config: DNS hijack + leak ON via proxy / OFF direct", _v3_dns_hijack_and_leak)
 check("config: unsupported protocol/plugin raises", _v3_unsupported_raises)
 check("dispatch: unsupported → legacy error, no silent switch", _v3_dispatch_no_silent_switch)
+check("dispatch: engine=sing-box routes to sing-box; runtime fail no fallback",
+      _v3_dispatch_routes_to_singbox_and_no_runtime_fallback)
 check("config: no 127.0.0.1:2081 SOCKS bridge (no loopback exhaustion)", _v3_no_loopback_bridge)
 check("cleanup: sing-box runtime config wiped on disconnect", _v3_runtime_cleanup)
 check("kill-switch: allows + removes sing-box.exe rule", _v3_killswitch_singbox)

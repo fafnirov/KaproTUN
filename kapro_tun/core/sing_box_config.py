@@ -106,10 +106,14 @@ def _dns_block(dns_option: str, dns_leak_protection: bool) -> dict[str, Any]:
             "strategy": "ipv4_only",
         }
     # Opt-out: DNS goes direct (ISP-visible) — matches the classic leak-off UX.
+    # NO detour here: sing-box 1.13 rejects `"detour": "direct"` because the
+    # `direct` outbound is empty ("detour to an empty direct outbound makes no
+    # sense"). A DNS server with no detour already resolves over the default
+    # (direct) path via auto_detect_interface, which is exactly the leak-off
+    # behaviour we want.
     return {
         "servers": [
-            {"type": "udp", "tag": "dns-direct", "server": upstream,
-             "detour": "direct"},
+            {"type": "udp", "tag": "dns-direct", "server": upstream},
         ],
         "final": "dns-direct",
         "strategy": "ipv4_only",
