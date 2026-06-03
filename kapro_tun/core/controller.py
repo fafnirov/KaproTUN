@@ -117,17 +117,25 @@ _ALWAYS_BYPASS: list[tuple[str, str]] = _DNS_RESOLVER_BYPASS + _SERVICE_BYPASS
 # UDP/session storm). xray triggers on memory OR a HIGH handle count (its 66k
 # in the report); its threads aren't a reliable fault signal so they're logged
 # but not gated on.
-MEM_TUN2SOCKS_MOD_BYTES = 1_800_000_000      # ~1.8 GB
-MEM_TUN2SOCKS_MOD_HANDLES = 12_000
-MEM_TUN2SOCKS_MOD_THREADS = 500
-MEM_TUN2SOCKS_CRIT_BYTES = 3_000_000_000     # ~3 GB
-MEM_TUN2SOCKS_CRIT_HANDLES = 25_000
-MEM_TUN2SOCKS_CRIT_THREADS = 800
+# v2.1.9: raised ABOVE the real idle baseline. Live data showed tun2socks
+# sitting at ~1.9 GB "private bytes" seconds after a fresh connect — that's a
+# baseline (Go/gVisor reserves address space Windows counts as private), NOT a
+# runaway, so the old 1.8 GB moderate bar fired on every healthy session and
+# the client reconnect-looped. Bars now sit between that baseline and the
+# observed runaway (tun2socks ~4.7 GB / ~38k handles / ~900 threads, xray
+# ~2.3 GB / ~66k handles). The GUI watchdog ALSO requires a post-connect grace
+# period + a sustained breach, so a stable baseline can never trip a heal.
+MEM_TUN2SOCKS_MOD_BYTES = 3_200_000_000       # ~3.0 GiB (idle ~1.9 GB; safe gap)
+MEM_TUN2SOCKS_MOD_HANDLES = 20_000
+MEM_TUN2SOCKS_MOD_THREADS = 700
+MEM_TUN2SOCKS_CRIT_BYTES = 4_300_000_000      # ~4.0 GiB (runaway ~4.7 GB)
+MEM_TUN2SOCKS_CRIT_HANDLES = 33_000
+MEM_TUN2SOCKS_CRIT_THREADS = 1_000
 
-MEM_XRAY_MOD_BYTES = 2_500_000_000           # ~2.5 GB
-MEM_XRAY_MOD_HANDLES = 40_000
-MEM_XRAY_CRIT_BYTES = 3_500_000_000          # ~3.5 GB
-MEM_XRAY_CRIT_HANDLES = 60_000
+MEM_XRAY_MOD_BYTES = 3_200_000_000            # xray rarely trips on bytes…
+MEM_XRAY_MOD_HANDLES = 45_000                 # …handles are its real signal
+MEM_XRAY_CRIT_BYTES = 4_300_000_000
+MEM_XRAY_CRIT_HANDLES = 60_000                # runaway ~66k → critical
 
 # Back-compat aliases (kept so any external reference still resolves).
 MEM_HEAL_TUN2SOCKS_BYTES = MEM_TUN2SOCKS_MOD_BYTES

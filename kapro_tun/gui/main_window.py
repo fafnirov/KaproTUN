@@ -1539,6 +1539,14 @@ class MainWindow(QMainWindow):
         self._mem_heal_count = 0
         self._mem_heal_max = 4          # heal1, heal2→economy, heal3-4 economy, then stop
         self._mem_heal_cooldown_s = 180.0
+        # v2.1.9 false-alarm guards: ignore breaches for a grace period after a
+        # (re)connect (helper sits at its baseline until it settles), and only
+        # act once the breach PERSISTS across several samples — so a stable high
+        # idle baseline can never trigger a heal / reconnect loop.
+        self._mem_breach_streak = 0
+        self._MEM_GRACE_S = 120.0
+        self._MEM_SUSTAIN_MODERATE = 3   # 3×10s ≈ 30s sustained
+        self._MEM_SUSTAIN_CRITICAL = 2   # 2×10s ≈ 20s sustained
         self._last_mem_heal_ts = 0.0
         self._mem_heal_exhausted_notified = False
         self._mem_timer = QTimer(self)
@@ -2344,10 +2352,18 @@ class MainWindow(QMainWindow):
 
     def _check_memory(self) -> None:
         """Periodic (10 s) runtime sample for tun2socks + xray. Logs a summary
-        ~once a minute (to Logs page AND on-disk app.log) and, on a genuine
-        runaway, hands off to the tiered self-heal. Only while a TUN session is
-        up; cheap, non-blocking → fine on the UI thread."""
+        ~once a minute and, on a SUSTAINED runaway, hands off to the tiered
+        self-heal.
+
+        Two false-alarm guards (v2.1.9) stop a high IDLE baseline from looping
+        reconnects on a perfectly healthy connection:
+          * grace period — ignore breaches for _MEM_GRACE_S after a (re)connect,
+            while the helper settles at its baseline;
+          * sustained breach — only act once the breach persists across several
+            consecutive samples, not on a single reading.
+        Only while a TUN session is up; cheap, non-blocking → fine on the UI."""
         if not self.manager.is_connected() or self.manager.current_mode() != MODE_TUN:
+            self._mem_breach_streak = 0
             return
         try:
             stats = self.manager.sample_runtime_stats()
@@ -2365,15 +2381,37 @@ class MainWindow(QMainWindow):
             verdict = self.manager.memory_pressure_reason(stats)
         except Exception:
             verdict = None
-        if verdict:
-            severity, reason = verdict
-            # Always record the breach with full stats on disk, even if a
-            # cooldown defers the actual heal.
-            try:
-                app_log.log(f"[mem-pressure/{severity}] {reason} | "
-                            f"{self.manager.format_runtime_stats(stats)}")
-            except Exception:
-                pass
+
+        # Grace period: don't judge a just-(re)connected helper. _connected_at
+        # is 0.0 while connecting and set to now() on success.
+        now = time.time()
+        if self._connected_at <= 0.0 or (now - self._connected_at) < self._MEM_GRACE_S:
+            self._mem_breach_streak = 0
+            if verdict:
+                try:
+                    app_log.log(f"[mem-pressure/{verdict[0]}] {verdict[1]} "
+                                f"(grace {int(self._MEM_GRACE_S)}s — без действия)")
+                except Exception:
+                    pass
+            return
+
+        if not verdict:
+            self._mem_breach_streak = 0
+            return
+
+        # Sustained-breach gate: require N consecutive over-threshold samples.
+        severity, reason = verdict
+        self._mem_breach_streak += 1
+        need = (self._MEM_SUSTAIN_CRITICAL if severity == "critical"
+                else self._MEM_SUSTAIN_MODERATE)
+        try:
+            app_log.log(f"[mem-pressure/{severity}] {reason} "
+                        f"streak={self._mem_breach_streak}/{need} | "
+                        f"{self.manager.format_runtime_stats(stats)}")
+        except Exception:
+            pass
+        if self._mem_breach_streak >= need:
+            self._mem_breach_streak = 0
             self._on_memory_pressure(severity, reason)
 
     def _on_memory_pressure(self, severity: str, reason: str) -> None:

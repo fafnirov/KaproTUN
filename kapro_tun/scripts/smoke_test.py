@@ -1037,11 +1037,15 @@ def _memory_pressure_tiered() -> None:
     # None samples → no crash, no false positive.
     if mgr.memory_pressure_reason({"tun2socks": None, "xray": None}) is not None:
         raise AssertionError("None samples should yield no pressure")
-    # Critical thresholds sit in the band the task asked for (~3 GB / 25k).
-    if not (2_500_000_000 <= C.MEM_TUN2SOCKS_CRIT_BYTES <= 3_500_000_000):
+    # v2.1.9: thresholds must sit ABOVE the observed ~1.9 GB idle baseline so a
+    # healthy session never trips a heal (the false-positive reconnect-loop), and
+    # below the observed ~4.7 GB runaway.
+    if C.MEM_TUN2SOCKS_MOD_BYTES <= 2_200_000_000:
+        raise AssertionError("tun2socks moderate mem threshold too low — must clear the ~1.9 GB idle baseline")
+    if not (3_500_000_000 <= C.MEM_TUN2SOCKS_CRIT_BYTES <= 5_000_000_000):
         raise AssertionError("tun2socks critical mem threshold out of band")
-    if C.MEM_TUN2SOCKS_CRIT_HANDLES != 25_000:
-        raise AssertionError("tun2socks critical handle threshold should be 25k")
+    if not (C.MEM_TUN2SOCKS_MOD_BYTES < C.MEM_TUN2SOCKS_CRIT_BYTES):
+        raise AssertionError("moderate threshold must be below critical")
 
 
 check("controller: tiered runaway classification (moderate/critical)",
@@ -1213,6 +1217,7 @@ def _runtime_safety_branches_via_window() -> None:
     from kapro_tun.gui import main_window as mw
     from kapro_tun.core import app_log
     from kapro_tun.core.parser import ProxyConfig
+    from kapro_tun.core.proc_stats import ProcSample
     if QApplication.instance() is None:
         QApplication([])
 
@@ -1302,6 +1307,44 @@ def _runtime_safety_branches_via_window() -> None:
             raise AssertionError("storm must trigger emergency stop")
         if calls["disconnect"] < 1:
             raise AssertionError("storm emergency stop must disconnect helpers")
+
+        # --- v2.1.9 grace period + sustained-breach gate ---
+        # A CRITICAL-breaching sample must NOT heal during the post-connect
+        # grace window, and outside grace must require N consecutive samples.
+        import time as _t2
+        heals = []
+        w._on_memory_pressure = lambda sev, rsn: heals.append((sev, rsn))
+        w.manager.is_connected = lambda: True
+        w.manager.current_mode = lambda: mw.MODE_TUN
+        crit_stats = {"tun2socks": ProcSample(5_000_000_000, 0, 0, 0.0), "xray": None}
+        w.manager.sample_runtime_stats = lambda: crit_stats
+        # within grace → no heal even though the sample is critical
+        w._connected_at = _t2.time()
+        w._mem_breach_streak = 0
+        w._check_memory()
+        if heals:
+            raise AssertionError("memory heal fired during the post-connect grace period")
+        # past grace → needs _MEM_SUSTAIN_CRITICAL consecutive breaches
+        w._connected_at = _t2.time() - (w._MEM_GRACE_S + 30)
+        w._mem_breach_streak = 0
+        for _k in range(max(0, w._MEM_SUSTAIN_CRITICAL - 1)):
+            w._check_memory()
+        if heals:
+            raise AssertionError("heal fired before the sustained-breach streak was reached")
+        w._check_memory()  # this sample reaches the streak
+        if not heals:
+            raise AssertionError("heal did not fire after a sustained critical breach")
+        # a stable baseline BELOW the moderate bar never heals, ever
+        heals.clear()
+        w._mem_breach_streak = 0
+        from kapro_tun.core import controller as _C2
+        baseline = {"tun2socks": ProcSample(_C2.MEM_TUN2SOCKS_MOD_BYTES - 1, 0, 0, 0.0),
+                    "xray": None}
+        w.manager.sample_runtime_stats = lambda: baseline
+        for _k in range(6):
+            w._check_memory()
+        if heals:
+            raise AssertionError("a stable sub-threshold baseline must never heal")
     finally:
         mw.show_toast = orig_toast
         app_log.log = orig_applog
