@@ -17,6 +17,38 @@ Windows). Android-клиент живёт в отдельном репозито
 
 # Desktop (Windows + Python)
 
+## v3.0.4 — Точечный фикс: тихие логи sing-box, ICMP-шум, изолированный smoke
+
+- **smoke полностью изолирован от реального `app.log`.** Sandbox теперь
+  дополнительно перенаправляет `paths.app_log_file` (раньше — только через
+  `app_data_dir`), а regression-тест больше не падает ложно из-за параллельно
+  работающего приложения: проверяется не «размер не изменился» (его меняет сам
+  работающий клиент своими `[mem]`-строками), а «ни одна строка с тест-сигнатурой
+  не попала в реальный `app.log`». Подтверждено внешней проверкой — реальный
+  `app.log` от smoke не меняется (0 добавленных строк).
+- **Лог-фильтр sing-box разделён на три корзины:**
+  - *всегда скрыто из UI* (но остаётся в recent/diagnostic logs): per-connection
+    шум (forcibly closed, connection reset, download/upload closed, broken pipe)
+    и спам ICMP («icmp is not supported by default outbound: proxy»);
+  - *скрыто, только когда туннель уже поднят, но видно на старте* как диагностика
+    подключения: неоднозначные сетевые ошибки (missing default interface, no
+    route to internet, i/o timeout);
+  - *всегда видно*: FATAL, parse/decode config, DNS start failure, tun/wintun/
+    permission, bind/address already in use.
+
+  При неудачной проверке связности в ошибку подключения добавляется
+  диагностический хвост логов sing-box, так что стартовые ошибки видны.
+- **ICMP-WARN больше не пугает.** Пинги, входящие в TUN (их прокси-outbound не
+  переносит), не попадают в UI/`app.log` как ошибка и не триггерят reconnect.
+- **`block_ads`-предупреждение — не чаще одного раза за запуск.** «Ad-block
+  работает только в legacy / HTTP» логируется один раз за сессию приложения, а
+  не на каждом reconnect; в Настройках чекбокс под sing-box остаётся честно
+  неактивным.
+
+Тесты: sandbox-изоляция (по сигнатурам), классификация логов (ICMP / transient
+startup-vs-live / fatal), однократность `block_ads`-уведомления. compileall +
+оба smoke-раннера зелёные; внешняя проверка real `app.log` — без изменений.
+
 ## v3.0.3 — Polish перед stable: тихие логи sing-box, UX ad-block, чистые тесты, docs
 
 Косметико-стабилизационный релиз поверх sing-box-движка — дата-план не тронут,

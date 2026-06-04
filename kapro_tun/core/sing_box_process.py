@@ -25,36 +25,23 @@ LogSink = Callable[[str], None]
 
 
 # --- log classification ----------------------------------------------------
-# sing-box logs per-connection network churn at ERROR level even though it's
-# harmless: a remote peer reset a socket, a direct/LAN/private address timed
-# out, a download/upload stream closed. Surfacing every one of these to the
-# user's Logs page is scary noise ("[sing-box] ERROR …" on a perfectly healthy
-# tunnel). We keep them in recent_logs() for diagnostics but DON'T forward them
-# to the UI sink. Genuinely fatal / startup / config / driver / permission
-# errors are NEVER classified as benign — they always reach the user.
+# sing-box logs a lot at ERROR/WARN that is harmless per-connection churn on a
+# perfectly healthy tunnel. We keep EVERYTHING in recent_logs() for diagnostics,
+# but only forward user-relevant lines to the UI sink. Three buckets:
+#
+#   _NEVER_HIDE     fatal / startup / config / driver / permission — always show.
+#   _ALWAYS_NOISE   pure per-connection socket churn + the ICMP-not-supported
+#                   WARN — never a health signal, always hidden from the UI.
+#   _TRANSIENT_NET  ambiguous network conditions (missing default interface, no
+#                   route, i/o timeout): a CONNECT failure at startup, but
+#                   transient churn once the tunnel is already live. Shown while
+#                   starting up (surfaced as a connect diagnostic) and hidden
+#                   once the session is confirmed live (see SingBoxProcess._live
+#                   / mark_live()).
+#
+# A line is matched case-insensitively. _NEVER_HIDE wins over the noise buckets,
+# so e.g. a fatal that mentions "timeout" still shows.
 
-# Per-connection socket churn — harmless, hide from the UI.
-_BENIGN_NOISE = (
-    "an existing connection was forcibly closed",  # Windows WSAECONNRESET
-    "forcibly closed by the remote host",
-    "i/o timeout",
-    "connection download closed",
-    "connection upload closed",
-    "connection reset by peer",
-    "use of closed network connection",
-    "broken pipe",
-    "context canceled",
-    "context deadline exceeded",
-    "wsarecv:",
-    "wsasend:",
-    "no route to host",
-    "network is unreachable",
-    "host is unreachable",
-)
-
-# Markers that ALWAYS keep a line visible, even if it also contains a benign
-# substring (e.g. a fatal error that mentions "timeout"). sing-box logs real
-# fatals at FATAL level, so the level word itself is a strong signal.
 _NEVER_HIDE = (
     " fatal",        # sing-box level word: "… FATAL …"
     "fatal:",
@@ -73,17 +60,62 @@ _NEVER_HIDE = (
     "invalid config",
     "unmarshal",
     "address already in use",
+    "bind:",                 # listen/bind failure
+    "start dns",             # DNS server start failure
+    "dns: start",
+    "create service",
+)
+
+# Pure per-connection socket churn — never a health signal. Always hidden.
+_ALWAYS_NOISE = (
+    "an existing connection was forcibly closed",  # Windows WSAECONNRESET
+    "forcibly closed by the remote host",
+    "connection download closed",
+    "connection upload closed",
+    "connection reset by peer",
+    "read: connection reset",
+    "write: connection reset",
+    "use of closed network connection",
+    "broken pipe",
+    "wsarecv:",
+    "wsasend:",
+    # sing-box WARNs on every ICMP packet (ping) that enters the TUN, because
+    # the proxy outbound can't carry ICMP. Pure noise on a healthy tunnel.
+    "icmp is not supported by default outbound",
+    "link icmp connection",
+)
+
+# Ambiguous: a connect failure at startup, transient churn once live.
+_TRANSIENT_NET = (
+    "missing default interface",
+    "no route to internet",
+    "no route to host",
+    "network is unreachable",
+    "host is unreachable",
+    "i/o timeout",
+    "context canceled",
+    "context deadline exceeded",
 )
 
 
-def is_benign_noise(line: str) -> bool:
-    """True for sing-box per-connection network noise that should be kept out of
-    the user-facing Logs page (still retained in recent_logs() for diagnostics).
-    Never True for fatal / startup / config / driver / permission errors."""
+def is_benign_noise(line: str, live: bool = True) -> bool:
+    """True if `line` is benign noise that should be kept OUT of the user-facing
+    Logs page (it's always retained in recent_logs() for diagnostics).
+
+    `live` — whether the tunnel is already confirmed up (steady state). Default
+    True. During the connect/startup window callers pass live=False so that
+    ambiguous network errors (missing default interface, no route, i/o timeout)
+    are surfaced as a connect diagnostic instead of being swallowed.
+
+    Fatal / startup / config / driver / permission errors are never benign."""
     low = line.lower()
     if any(p in low for p in _NEVER_HIDE):
         return False
-    return any(p in low for p in _BENIGN_NOISE)
+    if any(p in low for p in _ALWAYS_NOISE):
+        return True
+    if any(p in low for p in _TRANSIENT_NET):
+        return live      # benign only once the tunnel is already live
+    return False
 
 
 class SingBoxProcess:
@@ -95,6 +127,16 @@ class SingBoxProcess:
         self._on_log = on_log
         self._recent: deque[str] = deque(maxlen=log_buffer)
         self._lock = threading.Lock()
+        # False during the connect/startup window, True once the controller
+        # confirms the tunnel is live (mark_live()). Controls whether ambiguous
+        # network errors are surfaced (startup) or treated as transient noise.
+        self._live = False
+
+    def mark_live(self) -> None:
+        """Called by the controller once the connect-time liveness check passes.
+        Switches the log filter from 'startup' (surface ambiguous network errors
+        as a connect diagnostic) to 'live' (treat them as transient noise)."""
+        self._live = True
 
     def _build_args(self, exe, config_path: str) -> list[str]:
         """The sing-box command line. Split out so it's unit-testable without
@@ -104,6 +146,7 @@ class SingBoxProcess:
     def start(self, config_path: str) -> None:
         if self.is_running():
             raise RuntimeError("sing-box is already running")
+        self._live = False  # each session starts in the 'startup' log mode
         exe = paths.sing_box_exe()
         if not exe.is_file():
             raise FileNotFoundError(f"sing-box binary not found at {exe}")
@@ -164,11 +207,13 @@ class SingBoxProcess:
         for line in proc.stdout:
             line = line.rstrip("\r\n")
             # Always retain the full stream for diagnostics (connect-time tail,
-            # recent_logs()), but keep benign per-connection churn out of the
-            # user-facing sink so a healthy tunnel doesn't spam scary ERRORs.
+            # recent_logs()), but keep benign churn out of the user-facing sink
+            # so a healthy tunnel doesn't spam scary ERRORs. While starting up
+            # (not yet live) ambiguous network errors ARE forwarded so a connect
+            # failure is visible; once live they're treated as transient noise.
             with self._lock:
                 self._recent.append(line)
-            if self._on_log and not is_benign_noise(line):
+            if self._on_log and not is_benign_noise(line, live=self._live):
                 try:
                     self._on_log(line)
                 except Exception:

@@ -71,13 +71,20 @@ from pathlib import Path as _SbxPath
 from kapro_tun.core import paths as _sbx_paths
 from kapro_tun.core import app_log as _sbx_app_log
 
-# Capture the REAL app.log path + size BEFORE redirecting — a regression test
-# below proves the suite never appended to it.
+# Capture the REAL app.log path + a content snapshot BEFORE redirecting, so a
+# regression test below can prove the SUITE never appended to it. We snapshot
+# the line set (not just the size): a concurrently-running KaproTUN app may
+# append its own [mem]/[connect] lifecycle lines during the ~10s smoke run, so
+# a raw size/byte comparison is flaky — the robust check is "no NEW line carries
+# a smoke-test signature".
 _REAL_APP_LOG = _sbx_paths.app_log_file()
 try:
     _REAL_APP_LOG_SIZE_BEFORE = _REAL_APP_LOG.stat().st_size
+    _REAL_APP_LOG_LINES_BEFORE = frozenset(
+        _REAL_APP_LOG.read_text(encoding="utf-8", errors="replace").splitlines())
 except OSError:
     _REAL_APP_LOG_SIZE_BEFORE = 0
+    _REAL_APP_LOG_LINES_BEFORE = frozenset()
 
 # Real binary dirs (path-only, no mkdir) captured before the redirect. We keep
 # ONLY sing_box_dir + tun_dir real, because the real `sing-box check` test needs
@@ -94,6 +101,11 @@ _SANDBOX_DIR = _SbxPath(_sbx_tempfile.mkdtemp(prefix="kaprotun-smoke-"))
 _sbx_paths.app_data_dir = lambda: _SANDBOX_DIR
 _sbx_paths.sing_box_dir = lambda: _REAL_SINGBOX_DIR
 _sbx_paths.tun_dir = lambda: _REAL_TUN_DIR
+# Defence in depth: redirect app_log_file() directly too. It already resolves
+# via app_data_dir() (so it's covered), but pinning it explicitly means even a
+# test that restores a stale captured app_log_file ref still lands in the
+# sandbox — app.log must NEVER resolve to the real path during the suite.
+_sbx_paths.app_log_file = lambda: _SANDBOX_DIR / "app.log"
 _sbx_app_log._reset_for_test()  # reopen the rotating handler under the sandbox
 _sbx_atexit.register(lambda: _sbx_shutil.rmtree(_SANDBOX_DIR, ignore_errors=True))
 
@@ -5080,22 +5092,42 @@ def _v3_singbox_watchdog_engine_aware() -> None:
 
 
 def _v3_singbox_log_noise_classification() -> None:
-    # 14) sing-box logs per-connection network churn at ERROR level. Those
-    #     harmless lines must be kept OUT of the user-facing sink (still retained
-    #     in recent_logs for diagnostics), while genuine fatal/startup/config/
-    #     driver errors must always reach the user.
+    # 14) sing-box log filter — three buckets:
+    #   (a) pure per-connection churn + the ICMP-not-supported WARN → ALWAYS
+    #       hidden from the UI (retained in recent_logs);
+    #   (b) ambiguous network errors (missing default interface / no route / i/o
+    #       timeout) → VISIBLE at startup (connect diagnostic), hidden once live;
+    #   (c) fatal / startup / config / driver / permission → ALWAYS visible.
     from kapro_tun.core import sing_box_process as _sbp
-    benign = [
+
+    # (a) churn + ICMP WARN: hidden in BOTH startup and live states.
+    always_hidden = [
         "ERROR outbound/direct[direct]: An existing connection was forcibly "
         "closed by the remote host.",
-        "ERROR dial tcp 10.0.0.5:443: i/o timeout",
         "ERROR inbound/tun[tun-in]: connection download closed",
         "ERROR read tcp 1.2.3.4:55000->5.6.7.8:443: connection reset by peer",
         "WARN use of closed network connection",
+        "WARN inbound/tun[tun-in]: link icmp connection from 10.0.0.2 to 1.1.1.1: "
+        "icmp is not supported by default outbound: proxy",
     ]
-    for line in benign:
-        if not _sbp.is_benign_noise(line):
-            raise AssertionError(f"benign network noise must be hidden: {line!r}")
+    for line in always_hidden:
+        if not (_sbp.is_benign_noise(line, live=True)
+                and _sbp.is_benign_noise(line, live=False)):
+            raise AssertionError(f"churn/ICMP must be hidden in both states: {line!r}")
+
+    # (b) transient net: hidden once live, but VISIBLE at startup.
+    transient = [
+        "ERROR network: missing default interface",
+        "ERROR route: no route to internet",
+        "ERROR dial tcp 10.0.0.5:443: i/o timeout",
+    ]
+    for line in transient:
+        if not _sbp.is_benign_noise(line, live=True):
+            raise AssertionError(f"transient net must be hidden once live: {line!r}")
+        if _sbp.is_benign_noise(line, live=False):
+            raise AssertionError(f"transient net must be VISIBLE at startup: {line!r}")
+
+    # (c) fatal/startup/config/driver/permission: visible in BOTH states.
     fatal = [
         "FATAL start service: configure tun interface: permission denied",
         "panic: runtime error",
@@ -5103,29 +5135,69 @@ def _v3_singbox_log_noise_classification() -> None:
         "FATAL decode config at line 3: invalid character",
         "ERROR wintun: failed to load driver",
         "ERROR initialize outbound[proxy]: parse config: bad reality public_key",
+        "FATAL start dns server: listen udp :53: bind: permission denied",
     ]
     for line in fatal:
-        if _sbp.is_benign_noise(line):
+        if _sbp.is_benign_noise(line, live=True) or _sbp.is_benign_noise(line, live=False):
             raise AssertionError(f"fatal/startup error must stay visible: {line!r}")
-    # The reader keeps benign lines in recent_logs but doesn't forward them.
-    sink = []
-    p = _sbp.SingBoxProcess(on_log=sink.append)
 
     class _FakeStdout:
         def __init__(self, lines): self._lines = iter(lines)
         def __iter__(self): return self._lines
 
-    class _FakeProc:
-        stdout = _FakeStdout([benign[0] + "\n", fatal[0] + "\n"])
-    p._proc = _FakeProc()
-    p._read_loop()
-    if any("forcibly closed" in s for s in sink):
-        raise AssertionError("benign line leaked to the user sink")
+    def _run(lines, live):
+        sink = []
+        p = _sbp.SingBoxProcess(on_log=sink.append)
+        p._live = live
+
+        class _FakeProc:
+            stdout = _FakeStdout([l + "\n" for l in lines])
+        p._proc = _FakeProc()
+        p._read_loop()
+        return sink, p.recent_logs()
+
+    # Live: ICMP + transient hidden from sink, fatal shown; all kept in recent.
+    sink, recent = _run([always_hidden[4], transient[0], fatal[0]], live=True)
+    if any("icmp" in s.lower() for s in sink):
+        raise AssertionError("ICMP WARN leaked to the user sink when live")
+    if any("missing default interface" in s for s in sink):
+        raise AssertionError("transient net leaked to the user sink when live")
     if not any("permission denied" in s for s in sink):
         raise AssertionError("fatal line must reach the user sink")
-    recent = p.recent_logs()
-    if not any("forcibly closed" in r for r in recent):
-        raise AssertionError("benign line must still be retained in recent_logs")
+    if not any("icmp" in r.lower() for r in recent):
+        raise AssertionError("ICMP line must be retained in recent_logs for diagnostics")
+
+    # Startup window: the same transient error IS forwarded (connect diagnostic).
+    sink2, _ = _run([transient[0]], live=False)
+    if not any("missing default interface" in s for s in sink2):
+        raise AssertionError("transient net must be visible during the startup window")
+
+
+def _v3_block_ads_warning_once() -> None:
+    # 17) The 'ad-block is legacy-only' notice must be logged AT MOST ONCE per
+    #     app launch — not on every sing-box reconnect.
+    from kapro_tun.core import controller as _C5
+    from kapro_tun.core.controller import ConnectionManager
+    cm = ConnectionManager(on_log=None)
+    cm.settings["block_ads"] = True
+    cm.settings["tun_engine"] = _C5.ENGINE_SING_BOX
+    logged = []
+    cm._log = lambda m: logged.append(str(m))
+    # Three connects in a row (the real call site is _connect_tun_sing_box).
+    for _ in range(3):
+        cm._note_singbox_adblock_once()
+    hits = [m for m in logged if "Блокировка рекламы" in m]
+    if len(hits) != 1:
+        raise AssertionError(
+            f"block_ads notice must log exactly once per launch, got {len(hits)}")
+    # With block_ads OFF, it never logs.
+    cm2 = ConnectionManager(on_log=None)
+    cm2.settings["block_ads"] = False
+    logged2 = []
+    cm2._log = lambda m: logged2.append(str(m))
+    cm2._note_singbox_adblock_once()
+    if any("Блокировка рекламы" in m for m in logged2):
+        raise AssertionError("no ad-block notice when block_ads is off")
 
 
 def _v3_block_ads_disabled_on_singbox() -> None:
@@ -5182,11 +5254,23 @@ def _v3_block_ads_disabled_on_singbox() -> None:
     sp.deleteLater()
 
 
+_SMOKE_LOG_SIGNATURES = (
+    "SMOKE-SANDBOX-MARKER",         # the marker this test emits
+    "kaprotun-smoke-",             # the sandbox temp-dir prefix
+    "Test-VLESS", "Test-Trojan", "Test-HY2",  # synthetic config names
+)
+
+
 def _smoke_does_not_touch_real_app_log() -> None:
     # 16) The whole suite must run inside the sandbox: writing to the REAL
-    #     %LOCALAPPDATA%/KaproTUN/app.log is a regression. Prove the redirect
-    #     works (sandbox got our marker) AND the real file is byte-for-byte
-    #     untouched by this run.
+    #     %LOCALAPPDATA%/KaproTUN/app.log is a regression. Two checks:
+    #       (a) our marker landed in the SANDBOX app.log (redirect works);
+    #       (b) the REAL app.log gained NO smoke-attributable line.
+    #     We deliberately do NOT assert the real app.log size is unchanged: a
+    #     concurrently-running KaproTUN app appends its own [mem]/[connect]
+    #     lifecycle lines during the ~10s run — that is NOT a smoke leak. A real
+    #     leak would carry a smoke signature (the marker, the sandbox prefix, a
+    #     synthetic test config name), which is what we fail on.
     marker = "SMOKE-SANDBOX-MARKER-do-not-ship"
     _sbx_app_log.log(marker)
     _sbx_app_log._reset_for_test()  # close handlers → flush to disk
@@ -5195,15 +5279,21 @@ def _smoke_does_not_touch_real_app_log() -> None:
                if sandbox_log.exists() else "")
     if marker not in sb_text:
         raise AssertionError("app_log did not write to the sandbox — redirect failed")
-    if _REAL_APP_LOG.exists():
-        real_text = _REAL_APP_LOG.read_text(encoding="utf-8", errors="replace")
-        if marker in real_text:
-            raise AssertionError("smoke wrote the test marker into the REAL app.log!")
-        if _REAL_APP_LOG.stat().st_size != _REAL_APP_LOG_SIZE_BEFORE:
-            raise AssertionError(
-                f"REAL app.log size changed during smoke "
-                f"({_REAL_APP_LOG_SIZE_BEFORE} → {_REAL_APP_LOG.stat().st_size}) — "
-                f"a test wrote to it outside the sandbox")
+    if not _REAL_APP_LOG.exists():
+        return
+    real_text = _REAL_APP_LOG.read_text(encoding="utf-8", errors="replace")
+    if marker in real_text:
+        raise AssertionError("smoke wrote the test marker into the REAL app.log!")
+    # Any NEW line (vs the pre-suite snapshot) that carries a smoke signature is
+    # a leak. App-lifecycle lines from a running instance are tolerated.
+    new_lines = [l for l in real_text.splitlines()
+                 if l not in _REAL_APP_LOG_LINES_BEFORE]
+    leaked = [l for l in new_lines
+              if any(sig in l for sig in _SMOKE_LOG_SIGNATURES)]
+    if leaked:
+        raise AssertionError(
+            f"smoke leaked {len(leaked)} line(s) into the REAL app.log: "
+            f"{leaked[:3]}")
 
 
 check("migration: default engine sing-box; old settings migrate", _v3_migration_default)
@@ -5224,10 +5314,12 @@ check("config: XHTTP/splithttp → UnsupportedBySingBox (no half-working TCP)",
       _v3_xhttp_unsupported)
 check("watchdog: engine-aware crash detection (no false Xray crash on sing-box)",
       _v3_singbox_watchdog_engine_aware)
-check("logs: sing-box benign net-noise hidden, fatal/startup stays visible",
+check("logs: sing-box benign/ICMP hidden, transient startup-visible, fatal stays",
       _v3_singbox_log_noise_classification)
 check("ui: ad-block disabled under sing-box TUN, value preserved",
       _v3_block_ads_disabled_on_singbox)
+check("logs: block_ads notice logs once per launch, not per reconnect",
+      _v3_block_ads_warning_once)
 
 # Must run LAST — proves the whole suite stayed in the sandbox and never wrote
 # to the real app.log.

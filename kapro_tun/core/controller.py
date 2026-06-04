@@ -24,7 +24,7 @@ from .hysteria_process import HysteriaProcess
 # in the connect flow.
 from . import tun2socks_process
 from .tun2socks_process import Tun2socksProcess
-from .sing_box_process import SingBoxProcess
+from .sing_box_process import SingBoxProcess, is_benign_noise
 from . import sing_box_config, sing_box_installer
 if sys.platform == "win32":
     from . import network_routes
@@ -245,6 +245,9 @@ class ConnectionManager:
         self._active: Optional[ProxyConfig] = None
         # Which TUN engine the live session is using (None when disconnected).
         self._active_engine: Optional[str] = None
+        # Once-per-app-launch guard so the "ad-block is legacy-only" notice
+        # isn't logged on every sing-box reconnect.
+        self._singbox_adblock_noted = False
         # Belt-and-braces: if Python exits uncleanly with TUN routes active,
         # the user's network is broken until reboot. Best-effort cleanup here.
         atexit.register(self._atexit_cleanup)
@@ -983,6 +986,18 @@ class ConnectionManager:
         self._active = config
         self._active_engine = ENGINE_CLASSIC
 
+    def _note_singbox_adblock_once(self) -> None:
+        """Log the 'ad-block is legacy-only' notice AT MOST ONCE per app launch.
+
+        geosite ad-block is an Xray feature and can't run on sing-box. The
+        Settings checkbox is disabled under sing-box, but if `block_ads` was left
+        True from a legacy session we surface it once — never on every reconnect
+        (which spammed the Logs page / app.log). Idempotent within a launch."""
+        if bool(self.settings.get("block_ads")) and not self._singbox_adblock_noted:
+            self._singbox_adblock_noted = True
+            self._log("[sing-box] Блокировка рекламы (block_ads) работает только в "
+                      "legacy-движке / HTTP-режиме — на sing-box она неактивна.")
+
     def _connect_tun_sing_box(self, config: ProxyConfig, direct_domains: list[str]) -> None:
         """sing-box native-TUN connect (v3.0.0 primary). sing-box owns the TUN
         device, manages routes (auto_route), proxies and resolves DNS itself —
@@ -1010,6 +1025,10 @@ class ConnectionManager:
         dns_leak = bool(self.settings.get("dns_leak_protection", True))
         block_ads = bool(self.settings.get("block_ads", False))
         route_ru_direct = bool(self.settings.get("route_ru_direct", False))
+
+        # Honest ONE-TIME notice (not on every reconnect) that ad-block is
+        # legacy-only — see _note_singbox_adblock_once().
+        self._note_singbox_adblock_once()
 
         # Generate + write the runtime config (may raise UnsupportedBySingBox,
         # which the dispatcher turns into a 'use legacy' message — no process
@@ -1050,10 +1069,20 @@ class ConnectionManager:
             # its tunnelled resolver. If it answers, the tunnel carries traffic.
             self._log("[*] Проверяю, что туннель sing-box живой…")
             if not dns_health.probe(timeout=2.0, attempts=4):
+                # Surface the startup-relevant sing-box lines (missing default
+                # interface / no route / config) as a connect diagnostic — these
+                # are hidden once live, but at startup they explain the failure.
+                diag = [l for l in self.sing_box_process.recent_logs()
+                        if not is_benign_noise(l, live=False)]
+                tail = "\n".join(diag[-6:])
                 raise ConnectionError(
                     "sing-box поднялся, но DNS через туннель не отвечает. "
                     "Откатываю. Проверь сервер/подписку, либо переключи движок "
-                    "на legacy (Xray + tun2socks).")
+                    "на legacy (Xray + tun2socks)."
+                    + (f"\n\nДиагностика sing-box:\n{tail}" if tail else ""))
+            # Confirmed live → switch the log filter to steady-state, so
+            # ambiguous network errors become transient noise instead of alarms.
+            self.sing_box_process.mark_live()
             self._log("[*] sing-box TUN активен — трафик и DNS проходят.")
         except Exception:
             self.sing_box_process.stop()
