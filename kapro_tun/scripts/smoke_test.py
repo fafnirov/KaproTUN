@@ -79,19 +79,21 @@ try:
 except OSError:
     _REAL_APP_LOG_SIZE_BEFORE = 0
 
-# Real binary dirs (path-only, no mkdir) captured before the redirect.
+# Real binary dirs (path-only, no mkdir) captured before the redirect. We keep
+# ONLY sing_box_dir + tun_dir real, because the real `sing-box check` test needs
+# the installed binary (sing_box_dir) and a valid existing cwd / WinTUN driver
+# (tun_dir). We must NOT re-pin xray_dir or hysteria_dir: hysteria_dir also
+# holds a *runtime config* (hysteria-client.yaml), and pinning it to a real
+# (maybe non-existent) dir breaks the runtime-config write/cleanup test. Those
+# two follow app_data_dir into the sandbox like every other writable path.
 _REAL_BASE = _sbx_paths.app_data_dir()
 _REAL_SINGBOX_DIR = _REAL_BASE / "sing-box"
 _REAL_TUN_DIR = _REAL_BASE / "tun"
-_REAL_XRAY_DIR = _REAL_BASE / "xray"
-_REAL_HYSTERIA_DIR = _REAL_BASE / "hysteria"
 
 _SANDBOX_DIR = _SbxPath(_sbx_tempfile.mkdtemp(prefix="kaprotun-smoke-"))
 _sbx_paths.app_data_dir = lambda: _SANDBOX_DIR
 _sbx_paths.sing_box_dir = lambda: _REAL_SINGBOX_DIR
 _sbx_paths.tun_dir = lambda: _REAL_TUN_DIR
-_sbx_paths.xray_dir = lambda: _REAL_XRAY_DIR
-_sbx_paths.hysteria_dir = lambda: _REAL_HYSTERIA_DIR
 _sbx_app_log._reset_for_test()  # reopen the rotating handler under the sandbox
 _sbx_atexit.register(lambda: _sbx_shutil.rmtree(_SANDBOX_DIR, ignore_errors=True))
 
