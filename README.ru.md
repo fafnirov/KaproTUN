@@ -72,19 +72,24 @@ Shadowsocks, Hysteria2) с одной важной фичей: домены из
 - 📥 **Импорт subscription-URL** — вставляешь один URL, получаешь все
   конфиги от провайдера. Фоновый авто-рефреш раз в 12 часов
   (additive-only — рабочие конфиги никогда не удаляются).
-- 🛡 **Реальный firewall kill-switch** — если прокси умрёт, Windows
-  Firewall заблокирует весь outbound кроме `xray.exe`. Никаких тихих
-  утечек реального IP.
+- 🛡 **Реальный firewall kill-switch** — если туннель умрёт, Windows
+  Firewall заблокирует весь outbound кроме процесса активного движка:
+  `sing-box.exe` для движка sing-box TUN, либо `xray.exe` (+ `hysteria.exe`
+  для Hysteria2) для legacy-движка и HTTP-режима. Никаких тихих утечек
+  реального IP.
 - 🔁 **Auto-reconnect** — прозрачно переподключает до 3 раз с backoff
-  если Xray упал посреди сессии.
+  если активный движок упал посреди сессии.
 - 🔒 **Конфиги шифруются на диске** — Windows DPAPI (тот же механизм
   которым Chrome шифрует сохранённые пароли). Старые plaintext-конфиги
   автоматом перешифровываются при первом запуске.
 - 🌐 **Два режима подключения** —
-  - **HTTP-прокси** (по умолчанию, без админа) — браузер + приложения
-    которые умеют системный прокси
-  - **TUN** (нужны админ/root) — туннелирует все приложения, включая
-    игры и Telegram. Использует bundled tun2socks + WinTUN-драйвер.
+  - **HTTP-прокси** (без админа) — браузер + приложения, которые умеют
+    системный прокси, через Xray
+  - **TUN** (нужны админ/root) — туннелирует все приложения, включая игры
+    и Telegram. Движок по умолчанию — **sing-box native TUN**: один процесс
+    владеет TUN-устройством и сам роутит, без локального SOCKS-моста
+    (`127.0.0.1:2081`) и без отдельного tun2socks. **Legacy-движок
+    Xray + tun2socks** остаётся ручным fallback'ом в Настройках → Движок TUN.
 - ✏️ **Редактируемый список «всегда напрямую»** доменов — 108 разумных
   дефолтов (банки, госуслуги, маркетплейсы, медиа).
 - 📡 **Tray quick-connect** — топ-3 самых быстрых конфига по пингу в
@@ -115,8 +120,9 @@ responsible disclosure.
 | macOS | 12+ (Apple Silicon) |
 | Linux | glibc 2.31+ (Ubuntu 20.04+ и эквиваленты) |
 
-Диск: ~80 МБ в сумме (~57 МБ приложение + ~25 МБ для Xray + tun2socks +
-WinTUN, скачиваются при первом подключении).
+Диск: ~95 МБ в сумме (~57 МБ приложение + ~35 МБ для sing-box + Xray +
+tun2socks + WinTUN, скачиваются при первом подключении — sing-box для
+основного TUN-движка, Xray для HTTP-режима и legacy-движка).
 
 ## Установка и запуск
 
@@ -143,27 +149,41 @@ pyinstaller KaproVPN.spec          # → dist/KaproVPN.exe (портативна
 pyinstaller KaproVPN-Setup.spec    # → dist/KaproVPN-Setup.exe (Windows-установщик)
 ```
 
-При первом запуске приложение скачает последний релиз Xray-core в
-`%LOCALAPPDATA%\KaproVPN\xray\` (Windows) или `~/.local/share/KaproVPN/`
-(macOS / Linux). Туда же tun2socks + wintun.dll на Windows.
+При первом запуске / первом подключении приложение скачает бинарники в
+`%LOCALAPPDATA%\KaproVPN\` (Windows) или `~/.local/share/KaproVPN/`
+(macOS / Linux): **sing-box** (`sing-box/`, основной TUN-движок),
+**Xray-core** (`xray/`, HTTP-режим + legacy-движок) и на Windows
+**tun2socks + wintun.dll** (`tun/`, для legacy-движка и общий WinTUN-драйвер).
 
 ## Как это работает
 
 1. Вы вставляете share-URL (например, `vless://…`) или subscription URL.
-2. Приложение разбирает его и генерирует JSON-конфиг Xray-core с
-   правилами split-routing'а:
-   - домены из «direct»-списка → outbound `freedom` (ваш реальный IP)
+   Приложение разбирает его в proxy-outbound и применяет правила
+   split-routing'а:
+   - домены из «direct»-списка → напрямую (ваш реальный IP)
+   - приватные / LAN / Docker диапазоны → всегда напрямую, мимо туннеля
    - всё остальное → proxy-outbound (разобранный URL)
-   - публичные DNS-резолверы и порт 53 → всегда напрямую (анти-DNS-leak)
-3. `xray.exe` запускается как подпроцесс и слушает на `127.0.0.1:2080`
-   (HTTP) и `:2081` (SOCKS5).
-4. **HTTP-режим**: системный прокси OS указывается на порт 2080.
-   **TUN-режим**: tun2socks создаёт виртуальный сетевой адаптер и
-   форвардит каждый пакет через `127.0.0.1:2081`, дальше xray роутит
-   по правилам.
-5. Если Xray умер не по нашей команде — auto-reconnect retry'ит. Если
-   включён firewall kill-switch, трафик остаётся заблокированным до
-   переподключения или явного дисконнекта — никаких тихих утечек.
+   - DNS идёт через туннель при включённой защите от утечек, иначе напрямую
+
+Дальше — в зависимости от режима/движка:
+
+- **HTTP-режим** — `xray.exe` слушает на `127.0.0.1:2080` (HTTP) / `:2081`
+  (SOCKS5); системный прокси OS указывается на порт 2080.
+- **TUN-режим · sing-box (по умолчанию)** — один `sing-box.exe` владеет
+  TUN-устройством, сам управляет маршрутами (`auto_route` +
+  `auto_detect_interface`), резолвит DNS и дозванивается до прокси. **Нет
+  моста `127.0.0.1:2081` и нет tun2socks** — поэтому исчерпание эфемерных
+  портов loopback невозможно, а «прямой» трафик уходит через физическую
+  сетевую карту (нет петли маршрутов).
+- **TUN-режим · legacy (ручной fallback)** — `tun2socks.exe` создаёт
+  виртуальный адаптер и форвардит каждый пакет через `127.0.0.1:2081` в
+  `xray.exe`, который роутит по правилам. Выбирается в Настройках для
+  конфигов, которые sing-box пока не умеет (например, транспорт XHTTP).
+
+Если активный движок умер не по нашей команде — auto-reconnect переподключает
+**тем же** движком. При включённом firewall kill-switch трафик остаётся
+заблокированным до переподключения или явного дисконнекта — никаких тихих
+утечек.
 
 ## Структура проекта
 
@@ -174,9 +194,12 @@ kapro_vpn/
 │   ├── xray_config.py        # генератор JSON Xray-core со split-routing + DNS-leak hardening
 │   ├── xray_installer.py     # загрузка Xray-core (с mirror-fallback)
 │   ├── xray_process.py       # управление xray-подпроцессом + log rotation
-│   ├── tun2socks_installer.py
-│   ├── tun2socks_process.py
-│   ├── network_routes.py     # роуты/DNS для TUN-режима на Windows
+│   ├── sing_box_config.py    # генератор JSON sing-box (основной TUN-движок) + гейт транспортов
+│   ├── sing_box_installer.py # загрузка sing-box (с mirror-fallback)
+│   ├── sing_box_process.py   # sing-box-подпроцесс + классификатор шумных per-connection логов
+│   ├── tun2socks_installer.py  # legacy-движок
+│   ├── tun2socks_process.py    # legacy-движок
+│   ├── network_routes.py     # роуты/DNS для legacy TUN-движка на Windows
 │   ├── network_routes_unix.py # эквивалент для macOS/Linux
 │   ├── admin.py              # UAC / sudo хелперы
 │   ├── system_proxy.py       # OS HTTP-proxy контроллер (3 платформы)
@@ -222,8 +245,11 @@ PR'ы приветствуются. Самые полезные направле
   account, патч в GitHub Actions, который добавит codesigning +
   notarytool, позволит маковским юзерам не видеть «разработчик не
   идентифицирован» Gatekeeper-prompt.
-- **Android-порт** — есть skeleton в `android/` (VPNService + TUN +
-  config-bridge к libv2ray.aar), нужна полировка UI и connect-flow.
+- **Android-клиент** — переехал в отдельный репозиторий:
+  [fafnirov/KaproVPN-Android](https://github.com/fafnirov/KaproVPN-Android)
+  (Kotlin + Compose, v0.1.0 готов). С этим репо синхронизируется только
+  `kapro_vpn/data/default_sites.json` — общий список RU-сайтов для
+  split-routing.
 - **IPv6 в TUN-режиме** — сейчас только IPv4; IPv6-трафик может уходить
   мимо туннеля.
 - **Больше языков** — `kapro_vpn/core/i18n.py` основан на dict'ах,

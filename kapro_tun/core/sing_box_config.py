@@ -195,11 +195,13 @@ def build_config(
         ru = _ru_cidrs()
         if ru:
             rules.append({"ip_cidr": ru, "action": "route", "outbound": "direct"})
-    if block_ads and on_log:
-        # geosite-based ad-block needs the geosite DB; not shipped on sing-box
-        # yet. Surface the limitation honestly instead of pretending.
-        on_log("[sing-box] Блокировка рекламы (block_ads) пока работает только "
-               "в legacy-движке — в sing-box она не активна.")
+    # NOTE: block_ads is intentionally NOT honoured here — geosite:category-ads-all
+    # needs the geosite DB, which we don't ship for sing-box. The Settings UI
+    # disables the ad-block checkbox + shows a 'legacy only' note when sing-box
+    # is the active engine, so the limitation is surfaced there ONCE rather than
+    # spamming the Logs page on every (re)connect (v3.0.3). `on_log` is kept in
+    # the signature for callers/future use.
+    _ = (block_ads, on_log)
 
     dns_block = _dns_block(dns_option, dns_leak_protection)
     return {

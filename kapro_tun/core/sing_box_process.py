@@ -24,6 +24,68 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 LogSink = Callable[[str], None]
 
 
+# --- log classification ----------------------------------------------------
+# sing-box logs per-connection network churn at ERROR level even though it's
+# harmless: a remote peer reset a socket, a direct/LAN/private address timed
+# out, a download/upload stream closed. Surfacing every one of these to the
+# user's Logs page is scary noise ("[sing-box] ERROR …" on a perfectly healthy
+# tunnel). We keep them in recent_logs() for diagnostics but DON'T forward them
+# to the UI sink. Genuinely fatal / startup / config / driver / permission
+# errors are NEVER classified as benign — they always reach the user.
+
+# Per-connection socket churn — harmless, hide from the UI.
+_BENIGN_NOISE = (
+    "an existing connection was forcibly closed",  # Windows WSAECONNRESET
+    "forcibly closed by the remote host",
+    "i/o timeout",
+    "connection download closed",
+    "connection upload closed",
+    "connection reset by peer",
+    "use of closed network connection",
+    "broken pipe",
+    "context canceled",
+    "context deadline exceeded",
+    "wsarecv:",
+    "wsasend:",
+    "no route to host",
+    "network is unreachable",
+    "host is unreachable",
+)
+
+# Markers that ALWAYS keep a line visible, even if it also contains a benign
+# substring (e.g. a fatal error that mentions "timeout"). sing-box logs real
+# fatals at FATAL level, so the level word itself is a strong signal.
+_NEVER_HIDE = (
+    " fatal",        # sing-box level word: "… FATAL …"
+    "fatal:",
+    "panic",
+    "failed to start",
+    "start command",
+    "permission denied",
+    "access is denied",
+    "operation not permitted",
+    "wintun",        # TUN driver problems
+    "tun device",
+    "create tun",
+    "configure tun",
+    "decode config",
+    "parse config",
+    "invalid config",
+    "unmarshal",
+    "address already in use",
+)
+
+
+def is_benign_noise(line: str) -> bool:
+    """True for sing-box per-connection network noise that should be kept out of
+    the user-facing Logs page (still retained in recent_logs() for diagnostics).
+    Never True for fatal / startup / config / driver / permission errors."""
+    low = line.lower()
+    if any(p in low for p in _NEVER_HIDE):
+        return False
+    return any(p in low for p in _BENIGN_NOISE)
+
+
 class SingBoxProcess:
     """Wraps a sing-box subprocess (start/stop/is_running/pid/recent_logs)."""
 
@@ -101,9 +163,12 @@ class SingBoxProcess:
             return
         for line in proc.stdout:
             line = line.rstrip("\r\n")
+            # Always retain the full stream for diagnostics (connect-time tail,
+            # recent_logs()), but keep benign per-connection churn out of the
+            # user-facing sink so a healthy tunnel doesn't spam scary ERRORs.
             with self._lock:
                 self._recent.append(line)
-            if self._on_log:
+            if self._on_log and not is_benign_noise(line):
                 try:
                     self._on_log(line)
                 except Exception:

@@ -658,6 +658,23 @@ class SettingsPage(QWidget):
         block_ads_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(block_ads_hint)
 
+        # v3.0.3: ad-block is an Xray routing feature (geosite:category-ads-all);
+        # the sing-box engine doesn't ship the geosite DB, so it can't block ads.
+        # When sing-box is the active TUN engine we disable the checkbox and show
+        # this note so we never promise blocking that won't happen. The stored
+        # setting is preserved — switching to legacy (or HTTP mode) re-activates
+        # it. Visibility toggled by _sync_block_ads_for_engine().
+        self._block_ads_engine_note = QLabel(
+            "⚠ Работает только на движке «Legacy (Xray + tun2socks)» или в "
+            "HTTP-режиме. На основном движке sing-box блокировка неактивна — "
+            "переключи движок в разделе «Движок TUN» ниже."
+        )
+        self._block_ads_engine_note.setObjectName("dim")
+        self._block_ads_engine_note.setWordWrap(True)
+        self._block_ads_engine_note.setContentsMargins(28, 0, 0, 0)
+        self._block_ads_engine_note.setVisible(False)
+        outer.addWidget(self._block_ads_engine_note)
+
         self.ru_direct_check = QCheckBox("Российские сайты напрямую (по гео-IP)")
         self.ru_direct_check.setChecked(
             bool(manager.settings.get("route_ru_direct", False))
@@ -897,6 +914,9 @@ class SettingsPage(QWidget):
         self.engine_combo.currentIndexChanged.connect(self._on_tun_engine_changed)
         engine_row.addWidget(self.engine_combo)
         outer.addLayout(engine_row)
+        # Both block_ads_check and engine_combo now exist — reflect the
+        # engine-dependent availability of ad-block in the UI from the start.
+        self._sync_block_ads_for_engine()
         engine_hint = QLabel(
             "sing-box — основной движок: один процесс владеет TUN, без моста "
             "tun2socks. Legacy включай, только если конкретный конфиг не "
@@ -1068,6 +1088,29 @@ class SettingsPage(QWidget):
         self._manager.update_settings(block_ads=checked)
         self.settings_changed.emit()
 
+    def _block_ads_available(self) -> bool:
+        """Ad-block (geosite:category-ads-all) is an Xray routing feature. It
+        works in HTTP mode and in the legacy TUN engine (both run xray), but NOT
+        in the sing-box native-TUN engine (no geosite DB). Available unless the
+        active dataplane is sing-box TUN."""
+        mode = self._manager.settings.get("mode", MODE_HTTP_PROXY)
+        if mode != MODE_TUN:
+            return True  # HTTP mode always uses xray
+        engine = _controller.resolve_engine(self._manager.settings.get("tun_engine"))
+        return engine != _controller.ENGINE_SING_BOX
+
+    def _sync_block_ads_for_engine(self) -> None:
+        """Enable/disable the ad-block checkbox + its 'legacy only' note to
+        match where ad-block can actually run. NEVER mutates the stored
+        block_ads setting — disabling is purely visual, so switching back to
+        legacy/HTTP restores the user's choice intact."""
+        available = self._block_ads_available()
+        # setEnabled() doesn't emit toggled(), so the stored block_ads value is
+        # untouched — the checkbox keeps its checked state, just greyed out.
+        self.block_ads_check.setEnabled(available)
+        if hasattr(self, "_block_ads_engine_note"):
+            self._block_ads_engine_note.setVisible(not available)
+
     def _on_route_ru_direct_changed(self, checked: bool) -> None:
         self._manager.update_settings(route_ru_direct=checked)
         self.settings_changed.emit()
@@ -1161,6 +1204,8 @@ class SettingsPage(QWidget):
         key = self.engine_combo.currentData()
         if key:
             self._manager.update_settings(tun_engine=str(key))
+            # Ad-block availability depends on the engine — refresh its control.
+            self._sync_block_ads_for_engine()
             self.settings_changed.emit()
 
     def _on_theme_changed(self, _index: int) -> None:
@@ -1222,6 +1267,8 @@ class SettingsPage(QWidget):
         mode = MODE_TUN if self.radio_tun.isChecked() else MODE_HTTP_PROXY
         self._manager.update_settings(mode=mode)
         self._refresh_admin_row()
+        # Ad-block works in HTTP mode (xray) but not in sing-box TUN — re-sync.
+        self._sync_block_ads_for_engine()
         self.settings_changed.emit()
 
     def _refresh_admin_row(self) -> None:

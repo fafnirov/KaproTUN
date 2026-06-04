@@ -119,14 +119,21 @@ That's standard for Python apps and we don't try to obfuscate it.
 ## DNS leak protection
 
 When TUN mode is active, all traffic is routed through the tunnel by
-default. We add explicit bypass routes for:
+default, and **DNS leak protection** decides where name resolution goes. The
+mechanism differs by TUN engine, but the user-visible contract is the same:
+with leak-protection ON, queries ride the tunnel (the ISP/provider can't see
+them); with it OFF, they go direct (ISP-visible) — an explicit opt-out.
 
-1. **Public DNS resolvers** (Cloudflare 1.1.1.1, Google 8.8.8.8,
-   Yandex 77.88.8.8, Quad9 9.9.9.9) — these go out via your real
-   interface so the VPN provider doesn't see your DNS queries.
-2. **UDP/53 and TCP/53 in general** — xray routing rules force any
-   DNS-port traffic to direct outbound even if some app uses a
-   resolver we don't have hardcoded.
+- **sing-box (default engine).** A route rule hijacks all `:53` traffic
+  (`action: hijack-dns`) to sing-box's own DNS module. With leak-protection
+  ON the upstream resolver is reached **through the proxy** (`detour: proxy`);
+  with it OFF it's reached directly. Private / LAN / Docker ranges are pinned
+  to `direct`, so local resolvers and devices keep working.
+- **legacy (Xray + tun2socks).** xray routing rules force any DNS-port
+  traffic (UDP/53, TCP/53) to the appropriate outbound, plus explicit kernel
+  bypass routes for public resolvers (Cloudflare 1.1.1.1, Google 8.8.8.8,
+  Yandex 77.88.8.8, Quad9 9.9.9.9) so they leave via the real interface when
+  leak protection is off.
 
 For HTTP-proxy mode, DNS is handled by your system resolver as
 normal — only HTTP/HTTPS traffic is tunneled.
@@ -144,7 +151,10 @@ you're in:
   UI labels the mode "только браузер" and says so at the toggle.
 - **TUN mode (needs admin / sudo).** Creates a system TUN device and routes
   the whole machine's IPv4 through the tunnel — every app, like a traditional
-  VPN. Pick this for full-system protection.
+  VPN. Pick this for full-system protection. The default engine is **sing-box
+  native TUN** (one process owns the TUN, no `127.0.0.1:2081` SOCKS bridge);
+  a **legacy Xray + tun2socks** engine is a manual fallback. Either way the
+  whole-system routing + leak protection above applies.
 
 The IPv6- and WebRTC-leak blocks are armed in **both** modes — a browser in
 HTTP mode can otherwise leak the real address over native IPv6 or WebRTC STUN.

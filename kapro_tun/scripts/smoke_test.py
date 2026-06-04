@@ -53,6 +53,50 @@ from typing import Callable
 
 
 # ---------------------------------------------------------------------------
+# Global test sandbox — keep the suite from polluting the REAL app-data dir.
+# Tests construct ConnectionManagers / MainWindows, write runtime configs, and
+# emit app_log lines; without this they'd append to the user's real
+# %LOCALAPPDATA%/KaproTUN/app.log (and settings/configs/runtime configs). We
+# redirect paths.app_data_dir at a throwaway temp dir, but keep the BINARY
+# lookup dirs (sing-box, tun, xray, hysteria) pointing at the real install so
+# the real `sing-box check` test can still find the downloaded binary + WinTUN.
+# Per-test monkeypatches of app_data_dir/app_log_file/settings_file nest fine
+# under this (they save+restore around it).
+# ---------------------------------------------------------------------------
+import atexit as _sbx_atexit
+import shutil as _sbx_shutil
+import tempfile as _sbx_tempfile
+from pathlib import Path as _SbxPath
+
+from kapro_tun.core import paths as _sbx_paths
+from kapro_tun.core import app_log as _sbx_app_log
+
+# Capture the REAL app.log path + size BEFORE redirecting — a regression test
+# below proves the suite never appended to it.
+_REAL_APP_LOG = _sbx_paths.app_log_file()
+try:
+    _REAL_APP_LOG_SIZE_BEFORE = _REAL_APP_LOG.stat().st_size
+except OSError:
+    _REAL_APP_LOG_SIZE_BEFORE = 0
+
+# Real binary dirs (path-only, no mkdir) captured before the redirect.
+_REAL_BASE = _sbx_paths.app_data_dir()
+_REAL_SINGBOX_DIR = _REAL_BASE / "sing-box"
+_REAL_TUN_DIR = _REAL_BASE / "tun"
+_REAL_XRAY_DIR = _REAL_BASE / "xray"
+_REAL_HYSTERIA_DIR = _REAL_BASE / "hysteria"
+
+_SANDBOX_DIR = _SbxPath(_sbx_tempfile.mkdtemp(prefix="kaprotun-smoke-"))
+_sbx_paths.app_data_dir = lambda: _SANDBOX_DIR
+_sbx_paths.sing_box_dir = lambda: _REAL_SINGBOX_DIR
+_sbx_paths.tun_dir = lambda: _REAL_TUN_DIR
+_sbx_paths.xray_dir = lambda: _REAL_XRAY_DIR
+_sbx_paths.hysteria_dir = lambda: _REAL_HYSTERIA_DIR
+_sbx_app_log._reset_for_test()  # reopen the rotating handler under the sandbox
+_sbx_atexit.register(lambda: _sbx_shutil.rmtree(_SANDBOX_DIR, ignore_errors=True))
+
+
+# ---------------------------------------------------------------------------
 # Synthetic share URLs — placeholder grammar, no real keys/passwords.
 # When you bump these, keep them obviously-fake (UUIDs of all-a's, etc).
 # ---------------------------------------------------------------------------
@@ -5033,6 +5077,133 @@ def _v3_singbox_watchdog_engine_aware() -> None:
             w.close(); w.deleteLater()
 
 
+def _v3_singbox_log_noise_classification() -> None:
+    # 14) sing-box logs per-connection network churn at ERROR level. Those
+    #     harmless lines must be kept OUT of the user-facing sink (still retained
+    #     in recent_logs for diagnostics), while genuine fatal/startup/config/
+    #     driver errors must always reach the user.
+    from kapro_tun.core import sing_box_process as _sbp
+    benign = [
+        "ERROR outbound/direct[direct]: An existing connection was forcibly "
+        "closed by the remote host.",
+        "ERROR dial tcp 10.0.0.5:443: i/o timeout",
+        "ERROR inbound/tun[tun-in]: connection download closed",
+        "ERROR read tcp 1.2.3.4:55000->5.6.7.8:443: connection reset by peer",
+        "WARN use of closed network connection",
+    ]
+    for line in benign:
+        if not _sbp.is_benign_noise(line):
+            raise AssertionError(f"benign network noise must be hidden: {line!r}")
+    fatal = [
+        "FATAL start service: configure tun interface: permission denied",
+        "panic: runtime error",
+        "ERROR failed to start: bind: address already in use",
+        "FATAL decode config at line 3: invalid character",
+        "ERROR wintun: failed to load driver",
+        "ERROR initialize outbound[proxy]: parse config: bad reality public_key",
+    ]
+    for line in fatal:
+        if _sbp.is_benign_noise(line):
+            raise AssertionError(f"fatal/startup error must stay visible: {line!r}")
+    # The reader keeps benign lines in recent_logs but doesn't forward them.
+    sink = []
+    p = _sbp.SingBoxProcess(on_log=sink.append)
+
+    class _FakeStdout:
+        def __init__(self, lines): self._lines = iter(lines)
+        def __iter__(self): return self._lines
+
+    class _FakeProc:
+        stdout = _FakeStdout([benign[0] + "\n", fatal[0] + "\n"])
+    p._proc = _FakeProc()
+    p._read_loop()
+    if any("forcibly closed" in s for s in sink):
+        raise AssertionError("benign line leaked to the user sink")
+    if not any("permission denied" in s for s in sink):
+        raise AssertionError("fatal line must reach the user sink")
+    recent = p.recent_logs()
+    if not any("forcibly closed" in r for r in recent):
+        raise AssertionError("benign line must still be retained in recent_logs")
+
+
+def _v3_block_ads_disabled_on_singbox() -> None:
+    # 15) Ad-block is an Xray feature; under the sing-box TUN engine the Settings
+    #     checkbox must be DISABLED (never promise blocking that won't happen)
+    #     with the 'legacy only' note shown — and the stored block_ads value must
+    #     NOT be mutated by switching engines.
+    import os as _o4
+    _o4.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from kapro_tun.core.controller import ConnectionManager
+    from kapro_tun.core import controller as _C4
+    from kapro_tun.core import storage as _st4
+    from kapro_tun.gui.main_window import SettingsPage
+    from kapro_tun.core.controller import MODE_TUN as _MT, MODE_HTTP_PROXY as _MH
+    if QApplication.instance() is None:
+        QApplication([])
+
+    def _mk(mode, engine, block_ads=True):
+        base = {**_st4.DEFAULT_SETTINGS, "mode": mode,
+                "tun_engine": engine, "block_ads": block_ads}
+        orig = _st4.load_settings
+        _st4.load_settings = lambda: dict(base)
+        try:
+            return SettingsPage(ConnectionManager(on_log=lambda _l: None))
+        finally:
+            _st4.load_settings = orig
+
+    # TUN + sing-box → disabled + note shown, but the checked state preserved.
+    # Use isHidden() (the explicit show/hide flag) — isVisible() is False for any
+    # child until the top-level window is actually shown, which never happens
+    # in the offscreen test.
+    sp = _mk(_MT, _C4.ENGINE_SING_BOX, block_ads=True)
+    if sp.block_ads_check.isEnabled():
+        raise AssertionError("ad-block must be DISABLED under sing-box TUN")
+    if sp._block_ads_engine_note.isHidden():
+        raise AssertionError("ad-block 'legacy only' note must be shown under sing-box")
+    if not sp.block_ads_check.isChecked():
+        raise AssertionError("disabling must NOT clear the stored block_ads value")
+    sp.deleteLater()
+
+    # TUN + legacy → enabled, note hidden.
+    sp = _mk(_MT, _C4.ENGINE_CLASSIC)
+    if not sp.block_ads_check.isEnabled():
+        raise AssertionError("ad-block must be enabled under legacy TUN")
+    if not sp._block_ads_engine_note.isHidden():
+        raise AssertionError("note must be hidden under legacy TUN")
+    sp.deleteLater()
+
+    # HTTP mode → enabled (xray handles ad-block) regardless of tun_engine.
+    sp = _mk(_MH, _C4.ENGINE_SING_BOX)
+    if not sp.block_ads_check.isEnabled():
+        raise AssertionError("ad-block must be enabled in HTTP mode (xray)")
+    sp.deleteLater()
+
+
+def _smoke_does_not_touch_real_app_log() -> None:
+    # 16) The whole suite must run inside the sandbox: writing to the REAL
+    #     %LOCALAPPDATA%/KaproTUN/app.log is a regression. Prove the redirect
+    #     works (sandbox got our marker) AND the real file is byte-for-byte
+    #     untouched by this run.
+    marker = "SMOKE-SANDBOX-MARKER-do-not-ship"
+    _sbx_app_log.log(marker)
+    _sbx_app_log._reset_for_test()  # close handlers → flush to disk
+    sandbox_log = _SANDBOX_DIR / "app.log"
+    sb_text = (sandbox_log.read_text(encoding="utf-8", errors="replace")
+               if sandbox_log.exists() else "")
+    if marker not in sb_text:
+        raise AssertionError("app_log did not write to the sandbox — redirect failed")
+    if _REAL_APP_LOG.exists():
+        real_text = _REAL_APP_LOG.read_text(encoding="utf-8", errors="replace")
+        if marker in real_text:
+            raise AssertionError("smoke wrote the test marker into the REAL app.log!")
+        if _REAL_APP_LOG.stat().st_size != _REAL_APP_LOG_SIZE_BEFORE:
+            raise AssertionError(
+                f"REAL app.log size changed during smoke "
+                f"({_REAL_APP_LOG_SIZE_BEFORE} → {_REAL_APP_LOG.stat().st_size}) — "
+                f"a test wrote to it outside the sandbox")
+
+
 check("migration: default engine sing-box; old settings migrate", _v3_migration_default)
 check("config: native-TUN structure + pinned server + loop killer", _v3_config_structure)
 check("config: private/LAN/Docker (172.19.2.109) bypass", _v3_private_bypass)
@@ -5051,6 +5222,14 @@ check("config: XHTTP/splithttp → UnsupportedBySingBox (no half-working TCP)",
       _v3_xhttp_unsupported)
 check("watchdog: engine-aware crash detection (no false Xray crash on sing-box)",
       _v3_singbox_watchdog_engine_aware)
+check("logs: sing-box benign net-noise hidden, fatal/startup stays visible",
+      _v3_singbox_log_noise_classification)
+check("ui: ad-block disabled under sing-box TUN, value preserved",
+      _v3_block_ads_disabled_on_singbox)
+
+# Must run LAST — proves the whole suite stayed in the sandbox and never wrote
+# to the real app.log.
+check("sandbox: smoke never writes to the real app.log", _smoke_does_not_touch_real_app_log)
 
 
 # ---------------------------------------------------------------------------

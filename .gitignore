@@ -64,3 +64,6 @@ sample_*.json
 
 # Ad-hoc emulator screenshots saved during manual testing.
 build-screen.png
+
+# Local visual-audit screenshots (manual GUI review captures) — never shipped.
+_visual_audit/

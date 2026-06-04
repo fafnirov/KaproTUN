@@ -17,6 +17,39 @@ Windows). Android-клиент живёт в отдельном репозито
 
 # Desktop (Windows + Python)
 
+## v3.0.3 — Polish перед stable: тихие логи sing-box, UX ad-block, чистые тесты, docs
+
+Косметико-стабилизационный релиз поверх sing-box-движка — дата-план не тронут,
+только шум в логах, UX и документация.
+
+- **Логи sing-box не пугают сетевым шумом.** Per-connection ошибки, которые
+  sing-box пишет уровнем ERROR, но которые безобидны («An existing connection
+  was forcibly closed», «i/o timeout» к direct/LAN, «connection download
+  closed»), больше не сыплются в Логи. Они остаются в диагностическом буфере
+  (`recent_logs`) для разбора, но в UI скрыты. Настоящие FATAL / ошибки старта /
+  конфига / драйвера / прав по-прежнему видны.
+- **Ad-block честно показывает, где он работает.** geosite-блокировка рекламы —
+  фича Xray; на движке sing-box она невозможна. Теперь в Настройках чекбокс
+  «Блокировать рекламу и трекеры» при активном sing-box TUN становится
+  неактивным с пометкой «только Legacy / HTTP», а значение настройки
+  сохраняется (переключился на legacy или в HTTP — снова работает).
+  Предупреждение больше не спамится в логи на каждом reconnect.
+- **Smoke-тесты не трогают реальный `app.log`.** Весь набор тестов теперь
+  гоняется в одноразовой sandbox-директории — раньше тесты могли дописывать
+  строки в настоящий `%LOCALAPPDATA%\KaproTUN\app.log`. Добавлен
+  regression-тест, который это гарантирует.
+- **README / SECURITY приведены к v3.** Основной TUN = sing-box (без моста
+  `127.0.0.1:2081`), legacy Xray + tun2socks = ручной fallback; kill-switch,
+  disk/binary-раскладка и DNS-leak-защита описаны по движкам; архитектурный
+  flow разделён на HTTP / TUN sing-box / TUN legacy.
+- **Чек-лист стабильного релиза** — `docs/STABLE_RELEASE.md` (smoke,
+  60–120-мин soak, проверка процессов, sleep/wake, переключение сети, 10
+  reconnect, DNS-leak, kill-switch, очистка runtime-конфигов) плюс read-only
+  `kapro_tun/scripts/collect_diagnostics.py` для снапшота состояния.
+
+Покрыто тестами (классификация логов, UX ad-block, sandbox-изоляция); прогнаны
+`compileall` и оба smoke-раннера.
+
 ## v3.0.2 — Фикс: ложный «краш Xray» в sing-box TUN + честная ошибка для XHTTP
 
 После успешного подключения через sing-box приложение ошибочно писало
