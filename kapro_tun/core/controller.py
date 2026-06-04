@@ -486,19 +486,22 @@ class ConnectionManager:
         return self.settings.get("mode", MODE_HTTP_PROXY)
 
     def tun_dns_guarded(self) -> bool:
-        """True when a live TUN session is holding the physical NIC's DNS
-        cleared — i.e. the only case where a DNS outage means a broken tunnel
-        rather than a normal app-level hiccup.
+        """True when a live TUN session owns the system's DNS path — i.e. the
+        case where a DNS outage means a broken tunnel rather than a normal
+        app-level hiccup, so the runtime watchdog should heal it.
 
-        The runtime watchdog uses this to decide whether a failed DNS probe is
-        worth healing: in HTTP mode, or with leak protection off, the physical
-        resolver is untouched and a transient lookup failure is not our problem.
+        sing-box owns the system DNS in BOTH leak modes: its TUN hijacks all
+        :53, so even with leak protection OFF a failing resolver means the
+        TUN/DNS path is broken (the v3.0.5 'files.oaiusercontent.com / Yandex
+        images hang' class) — guard it regardless of the leak setting. The
+        classic engine only clears the physical resolver under leak protection,
+        so there it stays gated on dns_leak_protection.
         """
-        return (
-            self.is_connected()
-            and self.current_mode() == MODE_TUN
-            and bool(self.settings.get("dns_leak_protection", True))
-        )
+        if not (self.is_connected() and self.current_mode() == MODE_TUN):
+            return False
+        if self.current_engine() == ENGINE_SING_BOX:
+            return True
+        return bool(self.settings.get("dns_leak_protection", True))
 
     # --- runtime memory watchdog (v2.1.6) ---------------------------------
 
@@ -1080,6 +1083,17 @@ class ConnectionManager:
                     "Откатываю. Проверь сервер/подписку, либо переключи движок "
                     "на legacy (Xray + tun2socks)."
                     + (f"\n\nДиагностика sing-box:\n{tail}" if tail else ""))
+            # Extra, NON-fatal check: resolve a couple of real CDN-style hosts
+            # (the kind that hang on a degraded TUN-DNS path — ChatGPT files /
+            # Yandex statics). The general probe above already gates rollback;
+            # this only surfaces a clear warning if the CDN path is slow/broken,
+            # without producing a false connect failure. Bounded wall-clock.
+            if not dns_health.probe(timeout=2.0, attempts=1,
+                                    hosts=("files.oaiusercontent.com", "yastatic.net")):
+                self._log("[!] Системный DNS отвечает, но CDN-домены "
+                          "(files.oaiusercontent.com / yastatic.net) резолвятся "
+                          "медленно или не отвечают — возможны зависания "
+                          "картинок/файлов. Туннель поднят.")
             # Confirmed live → switch the log filter to steady-state, so
             # ambiguous network errors become transient noise instead of alarms.
             self.sing_box_process.mark_live()

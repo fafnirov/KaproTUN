@@ -45,6 +45,34 @@ PRIVATE_CIDRS: list[str] = [
 # plain DNS sent THROUGH the tunnel, so the ISP sees only encrypted bytes.
 _SYSTEM_DNS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
 
+# Globally-restricted services that must ALWAYS ride the proxy, even with
+# route_ru_direct on. Their CDNs frequently resolve to IPs that land in
+# geoip:ru (Cloudflare / Fastly RU edge), and a geoip:ru rule would then send
+# them out the real IP — which breaks the (geo-restricted) service: ChatGPT
+# loads but files.oaiusercontent.com images hang. Matched by SNIFFED SNI (a
+# sub-resource like files.oaiusercontent.com is forced through proxy regardless
+# of its IP), so this rule must sit BEFORE any direct/bypass rule.
+_ALWAYS_PROXY_SUFFIXES = [
+    "openai.com",
+    "chatgpt.com",
+    "oaistatic.com",
+    "oaiusercontent.com",   # covers files.oaiusercontent.com, *.oaiusercontent.com
+]
+
+
+def _dns_resolver_ips(dns_option: str) -> list[str]:
+    """The plain upstream resolver IP(s) the leak-OFF DNS dials. Used to route
+    that DNS traffic straight out the physical NIC (fast, ISP-visible) instead
+    of letting it crawl through the proxy."""
+    opt = dns_options.get(dns_option)
+    ips = list(opt.plain_servers) if opt.plain_servers else list(_SYSTEM_DNS)
+    out: list[str] = []
+    for ip in ips:
+        ip = str(ip).strip()
+        if ip and ip not in out:
+            out.append(ip)
+    return out[:3]
+
 
 class UnsupportedBySingBox(Exception):
     """The parsed config uses a feature sing-box can't faithfully reproduce.
@@ -182,11 +210,31 @@ def build_config(
     rules: list[dict[str, Any]] = [
         # Sniff first so domain_suffix rules below can match TLS SNI / HTTP Host.
         {"action": "sniff"},
-        # Hijack all DNS to the dns module (replaces the old dns-out outbound).
-        {"protocol": "dns", "action": "hijack-dns"},
-        # Private / LAN / Docker / multicast — never tunnel.
-        {"ip_cidr": list(PRIVATE_CIDRS), "action": "route", "outbound": "direct"},
     ]
+    # LEAK-OFF DNS fast-path: send the upstream resolver's :53 traffic straight
+    # out the physical NIC (direct), BEFORE the DNS hijack. Without this the
+    # dns-direct server (no detour) gets routed by `final: proxy` and the lookup
+    # crawls through the proxy's UDP relay → 10-12 s system-DNS stalls (the
+    # files.oaiusercontent.com / Yandex-images hang). Placed before hijack-dns so
+    # the dns module's own upstream query can't be re-hijacked into a loop.
+    # LEAK-ON deliberately has NO such rule — DNS rides the proxy for privacy.
+    if not dns_leak_protection:
+        resolver_ips = _dns_resolver_ips(dns_option)
+        if resolver_ips:
+            rules.append({
+                "ip_cidr": [f"{ip}/32" for ip in resolver_ips],
+                "port": [53],
+                "action": "route",
+                "outbound": "direct",
+            })
+    # Hijack all OTHER DNS to the dns module (replaces the old dns-out outbound).
+    rules.append({"protocol": "dns", "action": "hijack-dns"})
+    # Private / LAN / Docker / multicast — never tunnel.
+    rules.append({"ip_cidr": list(PRIVATE_CIDRS), "action": "route", "outbound": "direct"})
+    # Always-proxy critical geo-restricted services BEFORE any direct/bypass
+    # rule, so a CDN IP in geoip:ru can't pull them out the real interface.
+    rules.append({"domain_suffix": list(_ALWAYS_PROXY_SUFFIXES),
+                  "action": "route", "outbound": "proxy"})
     cleaned_domains = sorted({d.strip().lower() for d in direct_domains if d.strip()})
     if cleaned_domains:
         rules.append({"domain_suffix": cleaned_domains, "action": "route",

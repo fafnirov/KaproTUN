@@ -5200,6 +5200,129 @@ def _v3_block_ads_warning_once() -> None:
         raise AssertionError("no ad-block notice when block_ads is off")
 
 
+def _v3_dns_and_split_routing() -> None:
+    # 18) v3.0.5 DNS + split-routing fixes for the 'ChatGPT loads but
+    #     files.oaiusercontent.com / Yandex images hang' bug:
+    #     - leak-OFF: the upstream resolver's :53 is routed DIRECT (fast,
+    #       ISP-visible) BEFORE hijack-dns — not crawled through the proxy;
+    #       the dns server carries NO forbidden detour=direct.
+    #     - leak-ON: DNS keeps detour=proxy and there is NO resolver-direct rule
+    #       (no plaintext leak).
+    #     - OpenAI/CDN domains are force-proxied BEFORE any direct/geoip:ru rule,
+    #       and never appear in a direct rule, so route_ru_direct can't pull a
+    #       CDN IP out the real interface.
+    from kapro_tun.core import sing_box_config as sb
+
+    def build(leak, ru):
+        c = sb.build_config(parsed["vless"], ["gosuslugi.ru"], server_ip="1.2.3.4",
+                            dns_leak_protection=leak, route_ru_direct=ru)
+        return c, c["route"]["rules"]
+
+    def idx(rules, pred):
+        for i, r in enumerate(rules):
+            if pred(r):
+                return i
+        return None
+
+    # --- leak-OFF ---
+    c_off, rules_off = build(False, True)
+    for s in c_off["dns"]["servers"]:
+        if s.get("detour"):
+            raise AssertionError("leak-OFF dns server must have NO detour (1.13 fatal)")
+    i_res = idx(rules_off, lambda r: r.get("outbound") == "direct"
+                and r.get("port") == [53] and isinstance(r.get("ip_cidr"), list))
+    i_hijack = idx(rules_off, lambda r: r.get("action") == "hijack-dns")
+    if i_res is None:
+        raise AssertionError("leak-OFF must route the upstream resolver :53 DIRECT")
+    if i_hijack is None or i_res >= i_hijack:
+        raise AssertionError("resolver-direct rule must come BEFORE hijack-dns")
+    upstream = c_off["dns"]["servers"][0]["server"]
+    if f"{upstream}/32" not in rules_off[i_res]["ip_cidr"]:
+        raise AssertionError("the leak-OFF upstream IP must be in the direct rule")
+
+    # --- leak-ON ---
+    c_on, rules_on = build(True, True)
+    if not any(s.get("detour") == "proxy" for s in c_on["dns"]["servers"]):
+        raise AssertionError("leak-ON dns must keep detour=proxy")
+    if any(r.get("port") == [53] and r.get("outbound") == "direct" for r in rules_on):
+        raise AssertionError("leak-ON must NOT route resolver :53 direct (privacy leak)")
+
+    # --- OpenAI/CDN force-proxy ordering, in BOTH leak modes ---
+    for leak in (False, True):
+        c, rules = build(leak, True)  # ru-direct ON = the dangerous case
+        i_oai = idx(rules, lambda r: r.get("outbound") == "proxy"
+                    and "oaiusercontent.com" in (r.get("domain_suffix") or []))
+        if i_oai is None:
+            raise AssertionError(f"OpenAI domains must be force-proxied (leak={leak})")
+        i_geoip = idx(rules, lambda r: r.get("outbound") == "direct"
+                      and isinstance(r.get("ip_cidr"), list) and len(r["ip_cidr"]) > 50)
+        i_directdom = idx(rules, lambda r: r.get("outbound") == "direct"
+                          and r.get("domain_suffix"))
+        if i_geoip is not None and i_oai >= i_geoip:
+            raise AssertionError("OpenAI-proxy rule must precede geoip:ru direct")
+        if i_directdom is not None and i_oai >= i_directdom:
+            raise AssertionError("OpenAI-proxy rule must precede direct-domains")
+        for r in rules:
+            if r.get("outbound") == "direct" and r.get("domain_suffix"):
+                for d in r["domain_suffix"]:
+                    if any(x in d for x in ("oaiusercontent", "openai", "chatgpt", "oaistatic")):
+                        raise AssertionError(f"OpenAI domain in a DIRECT rule: {d}")
+
+
+def _v3_singbox_dns_watchdog_guarded() -> None:
+    # 19) The runtime DNS watchdog must guard sing-box in BOTH leak modes (the
+    #     bug: tun_dns_guarded() was gated on dns_leak_protection, so sing-box
+    #     leak-off DNS degradation went unnoticed). Classic leak-off stays
+    #     unguarded (its physical resolver is untouched). The watchdog requires
+    #     SUSTAINED failure (no single-probe reconnect loop).
+    from kapro_tun.core import controller as _C
+    from kapro_tun.core.controller import ConnectionManager
+    cm = ConnectionManager(on_log=None)
+    cm.is_connected = lambda: True
+
+    def guarded(mode, engine, leak):
+        cm.settings["mode"] = mode
+        cm.settings["tun_engine"] = engine
+        cm.settings["dns_leak_protection"] = leak
+        cm._active_engine = engine if mode == "tun" else None
+        return cm.tun_dns_guarded()
+
+    if not guarded("tun", _C.ENGINE_SING_BOX, False):
+        raise AssertionError("sing-box leak-OFF must be DNS-guarded (the bug)")
+    if not guarded("tun", _C.ENGINE_SING_BOX, True):
+        raise AssertionError("sing-box leak-ON must be DNS-guarded")
+    if guarded("http_proxy", _C.ENGINE_SING_BOX, True):
+        raise AssertionError("HTTP mode must never be DNS-guarded")
+    if guarded("tun", _C.ENGINE_CLASSIC, False):
+        raise AssertionError("classic leak-OFF stays unguarded (physical DNS intact)")
+    if not guarded("tun", _C.ENGINE_CLASSIC, True):
+        raise AssertionError("classic leak-ON must be DNS-guarded")
+
+    # Debounce: the watchdog needs >=2 consecutive failed probes before healing.
+    import os as _ow
+    _ow.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_tun.gui.main_window import _DnsWatchdog
+    wd = _DnsWatchdog(lambda: True)
+    if getattr(wd, "_fail_threshold", 0) < 2:
+        raise AssertionError("DNS watchdog must require sustained failure (>=2 probes)")
+
+
+def _v3_disconnect_restores_dns() -> None:
+    # 20) A clean disconnect (and the connect-time rollback) must stop sing-box —
+    #     sing-box's auto_route then restores the system DNS/routes itself.
+    import inspect as _ins
+    from kapro_tun.core import controller as _C
+    dsrc = _ins.getsource(_C.ConnectionManager.disconnect)
+    if "sing_box_process.stop" not in dsrc:
+        raise AssertionError("disconnect() must stop the sing-box process")
+    rsrc = _ins.getsource(_C.ConnectionManager._connect_tun_sing_box)
+    if "sing_box_process.stop" not in rsrc or "remove_runtime_configs" not in rsrc:
+        raise AssertionError("sing-box rollback must stop the process + wipe configs")
+
+
 def _v3_block_ads_disabled_on_singbox() -> None:
     # 15) Ad-block is an Xray feature; under the sing-box TUN engine the Settings
     #     checkbox must be DISABLED (never promise blocking that won't happen)
@@ -5320,6 +5443,12 @@ check("ui: ad-block disabled under sing-box TUN, value preserved",
       _v3_block_ads_disabled_on_singbox)
 check("logs: block_ads notice logs once per launch, not per reconnect",
       _v3_block_ads_warning_once)
+check("dns/routing: leak-off resolver direct, leak-on via proxy, OpenAI force-proxy",
+      _v3_dns_and_split_routing)
+check("watchdog: sing-box DNS guarded both leak modes, sustained-failure debounce",
+      _v3_singbox_dns_watchdog_guarded)
+check("disconnect/rollback stops sing-box → system DNS/routes restored",
+      _v3_disconnect_restores_dns)
 
 # Must run LAST — proves the whole suite stayed in the sandbox and never wrote
 # to the real app.log.
