@@ -5014,10 +5014,12 @@ def _v3_xhttp_rawurl_fallback() -> None:
 
 
 def _v3_orphan_tun_cleanup() -> None:
-    # v3.0.6: both engines name the TUN "KaproTun", so a leftover sing-box /
-    # tun2socks orphan blocks the next start with "...file already exists". The
-    # startup orphan-killer must include sing-box, and the TUN connect path must
-    # proactively free the device before (re)creating it.
+    # v3.0.6/v3.0.7: both engines name the TUN "KaproTun", so a leftover
+    # sing-box / tun2socks orphan blocks the next start with "...already exists".
+    # The startup orphan-killer must include sing-box. The TUN free MUST be
+    # REACTIVE (only on a real collision in _connect_tun_sing_box), NOT a proactive
+    # global kill in _connect_tun — else a second/child instance could kill the
+    # first's live sing-box and start a reconnect storm.
     import inspect as _ins
     from kapro_tun import main as _main
     ksrc = _ins.getsource(_main._kill_orphan_helpers)
@@ -5029,9 +5031,13 @@ def _v3_orphan_tun_cleanup() -> None:
         raise AssertionError("_free_tun_device must kill orphans on both OSes")
     if "sing-box" not in fsrc or "tun2socks" not in fsrc:
         raise AssertionError("_free_tun_device must target BOTH TUN engines")
+    # REACTIVE, not proactive: _connect_tun must NOT blind-kill on every connect.
     dsrc = _ins.getsource(_C.ConnectionManager._connect_tun)
-    if "_free_tun_device" not in dsrc:
-        raise AssertionError("_connect_tun must free the TUN device before dispatch")
+    if "_free_tun_device" in dsrc:
+        raise AssertionError("_connect_tun must NOT proactively kill (sibling-kill risk)")
+    sbsrc = _ins.getsource(_C.ConnectionManager._connect_tun_sing_box)
+    if "_free_tun_device" not in sbsrc or "already exists" not in sbsrc.lower():
+        raise AssertionError("_connect_tun_sing_box must free the TUN reactively on collision")
     # Safety: it must not kill our own live helpers.
     if "is_connected()" not in fsrc:
         raise AssertionError("_free_tun_device must guard on is_connected()")
@@ -5290,27 +5296,55 @@ def _v3_dns_and_split_routing() -> None:
         raise AssertionError("leak-ON dns must keep detour=proxy")
     if any(r.get("port") == [53] and r.get("outbound") == "direct" for r in rules_on):
         raise AssertionError("leak-ON must NOT route resolver :53 direct (privacy leak)")
+    # v3.0.7: leak-ON DNS MUST be DoH (type=https, TCP-relayed on :443), NOT plain
+    # UDP. Most VLESS/REALITY servers don't relay UDP, so type=udp+detour=proxy made
+    # every CDN/YouTube/OpenAI lookup time out ~7s through the tunnel. The proxied
+    # server must be type=https and must NOT be type=udp.
+    proxied = [s for s in c_on["dns"]["servers"] if s.get("detour") == "proxy"]
+    if not any(s.get("type") == "https" for s in proxied):
+        raise AssertionError("leak-ON DNS must use DoH (type=https) — UDP-over-proxy times out")
+    if any(s.get("type") == "udp" for s in proxied):
+        raise AssertionError("leak-ON DNS must NOT be plain UDP through the proxy (the 7s-timeout bug)")
 
-    # --- OpenAI/CDN force-proxy ordering, in BOTH leak modes ---
+    # --- OpenAI/CDN/YouTube force-proxy ordering, in BOTH leak modes ---
+    # v3.0.7 adds YouTube/Google-CDN suffixes (youtube.com, googlevideo.com,
+    # ytimg.com, youtubei.googleapis.com, …) so route_ru_direct/geoip:ru can't pull
+    # a CDN IP out the real interface. They must precede every direct/geoip rule and
+    # never appear in a DIRECT rule.
+    FORCED = ("oaiusercontent.com", "youtube.com", "googlevideo.com", "ytimg.com",
+              "youtubei.googleapis.com")
+    LEAK_SAFE_SUBSTR = ("oaiusercontent", "openai", "chatgpt", "oaistatic",
+                        "youtube", "googlevideo", "ytimg", "youtu.be", "ggpht")
     for leak in (False, True):
         c, rules = build(leak, True)  # ru-direct ON = the dangerous case
+        # Collect every forced-proxy suffix into one set for membership tests.
+        proxy_suffixes = set()
+        for r in rules:
+            if r.get("outbound") == "proxy":
+                proxy_suffixes.update(r.get("domain_suffix") or [])
+        for dom in FORCED:
+            if dom not in proxy_suffixes:
+                raise AssertionError(f"{dom} must be force-proxied (leak={leak})")
         i_oai = idx(rules, lambda r: r.get("outbound") == "proxy"
                     and "oaiusercontent.com" in (r.get("domain_suffix") or []))
-        if i_oai is None:
-            raise AssertionError(f"OpenAI domains must be force-proxied (leak={leak})")
+        i_yt = idx(rules, lambda r: r.get("outbound") == "proxy"
+                   and "youtube.com" in (r.get("domain_suffix") or []))
+        if i_oai is None or i_yt is None:
+            raise AssertionError(f"OpenAI+YouTube domains must be force-proxied (leak={leak})")
+        i_forced = max(i_oai, i_yt)
         i_geoip = idx(rules, lambda r: r.get("outbound") == "direct"
                       and isinstance(r.get("ip_cidr"), list) and len(r["ip_cidr"]) > 50)
         i_directdom = idx(rules, lambda r: r.get("outbound") == "direct"
                           and r.get("domain_suffix"))
-        if i_geoip is not None and i_oai >= i_geoip:
-            raise AssertionError("OpenAI-proxy rule must precede geoip:ru direct")
-        if i_directdom is not None and i_oai >= i_directdom:
-            raise AssertionError("OpenAI-proxy rule must precede direct-domains")
+        if i_geoip is not None and i_forced >= i_geoip:
+            raise AssertionError("forced-proxy rules must precede geoip:ru direct")
+        if i_directdom is not None and i_forced >= i_directdom:
+            raise AssertionError("forced-proxy rules must precede direct-domains")
         for r in rules:
             if r.get("outbound") == "direct" and r.get("domain_suffix"):
                 for d in r["domain_suffix"]:
-                    if any(x in d for x in ("oaiusercontent", "openai", "chatgpt", "oaistatic")):
-                        raise AssertionError(f"OpenAI domain in a DIRECT rule: {d}")
+                    if any(x in d for x in LEAK_SAFE_SUBSTR):
+                        raise AssertionError(f"forced-proxy domain in a DIRECT rule: {d}")
 
 
 def _v3_singbox_dns_watchdog_guarded() -> None:
@@ -5365,6 +5399,84 @@ def _v3_disconnect_restores_dns() -> None:
     rsrc = _ins.getsource(_C.ConnectionManager._connect_tun_sing_box)
     if "sing_box_process.stop" not in rsrc or "remove_runtime_configs" not in rsrc:
         raise AssertionError("sing-box rollback must stop the process + wipe configs")
+
+
+def _v3_cdn_dns_gate_is_honest() -> None:
+    # 21) v3.0.7 health-check honesty. The connect path must HARD-gate on CDN /
+    #     YouTube / OpenAI DNS resolving through the sing-box TUN (10.255.0.3). If
+    #     those hosts don't answer, it MUST roll back — it must NOT log
+    #     "DNS … проходят" / mark_live(). So in source order the CDN-probe
+    #     failure-raise must come BEFORE both mark_live() and the success log.
+    import inspect as _ins
+    from kapro_tun.core import controller as _C
+    src = _ins.getsource(_C.ConnectionManager._connect_tun_sing_box)
+    # The CDN gate must probe the SAME OS resolver for real CDN hosts.
+    if "cdn_hosts" not in src:
+        raise AssertionError("connect must probe real CDN/YouTube/OpenAI hosts (cdn_hosts)")
+    for host in ("www.youtube.com", "files.oaiusercontent.com", "yastatic.net"):
+        if host not in src:
+            raise AssertionError(f"CDN gate must include {host}")
+    i_probe = src.find("hosts=cdn_hosts")
+    if i_probe < 0:
+        raise AssertionError("CDN gate must pass cdn_hosts to the DNS probe")
+    # Anchor on the ACTUAL success signal — the mark_live() CALL and the success
+    # log word "активен" — not on "проходят", which also appears in a comment
+    # ABOVE the gate (that false-positive is exactly what this test guards).
+    i_live = src.find("self.sing_box_process.mark_live()")
+    i_ok = src.find("активен")
+    if i_live < 0 or i_ok < 0:
+        raise AssertionError("connect must mark_live() + log 'активен' on success (sanity)")
+    # Ordering invariant: the CDN probe sits BEFORE the success signal/log, so a
+    # CDN-DNS failure raises (rolls back) before any "connected/DNS ok" claim.
+    if not (i_probe < i_live and i_probe < i_ok):
+        raise AssertionError("CDN-DNS gate must precede mark_live()/success log (no contradiction)")
+    # The CDN failure branch must RAISE (rollback), not just warn/log.
+    tail = src[i_probe:i_live]
+    if "raise ConnectionError" not in tail:
+        raise AssertionError("CDN-DNS failure must raise ConnectionError (rollback), not warn")
+
+
+def _v3_process_crash_diagnostics() -> None:
+    # 22) v3.0.6/v3.0.7 process_crash forensics. A real engine exit must log a
+    #     single redacted diagnostic carrying pid + returncode + uptime + the last
+    #     raw log lines — so app.log explains WHY it died, not just
+    #     "reason=process_crash". Secrets in the tail must be redacted.
+    import os as _o
+    _o.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_tun.gui.main_window import MainWindow
+
+    class _FakeProc:
+        def last_pid(self): return 43217
+        def returncode(self): return 1
+        def uptime(self): return 12.7
+        def recent_logs(self):
+            # include a secret-looking token to prove redaction runs on the tail
+            return ["FATAL start: bad config",
+                    "uuid: 11111111-2222-3333-4444-555555555555 leaked"]
+
+    # _crash_diagnostics never touches `self`, so call the raw function with a
+    # dummy receiver (constructing a real QMainWindow needs the full app).
+    diag = MainWindow._crash_diagnostics(object(), _FakeProc(), "sing-box")
+    for needle in ("engine=sing-box", "pid=43217", "returncode=1",
+                   "uptime=12s", "last_logs=["):
+        if needle not in diag:
+            raise AssertionError(f"process_crash diag missing {needle!r}: {diag}")
+    if "11111111-2222-3333-4444-555555555555" in diag:
+        raise AssertionError("process_crash diag must REDACT secrets in the log tail")
+    if "\n" in diag:
+        raise AssertionError("process_crash diag must be a single line (app.log friendly)")
+
+    # And the crash branch must log it ONCE per episode (debounce flag), gated so a
+    # controlled stop / connect rollback / user reconnect doesn't double-count.
+    import inspect as _ins
+    rsrc = _ins.getsource(MainWindow._refresh_home)
+    if "_crash_diag_logged" not in rsrc or "[process_crash]" not in rsrc:
+        raise AssertionError("crash branch must log [process_crash] once per episode")
+    if "self._connecting" not in rsrc:
+        raise AssertionError("crash detection must be gated on _connecting (no rollback false-crash)")
 
 
 def _v3_block_ads_disabled_on_singbox() -> None:
@@ -5497,6 +5609,10 @@ check("watchdog: sing-box DNS guarded both leak modes, sustained-failure debounc
       _v3_singbox_dns_watchdog_guarded)
 check("disconnect/rollback stops sing-box → system DNS/routes restored",
       _v3_disconnect_restores_dns)
+check("health: CDN/YouTube/OpenAI DNS gate rolls back, never logs false 'DNS проходят'",
+      _v3_cdn_dns_gate_is_honest)
+check("diagnostics: process_crash logs pid/returncode/uptime/redacted-tail once",
+      _v3_process_crash_diagnostics)
 
 # Must run LAST — proves the whole suite stayed in the sandbox and never wrote
 # to the real app.log.

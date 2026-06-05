@@ -14,6 +14,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from collections import deque
 from typing import Callable, Optional
 
@@ -131,6 +132,20 @@ class SingBoxProcess:
         # confirms the tunnel is live (mark_live()). Controls whether ambiguous
         # network errors are surfaced (startup) or treated as transient noise.
         self._live = False
+        # For crash diagnostics: when the process was started + its last pid,
+        # so a process_crash line can report uptime + pid even after exit.
+        self._started_at = 0.0
+        self._last_pid: Optional[int] = None
+
+    def uptime(self) -> float:
+        """Seconds since the current/last sing-box process was started (0 if
+        never started)."""
+        return max(0.0, time.time() - self._started_at) if self._started_at else 0.0
+
+    def last_pid(self) -> Optional[int]:
+        """The OS pid of the current OR most-recently-exited process (survives
+        exit, unlike pid()), for crash diagnostics."""
+        return self._last_pid
 
     def mark_live(self) -> None:
         """Called by the controller once the connect-time liveness check passes.
@@ -166,6 +181,8 @@ class SingBoxProcess:
             creationflags=CREATE_NO_WINDOW,
             cwd=str(cwd),
         )
+        self._started_at = time.time()
+        self._last_pid = self._proc.pid
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 

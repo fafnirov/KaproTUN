@@ -1590,6 +1590,7 @@ class MainWindow(QMainWindow):
         self._minute_window_start = 0
         self._update_worker: Optional[_UpdateCheckWorker] = None
         self._crash_notified = False  # avoid spamming the same kill-switch toast
+        self._crash_diag_logged = False  # one full [process_crash] diag per episode
         # v2.0.1: one-shot flags so a SILENT helper-process death (tun2socks
         # engine / hysteria transport dies while xray itself stays alive ->
         # "connected but no internet") is logged once, not every poll tick.
@@ -1976,6 +1977,38 @@ class MainWindow(QMainWindow):
         """Human label for the active engine's core process, for crash logs."""
         return "sing-box" if self._engine_is_sing_box() else "Xray-core"
 
+    def _crash_diagnostics(self, proc, core_name: str) -> str:
+        """Build a redacted, single-line process_crash diagnostic: old pid,
+        returncode, uptime, and the last ~10 raw log lines of the dead process —
+        so app.log shows WHY it died, not just 'process_crash'. Best-effort:
+        every field is optional and never raises (it runs on the crash path)."""
+        from ..core import app_log as _al
+        parts = [f"engine={core_name}"]
+        try:
+            pid = (proc.last_pid() if hasattr(proc, "last_pid")
+                   else getattr(getattr(proc, "_proc", None), "pid", None))
+            if pid:
+                parts.append(f"pid={pid}")
+        except Exception:
+            pass
+        try:
+            parts.append(f"returncode={proc.returncode()}")
+        except Exception:
+            pass
+        try:
+            if hasattr(proc, "uptime"):
+                parts.append(f"uptime={int(proc.uptime())}s")
+        except Exception:
+            pass
+        try:
+            logs = proc.recent_logs()[-10:] if hasattr(proc, "recent_logs") else []
+            if logs:
+                tail = " | ".join(_al.redact(str(l)) for l in logs)
+                parts.append(f"last_logs=[{tail}]")
+        except Exception:
+            pass
+        return "; ".join(parts)
+
     def _refresh_home(self) -> None:
         # Don't fight the connect worker for the button state — the
         # "connecting" pulse keeps animating until the worker finishes
@@ -1995,6 +2028,18 @@ class MainWindow(QMainWindow):
             kill_switch = bool(self.manager.settings.get("kill_switch", False))
             mode_is_tun = self.manager.current_mode() == MODE_TUN
             rc = primary.returncode()
+
+            # Log a FULL diagnostic (old pid, returncode, uptime, last 10 raw
+            # log lines, redacted) exactly once per crash episode, so app.log
+            # explains WHY the engine died — not just "reason=process_crash".
+            # _crash_diag_logged resets in the healthy branch below.
+            if not getattr(self, "_crash_diag_logged", False):
+                self._crash_diag_logged = True
+                try:
+                    app_log.log("[process_crash] "
+                                + self._crash_diagnostics(primary, core_name))
+                except Exception:
+                    pass
 
             if kill_switch and mode_is_tun and self.manager.tun_process.is_running():
                 # Kill-switch holds: leave TUN up so foreign traffic gets
@@ -2066,8 +2111,9 @@ class MainWindow(QMainWindow):
                     self.manager.disconnect()
                     self._connected_at = 0.0
         else:
-            # Reset crash-notified flag when state is healthy
+            # Reset crash-notified flags when state is healthy
             self._crash_notified = False
+            self._crash_diag_logged = False
             # Successful steady-state — reset the auto-reconnect counter
             # so the NEXT crash gets a fresh 3-attempt budget instead of
             # immediately giving up.

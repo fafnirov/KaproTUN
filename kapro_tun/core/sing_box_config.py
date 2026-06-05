@@ -53,10 +53,23 @@ _SYSTEM_DNS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
 # sub-resource like files.oaiusercontent.com is forced through proxy regardless
 # of its IP), so this rule must sit BEFORE any direct/bypass rule.
 _ALWAYS_PROXY_SUFFIXES = [
+    # OpenAI / ChatGPT
     "openai.com",
     "chatgpt.com",
     "oaistatic.com",
     "oaiusercontent.com",   # covers files.oaiusercontent.com, *.oaiusercontent.com
+    # YouTube + its CDNs — these often land in geoip:ru (Google Global Cache /
+    # GGC nodes hosted by RU ISPs), which would otherwise pull them out the real
+    # IP and either geo-restrict or kill throughput. The user expects YouTube
+    # "through the VPN", so force it. NOTE: we list the YouTube-specific
+    # googleapis host only (youtubei.googleapis.com), NOT bare googleapis.com —
+    # that would drag every Google API + RU services that legitimately use it.
+    "youtube.com",
+    "youtu.be",
+    "googlevideo.com",      # *.googlevideo.com — the actual video byte streams
+    "ytimg.com",            # i.ytimg.com thumbnails
+    "ggpht.com",            # YouTube avatars/thumbs
+    "youtubei.googleapis.com",
 ]
 
 
@@ -149,19 +162,21 @@ def ensure_transport_supported(proxy) -> None:
 
 def _dns_block(dns_option: str, dns_leak_protection: bool) -> dict[str, Any]:
     opt = dns_options.get(dns_option)
-    # Plain-DNS upstream IP (no DoH → no TLS-in-tunnel stalls; matches the
-    # classic v1.19.1 lesson). Named option uses its plain server; system uses
-    # the diverse default.
     upstream = opt.plain_servers[0] if opt.plain_servers else _SYSTEM_DNS[0]
-    # sing-box 1.12+ DNS server format: typed servers ({"type":"udp","server":
-    # "1.1.1.1"}). The legacy {"address": "1.1.1.1"} grammar is deprecated in
-    # 1.12 and FATAL in 1.13 — we must emit the new shape so current binaries
-    # accept the config.
+    # sing-box 1.12+ DNS server format: typed servers. Legacy {"address": ...}
+    # is FATAL in 1.13.
     if dns_leak_protection:
-        # DNS rides the tunnel (detour=proxy) → ISP can't see queries.
+        # DNS rides the tunnel (detour=proxy) so the ISP can't see queries.
+        # CRITICAL: use DoH (type=https, port 443), NOT plain UDP. Most VLESS/
+        # REALITY proxy servers don't relay UDP (or relay it poorly), so DNS-
+        # over-UDP-through-proxy times out ~7 s — the YouTube/CDN/OpenAI "DNS
+        # hang" (v3.0.7). DoH is TCP-based (relayed as reliably as normal
+        # browsing), encrypted (the VPN server can't snoop the queries either),
+        # and on port 443, which no server blocks. server is an IP so there's no
+        # bootstrap-resolution chicken-and-egg.
         return {
             "servers": [
-                {"type": "udp", "tag": "dns-remote", "server": upstream,
+                {"type": "https", "tag": "dns-remote", "server": upstream,
                  "detour": "proxy"},
             ],
             "final": "dns-remote",

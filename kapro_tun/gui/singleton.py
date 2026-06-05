@@ -11,6 +11,21 @@ Pattern: try to connect to a named pipe that the primary instance owns.
 If the connection succeeds, we're the second instance — write "show" so
 the primary brings its window forward, then exit. If the connection
 fails, no primary exists; we become it by listening on the same name.
+
+NOTE — two "KaproTUN.exe" in Task Manager is NORMAL, not a second instance.
+The shipped build is a PyInstaller *onefile* exe: launching it starts a
+bootloader process (parent) that unpacks the bundle to a temp dir and spawns
+the real application as a child — same image name, so Task Manager shows two
+`KaproTUN.exe` (and an admin/UAC elevation can add its own consent broker).
+That is ONE logical instance: only the child runs the Qt event loop, so only
+the child ever calls acquire() and owns the QLocalServer lock. The two engine
+controllers can never both manage one sing-box/TUN, because the bootloader
+parent runs no Python of ours. A genuine second launch (double-clicked
+shortcut, autostart racing a manual start) is what acquire() catches and turns
+away — and crucially it does so via this named-pipe handshake, NOT by killing
+processes, so a second launch can never tear down the first instance's live
+sing-box (orphan cleanup in main.py only runs AFTER we've proven we're the
+sole instance).
 """
 from __future__ import annotations
 

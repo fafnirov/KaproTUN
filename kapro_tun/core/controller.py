@@ -674,12 +674,17 @@ class ConnectionManager:
     def _connect_tun(self, config: ProxyConfig, direct_domains: list[str]) -> None:
         """Dispatch to the selected TUN engine (v3.0.0). sing-box is the
         default; classic xray+tun2socks is the legacy fallback. An unsupported
-        config raises a clear error suggesting legacy — NEVER a silent switch."""
-        # A crashed/force-closed prior run can leave an orphan sing-box /
-        # tun2socks still holding the shared "KaproTun" adapter; free it before
-        # we (re)create the TUN, else the start dies with
-        # "...file already exists" (v3.0.6).
-        self._free_tun_device()
+        config raises a clear error suggesting legacy — NEVER a silent switch.
+
+        NOTE: we deliberately do NOT proactively kill orphan TUN helpers here.
+        The startup orphan-killer (main._kill_orphan_helpers, runs once when we
+        are the only instance per the single-instance guard) handles
+        cross-session leftovers; a same-session collision is handled REACTIVELY
+        in _connect_tun_sing_box (kill + retry only when the start actually fails
+        with "...already exists"). A blind global kill on every connect could,
+        if two instances ever co-existed, let the second kill the first's live
+        sing-box and start a reconnect storm — exactly what we must avoid (v3.0.7).
+        """
         engine = resolve_engine(self.settings.get("tun_engine"))
         if engine == ENGINE_SING_BOX:
             try:
@@ -1104,26 +1109,38 @@ class ConnectionManager:
             raise ConnectionError(f"Не удалось запустить sing-box: {e}") from e
 
         try:
-            # Did it die immediately (bad config / driver)?
+            # Did it die immediately (bad config / driver / TUN collision)?
             time.sleep(1.5)
             if not self.sing_box_process.is_running():
                 tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
                 low = tail.lower()
-                if ("already exists" in low or "configure tun" in low
-                        or "create tun" in low):
-                    # Should be prevented by _free_tun_device(), but if the
-                    # adapter is still held (slow removal / another instance),
-                    # tell the user how to recover instead of a raw FATAL.
+                tun_busy = ("already exists" in low or "configure tun" in low
+                            or "create tun" in low)
+                if tun_busy:
+                    # An orphan helper is still holding "KaproTun". Free it
+                    # REACTIVELY (only here, on a real collision — not on every
+                    # connect) and retry ONCE.
+                    self._log("[*] TUN «KaproTun» занят орфаном — освобождаю и "
+                              "пробую ещё раз…")
+                    self._free_tun_device()
+                    try:
+                        self.sing_box_process.start(cfg_path)
+                    except Exception as e:
+                        raise ConnectionError(
+                            f"Не удалось перезапустить sing-box: {e}") from e
+                    time.sleep(1.5)
+                if not self.sing_box_process.is_running():
+                    tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
+                    if tun_busy:
+                        raise ConnectionError(
+                            "sing-box не смог создать TUN-устройство «KaproTun» — "
+                            "оно занято другим процессом. Полностью закрой "
+                            "KaproTUN и запусти снова (при старте оно вычищает "
+                            "орфанов), затем подключись."
+                            + (f"\n\nЛог sing-box:\n{tail}" if tail else ""))
                     raise ConnectionError(
-                        "sing-box не смог создать TUN-устройство «KaproTun» — "
-                        "оно занято другим процессом (орфан прошлого запуска или "
-                        "ещё живой legacy-туннель). Полностью закрой KaproTUN и "
-                        "запусти снова — при старте оно вычищает орфанные "
-                        "процессы — затем подключись."
-                        + (f"\n\nЛог sing-box:\n{tail}" if tail else ""))
-                raise ConnectionError(
-                    "sing-box завершился сразу после старта"
-                    + (f":\n{tail}" if tail else "."))
+                        "sing-box завершился сразу после старта"
+                        + (f":\n{tail}" if tail else "."))
             # Liveness: OS resolution now travels through the sing-box TUN →
             # its tunnelled resolver. If it answers, the tunnel carries traffic.
             self._log("[*] Проверяю, что туннель sing-box живой…")
@@ -1139,21 +1156,28 @@ class ConnectionManager:
                     "Откатываю. Проверь сервер/подписку, либо переключи движок "
                     "на legacy (Xray + tun2socks)."
                     + (f"\n\nДиагностика sing-box:\n{tail}" if tail else ""))
-            # Extra, NON-fatal check: resolve a couple of real CDN-style hosts
-            # (the kind that hang on a degraded TUN-DNS path — ChatGPT files /
-            # Yandex statics). The general probe above already gates rollback;
-            # this only surfaces a clear warning if the CDN path is slow/broken,
-            # without producing a false connect failure. Bounded wall-clock.
-            if not dns_health.probe(timeout=2.0, attempts=1,
-                                    hosts=("files.oaiusercontent.com", "yastatic.net")):
-                self._log("[!] Системный DNS отвечает, но CDN-домены "
-                          "(files.oaiusercontent.com / yastatic.net) резолвятся "
-                          "медленно или не отвечают — возможны зависания "
-                          "картинок/файлов. Туннель поднят.")
-            # Confirmed live → switch the log filter to steady-state, so
+            # REAL gate (not a warning): resolve actual CDN / YouTube / OpenAI
+            # hosts through the SAME system resolver (10.255.0.3 = the sing-box
+            # TUN). These are the domains that hang when DNS-over-UDP-through-
+            # proxy times out — the v3.0.7 bug. If they don't answer in a
+            # generous bounded window, the tunnel's DNS is broken and the session
+            # is effectively useless, so roll back HONESTLY rather than claim
+            # "DNS проходят". The DoH leak-on DNS (v3.0.7) makes this pass
+            # normally; it only trips when the DNS path is genuinely degraded.
+            cdn_hosts = ("www.youtube.com", "files.oaiusercontent.com",
+                         "yastatic.net")
+            if not dns_health.probe(timeout=2.5, attempts=2, hosts=cdn_hosts):
+                raise ConnectionError(
+                    "sing-box поднялся, но DNS для YouTube / CDN / OpenAI не "
+                    "резолвится через туннель — системный DNS на TUN-адаптере не "
+                    "отвечает на эти домены, сайты/видео зависали бы на загрузке. "
+                    "Откатываю. Попробуй другой сервер, переключи защиту от "
+                    "DNS-утечек, либо движок на legacy (Xray + tun2socks).")
+            # Confirmed fully live → switch the log filter to steady-state, so
             # ambiguous network errors become transient noise instead of alarms.
             self.sing_box_process.mark_live()
-            self._log("[*] sing-box TUN активен — трафик и DNS проходят.")
+            self._log("[*] sing-box TUN активен — трафик и DNS (вкл. YouTube/CDN) "
+                      "проходят.")
         except Exception:
             self.sing_box_process.stop()
             try:
