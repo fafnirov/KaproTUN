@@ -5104,8 +5104,11 @@ def _v3_singbox_watchdog_engine_aware() -> None:
         m.is_connected = lambda: False
         logs.clear(); arm.clear()
         w._auto_recovery_disabled = False; w._reconnect_attempts = 0
+        w._crash_confirm = 0
         w._reconnect_timer.stop()
-        w._refresh_home()
+        # v3.0.8 debounce: a real death must read not-running on TWO consecutive
+        # 1s ticks before arming (a lone transient poll must not tear down).
+        w._refresh_home(); w._refresh_home()
         w._reconnect_timer.stop()
         if "process_crash" not in arm:
             raise AssertionError("classic xray death must still arm process_crash")
@@ -5121,8 +5124,9 @@ def _v3_singbox_watchdog_engine_aware() -> None:
         m.is_connected = lambda: False
         logs.clear(); arm.clear()
         w._auto_recovery_disabled = False; w._reconnect_attempts = 0
+        w._crash_confirm = 0
         w._reconnect_timer.stop()
-        w._refresh_home()
+        w._refresh_home(); w._refresh_home()   # debounce: two consecutive ticks
         w._reconnect_timer.stop()
         if not any("sing-box упал" in l for l in logs):
             raise AssertionError(f"sing-box death must log 'sing-box упал': {logs}")
@@ -5401,39 +5405,86 @@ def _v3_disconnect_restores_dns() -> None:
         raise AssertionError("sing-box rollback must stop the process + wipe configs")
 
 
-def _v3_cdn_dns_gate_is_honest() -> None:
-    # 21) v3.0.7 health-check honesty. The connect path must HARD-gate on CDN /
-    #     YouTube / OpenAI DNS resolving through the sing-box TUN (10.255.0.3). If
-    #     those hosts don't answer, it MUST roll back — it must NOT log
-    #     "DNS … проходят" / mark_live(). So in source order the CDN-probe
-    #     failure-raise must come BEFORE both mark_live() and the success log.
+def _v3_connect_is_forgiving() -> None:
+    # 21) v3.0.8 "just click and connect". The sing-box connect path must NOT
+    #     roll back a usable tunnel on a strict secondary DNS check. Specifically:
+    #     - NO per-CDN/YouTube/OpenAI rollback gate (the v3.0.7 regression that
+    #       errored out working tunnels because proxy-routed brand hosts were slow
+    #       to warm up). cdn_hosts must be gone entirely.
+    #     - liveness is POLL-based (wait for DNS to warm up) via a bounded
+    #       deadline, not a single tight probe; the ONE rollback is "nothing
+    #       resolved in the whole window".
+    #     - process-up is also polled (no flat sleep that misjudges a slow start).
     import inspect as _ins
     from kapro_tun.core import controller as _C
     src = _ins.getsource(_C.ConnectionManager._connect_tun_sing_box)
-    # The CDN gate must probe the SAME OS resolver for real CDN hosts.
-    if "cdn_hosts" not in src:
-        raise AssertionError("connect must probe real CDN/YouTube/OpenAI hosts (cdn_hosts)")
-    for host in ("www.youtube.com", "files.oaiusercontent.com", "yastatic.net"):
-        if host not in src:
-            raise AssertionError(f"CDN gate must include {host}")
-    i_probe = src.find("hosts=cdn_hosts")
-    if i_probe < 0:
-        raise AssertionError("CDN gate must pass cdn_hosts to the DNS probe")
-    # Anchor on the ACTUAL success signal — the mark_live() CALL and the success
-    # log word "активен" — not on "проходят", which also appears in a comment
-    # ABOVE the gate (that false-positive is exactly what this test guards).
-    i_live = src.find("self.sing_box_process.mark_live()")
-    i_ok = src.find("активен")
-    if i_live < 0 or i_ok < 0:
-        raise AssertionError("connect must mark_live() + log 'активен' on success (sanity)")
-    # Ordering invariant: the CDN probe sits BEFORE the success signal/log, so a
-    # CDN-DNS failure raises (rolls back) before any "connected/DNS ok" claim.
-    if not (i_probe < i_live and i_probe < i_ok):
-        raise AssertionError("CDN-DNS gate must precede mark_live()/success log (no contradiction)")
-    # The CDN failure branch must RAISE (rollback), not just warn/log.
-    tail = src[i_probe:i_live]
-    if "raise ConnectionError" not in tail:
-        raise AssertionError("CDN-DNS failure must raise ConnectionError (rollback), not warn")
+    # The redundant CDN gate must be GONE — no per-brand-host rollback.
+    if "cdn_hosts" in src or "hosts=cdn_hosts" in src:
+        raise AssertionError("connect must NOT re-introduce the per-CDN rollback gate")
+    if "не резолвится через туннель" in src:
+        raise AssertionError("connect must not roll back on YouTube/CDN DNS")
+    # Liveness + process-up must be POLL-based via the helper methods.
+    if "_wait_for_tunnel_dns" not in src:
+        raise AssertionError("connect must poll DNS-through-tunnel (warm-up tolerant)")
+    if "_wait_until_running" not in src:
+        raise AssertionError("connect must poll for process-up (no flat sleep)")
+    # Exactly the generic liveness failure may roll back; success still marks live.
+    if "mark_live" not in src:
+        raise AssertionError("connect must mark_live() on success")
+    # The poll helpers must be deadline-bounded loops that succeed on first hit.
+    dns_src = _ins.getsource(_C.ConnectionManager._wait_for_tunnel_dns)
+    if "while" not in dns_src or "deadline" not in dns_src or "return True" not in dns_src:
+        raise AssertionError("_wait_for_tunnel_dns must be a bounded poll loop")
+    run_src = _ins.getsource(_C.ConnectionManager._wait_until_running)
+    if "while" not in run_src or "is_running()" not in run_src:
+        raise AssertionError("_wait_until_running must poll is_running() until a deadline")
+
+
+def _v3_connect_classic_alive_on_transport() -> None:
+    # 21b) v3.0.8: the legacy/classic verify must treat the tunnel as ALIVE when
+    #      the proxy transport carries HTTP, even if OS DNS is slow to warm up
+    #      under leak protection — `alive = http_ok or dns_ok`, NOT dns-only. A
+    #      working server must never fail the connect just because the freshly
+    #      cleared resolver lags.
+    import inspect as _ins
+    from kapro_tun.core import controller as _C
+    src = _ins.getsource(_C.ConnectionManager._verify_tunnel_or_raise)
+    if "http_ok or dns_ok" not in src:
+        raise AssertionError("classic verify must be alive on http_ok OR dns_ok (not dns-only)")
+    # The dead-tunnel rollback (both signals dead) must still exist.
+    if "raise ConnectionError" not in src:
+        raise AssertionError("classic verify must still roll back a genuinely dead tunnel")
+
+
+def _v3_crash_detector_debounced() -> None:
+    # 21c) v3.0.8: the 1s process-crash detector must require TWO consecutive
+    #      not-running polls before tearing down (kills the spurious
+    #      "Подключение…" flicker from a single unreadable poll), AND must reset
+    #      the debounce counter on a healthy tick so it measures CONSECUTIVE misses.
+    import inspect as _ins
+    from kapro_tun.gui.main_window import MainWindow
+    src = _ins.getsource(MainWindow._refresh_home)
+    if "_crash_confirm" not in src:
+        raise AssertionError("crash detector must use a debounce counter (_crash_confirm)")
+    if "self._crash_confirm < 2" not in src and "_crash_confirm < 2" not in src:
+        raise AssertionError("crash detector must require >=2 consecutive not-running ticks")
+    if "self._crash_confirm = 0" not in src:
+        raise AssertionError("crash debounce counter must RESET on a healthy tick (consecutive)")
+
+
+def _v3_dns_watchdog_not_twitchy() -> None:
+    # 21d) v3.0.8: the runtime DNS watchdog must require SUSTAINED failure
+    #      (>=4 consecutive misses ≈ 80s) before a disruptive reconnect, so a
+    #      transient DNS blip never churns a working tunnel.
+    import os as _ow
+    _ow.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is None:
+        QApplication([])
+    from kapro_tun.gui.main_window import _DnsWatchdog
+    wd = _DnsWatchdog(lambda: True)
+    if getattr(wd, "_fail_threshold", 0) < 4:
+        raise AssertionError("DNS watchdog must require >=4 sustained failures (v3.0.8)")
 
 
 def _v3_process_crash_diagnostics() -> None:
@@ -5609,8 +5660,14 @@ check("watchdog: sing-box DNS guarded both leak modes, sustained-failure debounc
       _v3_singbox_dns_watchdog_guarded)
 check("disconnect/rollback stops sing-box → system DNS/routes restored",
       _v3_disconnect_restores_dns)
-check("health: CDN/YouTube/OpenAI DNS gate rolls back, never logs false 'DNS проходят'",
-      _v3_cdn_dns_gate_is_honest)
+check("connect: forgiving — no CDN rollback, poll-based liveness warm-up (v3.0.8)",
+      _v3_connect_is_forgiving)
+check("connect: classic alive on transport OR dns, not dns-only (v3.0.8)",
+      _v3_connect_classic_alive_on_transport)
+check("watchdog: crash detector debounced 2 consecutive ticks + resets (v3.0.8)",
+      _v3_crash_detector_debounced)
+check("watchdog: DNS watchdog needs >=4 sustained fails, not twitchy (v3.0.8)",
+      _v3_dns_watchdog_not_twitchy)
 check("diagnostics: process_crash logs pid/returncode/uptime/redacted-tail once",
       _v3_process_crash_diagnostics)
 

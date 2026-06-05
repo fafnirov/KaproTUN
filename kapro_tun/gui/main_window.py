@@ -1405,8 +1405,10 @@ class _DnsWatchdog(QThread):
     process-death watcher notices (the processes are fine).
 
     This thread periodically asks dns_health whether names still resolve and,
-    on a SUSTAINED outage (two consecutive failed probes ≈ a minute), emits
-    `unhealthy`. The window turns that into a bounded self-heal.
+    on a SUSTAINED outage (four consecutive failed probes ≈ 80 s), emits
+    `unhealthy`. The window turns that into a bounded self-heal. The threshold is
+    deliberately high so a transient DNS blip on an otherwise-fine tunnel never
+    triggers a disruptive disconnect+reconnect (v3.0.8).
 
     It self-gates on ConnectionManager.tun_dns_guarded(): when we're not in a
     DNS-clearing TUN session it doesn't probe at all, so it's cheap to leave
@@ -1422,7 +1424,12 @@ class _DnsWatchdog(QThread):
         self._stop = False
         self._fail_streak = 0
         self._interval_s = 20           # gap between probes while connected
-        self._fail_threshold = 2        # consecutive fails before we heal
+        # v3.0.8: require ~80s of SUSTAINED failure (4 consecutive misses), not
+        # ~40s (2). A DNS blip of a minute (server-side resolver hiccup, transient
+        # :53 throttle) recovers on its own faster than a reconnect completes —
+        # tearing down a tunnel whose data plane is fine is exactly the
+        # "Подключение…" churn on a working VPN the user complained about.
+        self._fail_threshold = 4        # consecutive fails before we heal
 
     def run(self) -> None:
         from ..core import dns_health
@@ -1438,7 +1445,9 @@ class _DnsWatchdog(QThread):
             if not self._guarded():
                 self._fail_streak = 0
                 continue
-            ok = dns_health.probe(timeout=1.5, attempts=2)
+            # Generous per-probe budget so a slow-but-alive resolver isn't
+            # mistaken for a dead one (3 hosts x 2 attempts, returns on first hit).
+            ok = dns_health.probe(timeout=2.5, attempts=2)
             if self._stop:
                 return
             # A disconnect may have landed while we were resolving — never heal
@@ -1591,6 +1600,11 @@ class MainWindow(QMainWindow):
         self._update_worker: Optional[_UpdateCheckWorker] = None
         self._crash_notified = False  # avoid spamming the same kill-switch toast
         self._crash_diag_logged = False  # one full [process_crash] diag per episode
+        # v3.0.8: a single unreadable poll() must NOT tear down a fine session.
+        # Require the core process to read not-running on TWO consecutive 1s
+        # polls before arming reconnect — kills the spurious "Подключение…"
+        # flicker on a tunnel the user considers fine.
+        self._crash_confirm = 0
         # v2.0.1: one-shot flags so a SILENT helper-process death (tun2socks
         # engine / hysteria transport dies while xray itself stays alive ->
         # "connected but no internet") is logged once, not every poll tick.
@@ -2025,6 +2039,14 @@ class MainWindow(QMainWindow):
         primary = self._primary_process()
         core_name = self._primary_process_name()
         if self.manager._active is not None and not primary.is_running():
+            # Debounce: require not-running on TWO consecutive 1s polls before
+            # tearing down. A single transient unreadable poll() must not trigger
+            # a spurious disconnect+reconnect of a healthy session (the v3.0.2
+            # "healthy sing-box mis-read as a crash" class). A process that truly
+            # exited stays exited and is caught on the very next tick (≤1s later).
+            self._crash_confirm += 1
+            if self._crash_confirm < 2:
+                return
             kill_switch = bool(self.manager.settings.get("kill_switch", False))
             mode_is_tun = self.manager.current_mode() == MODE_TUN
             rc = primary.returncode()
@@ -2114,6 +2136,9 @@ class MainWindow(QMainWindow):
             # Reset crash-notified flags when state is healthy
             self._crash_notified = False
             self._crash_diag_logged = False
+            # Reset the crash-debounce counter so it measures CONSECUTIVE
+            # not-running ticks (a healthy tick clears a lone transient blip).
+            self._crash_confirm = 0
             # Successful steady-state — reset the auto-reconnect counter
             # so the NEXT crash gets a fresh 3-attempt budget instead of
             # immediately giving up.

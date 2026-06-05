@@ -1049,6 +1049,38 @@ class ConnectionManager:
             self._log("[sing-box] Блокировка рекламы (block_ads) работает только в "
                       "legacy-движке / HTTP-режиме — на sing-box она неактивна.")
 
+    def _wait_until_running(self, deadline: float = 4.0,
+                            interval: float = 0.25) -> bool:
+        """Poll the sing-box process until it reports running, up to `deadline`s.
+        Returns True as soon as it's alive (fast path on a healthy box), False if
+        it's still not running at the deadline (a genuine instant death). Replaces
+        a coarse fixed sleep that misjudged a slow WinTUN init as a crash."""
+        waited = 0.0
+        while waited < deadline:
+            if self.sing_box_process.is_running():
+                return True
+            time.sleep(interval)
+            waited += interval
+        return self.sing_box_process.is_running()
+
+    def _wait_for_tunnel_dns(self, deadline: float = 15.0,
+                             interval: float = 0.75) -> bool:
+        """Poll DNS-through-the-tunnel until a well-known name resolves OR
+        `deadline`s elapse. A cold DoH-through-proxy resolver routinely needs
+        several seconds to warm up after the handshake, so we give the tunnel
+        time instead of declaring it dead on one tight probe. Returns True on the
+        first success; False only if NOTHING resolved in the whole window (a
+        genuinely dead tunnel). Bails early if the process dies mid-warm-up."""
+        waited = 0.0
+        while waited < deadline:
+            if dns_health.probe(timeout=2.0, attempts=1):
+                return True
+            if not self.sing_box_process.is_running():
+                return False
+            time.sleep(interval)
+            waited += interval
+        return dns_health.probe(timeout=2.0, attempts=1)
+
     def _connect_tun_sing_box(self, config: ProxyConfig, direct_domains: list[str]) -> None:
         """sing-box native-TUN connect (v3.0.0 primary). sing-box owns the TUN
         device, manages routes (auto_route), proxies and resolves DNS itself —
@@ -1110,8 +1142,10 @@ class ConnectionManager:
 
         try:
             # Did it die immediately (bad config / driver / TUN collision)?
-            time.sleep(1.5)
-            if not self.sing_box_process.is_running():
+            # Poll for a few seconds rather than a flat sleep — a slightly-slow
+            # WinTUN init on a busy machine must NOT be misjudged as an instant
+            # crash (that errored out tunnels that were merely slow to come up).
+            if not self._wait_until_running(4.0):
                 tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
                 low = tail.lower()
                 tun_busy = ("already exists" in low or "configure tun" in low
@@ -1128,8 +1162,7 @@ class ConnectionManager:
                     except Exception as e:
                         raise ConnectionError(
                             f"Не удалось перезапустить sing-box: {e}") from e
-                    time.sleep(1.5)
-                if not self.sing_box_process.is_running():
+                if not self._wait_until_running(4.0):
                     tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
                     if tun_busy:
                         raise ConnectionError(
@@ -1141,43 +1174,34 @@ class ConnectionManager:
                     raise ConnectionError(
                         "sing-box завершился сразу после старта"
                         + (f":\n{tail}" if tail else "."))
-            # Liveness: OS resolution now travels through the sing-box TUN →
-            # its tunnelled resolver. If it answers, the tunnel carries traffic.
+            # The process is up. ONE honest liveness gate: does ANY well-known
+            # (non-RU) name resolve through the tunnel? POLL until it does or a
+            # generous deadline elapses — a freshly-raised DoH-through-proxy
+            # resolver routinely needs several seconds to warm up, so a single
+            # short probe clips healthy tunnels (that was the v3.0.7 "errors
+            # everything" regression). We deliberately DO NOT probe specific
+            # YouTube/CDN/OpenAI hosts here: those are force-routed through the
+            # proxy and are the slowest to warm, and the generic probe already
+            # proves the tunnel resolves. If CDN DNS is genuinely degraded, the
+            # runtime DNS watchdog heals it post-connect — it's not a reason to
+            # refuse a working connection.
             self._log("[*] Проверяю, что туннель sing-box живой…")
-            if not dns_health.probe(timeout=2.0, attempts=4):
+            if not self._wait_for_tunnel_dns(15.0):
                 # Surface the startup-relevant sing-box lines (missing default
-                # interface / no route / config) as a connect diagnostic — these
-                # are hidden once live, but at startup they explain the failure.
+                # interface / no route / config) as a connect diagnostic.
                 diag = [l for l in self.sing_box_process.recent_logs()
                         if not is_benign_noise(l, live=False)]
                 tail = "\n".join(diag[-6:])
                 raise ConnectionError(
-                    "sing-box поднялся, но DNS через туннель не отвечает. "
-                    "Откатываю. Проверь сервер/подписку, либо переключи движок "
+                    "sing-box поднялся, но за 15 секунд ни одно имя не "
+                    "зарезолвилось через туннель — похоже, сервер недоступен. "
+                    "Откатываю. Попробуй другой сервер или переключи движок "
                     "на legacy (Xray + tun2socks)."
                     + (f"\n\nДиагностика sing-box:\n{tail}" if tail else ""))
-            # REAL gate (not a warning): resolve actual CDN / YouTube / OpenAI
-            # hosts through the SAME system resolver (10.255.0.3 = the sing-box
-            # TUN). These are the domains that hang when DNS-over-UDP-through-
-            # proxy times out — the v3.0.7 bug. If they don't answer in a
-            # generous bounded window, the tunnel's DNS is broken and the session
-            # is effectively useless, so roll back HONESTLY rather than claim
-            # "DNS проходят". The DoH leak-on DNS (v3.0.7) makes this pass
-            # normally; it only trips when the DNS path is genuinely degraded.
-            cdn_hosts = ("www.youtube.com", "files.oaiusercontent.com",
-                         "yastatic.net")
-            if not dns_health.probe(timeout=2.5, attempts=2, hosts=cdn_hosts):
-                raise ConnectionError(
-                    "sing-box поднялся, но DNS для YouTube / CDN / OpenAI не "
-                    "резолвится через туннель — системный DNS на TUN-адаптере не "
-                    "отвечает на эти домены, сайты/видео зависали бы на загрузке. "
-                    "Откатываю. Попробуй другой сервер, переключи защиту от "
-                    "DNS-утечек, либо движок на legacy (Xray + tun2socks).")
-            # Confirmed fully live → switch the log filter to steady-state, so
+            # Confirmed live → switch the log filter to steady-state, so
             # ambiguous network errors become transient noise instead of alarms.
             self.sing_box_process.mark_live()
-            self._log("[*] sing-box TUN активен — трафик и DNS (вкл. YouTube/CDN) "
-                      "проходят.")
+            self._log("[*] sing-box TUN активен — трафик и DNS проходят.")
         except Exception:
             self.sing_box_process.stop()
             try:
@@ -1310,13 +1334,23 @@ class ConnectionManager:
         """
         self._log("[*] Проверяю, что туннель реально живой (не только процессы)…")
         proxy_url = f"http://{host}:{port}"
-        http_ok = dns_health.http_probe(proxy_url, timeout=2.5)
-        dns_ok = dns_health.probe(timeout=1.5, attempts=2) if dns_cleared else None
+        http_ok = dns_health.http_probe(proxy_url, timeout=3.0)
+        dns_ok = dns_health.probe(timeout=3.0, attempts=3) if dns_cleared else None
 
-        alive = bool(dns_ok) if dns_cleared else http_ok
+        # v3.0.8: alive if the transport carries traffic OR (leak-on) OS DNS
+        # resolves. Previously leak-on demanded OS DNS ALONE, so a tunnel whose
+        # proxy demonstrably carried HTTP was still rolled back when the
+        # freshly-cleared resolver was merely slow to warm up — a working server
+        # failing the click-to-connect. If http_probe passed, the transport is
+        # alive; a lagging OS resolver is healed by the runtime DNS watchdog.
+        alive = bool(http_ok or dns_ok)
         if alive:
-            self._log("[*] Туннель живой — трафик проходит"
-                      + (", DNS резолвится." if dns_cleared else "."))
+            if dns_cleared and not dns_ok:
+                self._log("[*] Туннель живой — трафик проходит. DNS ещё "
+                          "прогревается, восстановится в фоне.")
+            else:
+                self._log("[*] Туннель живой — трафик проходит"
+                          + (", DNS резолвится." if dns_cleared else "."))
             return
 
         reality = self._scan_xray_reality_errors(log_offset)
