@@ -4993,6 +4993,50 @@ def _v3_xhttp_unsupported() -> None:
     _sb_v3.build_config(tcp, [], server_ip="1.2.3.4")  # must not raise
 
 
+def _v3_xhttp_rawurl_fallback() -> None:
+    # v3.0.6: the XHTTP gate must reject even if ProxyConfig.network wasn't
+    # populated (e.g. a config carried over from an older build) by sniffing the
+    # raw share URL — never let XHTTP reach sing-box as a plain-TCP outbound.
+    from kapro_tun.core.parser import ProxyConfig
+    cfg = ProxyConfig(
+        name="x", protocol="vless",
+        raw_url="vless://uuid@1.2.3.4:443?type=xhttp&security=reality&pbk=AAAA",
+        outbound={"type": "vless", "server": "1.2.3.4", "uuid": "uuid"},
+        network="")  # network deliberately empty
+    try:
+        _sb_v3.build_config(cfg, [], server_ip="1.2.3.4")
+    except _sb_v3.UnsupportedBySingBox as e:
+        if "legacy" not in str(e).lower():
+            raise AssertionError("xhttp-from-rawurl rejection must point to legacy")
+    else:
+        raise AssertionError(
+            "XHTTP from raw_url must raise UnsupportedBySingBox even with empty network")
+
+
+def _v3_orphan_tun_cleanup() -> None:
+    # v3.0.6: both engines name the TUN "KaproTun", so a leftover sing-box /
+    # tun2socks orphan blocks the next start with "...file already exists". The
+    # startup orphan-killer must include sing-box, and the TUN connect path must
+    # proactively free the device before (re)creating it.
+    import inspect as _ins
+    from kapro_tun import main as _main
+    ksrc = _ins.getsource(_main._kill_orphan_helpers)
+    if "sing-box.exe" not in ksrc or '"sing-box"' not in ksrc:
+        raise AssertionError("startup orphan-killer must include sing-box (both OSes)")
+    from kapro_tun.core import controller as _C
+    fsrc = _ins.getsource(_C.ConnectionManager._free_tun_device)
+    if "taskkill" not in fsrc or "pkill" not in fsrc:
+        raise AssertionError("_free_tun_device must kill orphans on both OSes")
+    if "sing-box" not in fsrc or "tun2socks" not in fsrc:
+        raise AssertionError("_free_tun_device must target BOTH TUN engines")
+    dsrc = _ins.getsource(_C.ConnectionManager._connect_tun)
+    if "_free_tun_device" not in dsrc:
+        raise AssertionError("_connect_tun must free the TUN device before dispatch")
+    # Safety: it must not kill our own live helpers.
+    if "is_connected()" not in fsrc:
+        raise AssertionError("_free_tun_device must guard on is_connected()")
+
+
 def _v3_singbox_watchdog_engine_aware() -> None:
     # 13) The crash-watchdog must be engine-aware (v3.0.2). In sing-box TUN mode
     #     xray (manager.process) is NEVER started, so the OLD watchdog read a
@@ -5435,6 +5479,10 @@ check("legacy: classic engine still selectable + valid", _v3_legacy_unaffected)
 check("config: real `sing-box check` accepts generated config", _v3_real_singbox_check)
 check("config: XHTTP/splithttp → UnsupportedBySingBox (no half-working TCP)",
       _v3_xhttp_unsupported)
+check("config: XHTTP rejected via raw-url fallback (empty .network)",
+      _v3_xhttp_rawurl_fallback)
+check("tun: orphan sing-box/tun2socks freed before TUN start (KaproTun collision)",
+      _v3_orphan_tun_cleanup)
 check("watchdog: engine-aware crash detection (no false Xray crash on sing-box)",
       _v3_singbox_watchdog_engine_aware)
 check("logs: sing-box benign/ICMP hidden, transient startup-visible, fatal stays",

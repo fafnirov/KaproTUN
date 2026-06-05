@@ -130,12 +130,21 @@ def ensure_transport_supported(proxy) -> None:
     refused with a clear 'switch to legacy' message — NEVER silently downgraded
     to TCP."""
     network = str(getattr(proxy, "network", "") or "").strip().lower()
+    # Belt-and-suspenders: XHTTP / splithttp are Xray-only and must NEVER reach
+    # sing-box (they'd become a plain-TCP outbound that mis-handshakes). Catch
+    # them from the raw share URL too, in case a parse path didn't populate
+    # .network (e.g. a config carried over from an older build).
+    raw = str(getattr(proxy, "raw_url", "") or "").lower()
+    if ("xhttp" in network or "splithttp" in network
+            or "type=xhttp" in raw or "type=splithttp" in raw):
+        raise UnsupportedBySingBox(
+            "Транспорт XHTTP/splithttp поддержан только в Xray. Переключи движок "
+            "на «Legacy (Xray + tun2socks)» в Настройках и подключись снова.")
     if network in _TCP_LIKE_NETWORKS or network in _SING_BOX_TRANSPORTS:
         return
     raise UnsupportedBySingBox(
-        f"Транспорт «{network}» (например XHTTP/splithttp) поддержан только в "
-        f"Xray. Переключи движок на «Legacy (Xray + tun2socks)» в Настройках и "
-        f"подключись снова.")
+        f"Транспорт «{network}» поддержан только в Xray. Переключи движок на "
+        f"«Legacy (Xray + tun2socks)» в Настройках и подключись снова.")
 
 
 def _dns_block(dns_option: str, dns_leak_protection: bool) -> dict[str, Any]:

@@ -633,10 +633,53 @@ class ConnectionManager:
 
     # --- TUN mode (system-wide) -------------------------------------------
 
+    def _free_tun_device(self) -> None:
+        """Force-kill orphan TUN helpers (sing-box / tun2socks) left by a
+        crashed/force-closed prior run, so the shared "KaproTun" adapter is free.
+
+        BOTH engines name the device "KaproTun"; a leftover sing-box.exe OR
+        tun2socks.exe still owning that adapter makes the next start die with
+        "configure tun interface: Cannot create a file when that file already
+        exists." Called from the TUN connect path, where connect() has already
+        verified THIS controller has no live session — so anything matching is an
+        orphan. Best-effort; never raises.
+        """
+        if self.is_connected():
+            return  # never touch our own live helpers
+        import subprocess
+        no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        killed = False
+        targets = (("sing-box.exe", "tun2socks.exe") if sys.platform == "win32"
+                   else ("sing-box", "tun2socks"))
+        for name in targets:
+            try:
+                if sys.platform == "win32":
+                    r = subprocess.run(["taskkill", "/F", "/IM", name],
+                                       capture_output=True, timeout=3,
+                                       creationflags=no_window)
+                else:
+                    r = subprocess.run(["pkill", "-9", "-x", name],
+                                       capture_output=True, timeout=3)
+                if r.returncode == 0:
+                    killed = True
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if killed:
+            # The OS removes the WinTUN/utun adapter when the holder exits, but
+            # async — give it a moment so the next create() doesn't race it.
+            self._log("[*] Освобождаю TUN-устройство «KaproTun» от орфанных "
+                      "процессов прошлого запуска…")
+            time.sleep(1.0)
+
     def _connect_tun(self, config: ProxyConfig, direct_domains: list[str]) -> None:
         """Dispatch to the selected TUN engine (v3.0.0). sing-box is the
         default; classic xray+tun2socks is the legacy fallback. An unsupported
         config raises a clear error suggesting legacy — NEVER a silent switch."""
+        # A crashed/force-closed prior run can leave an orphan sing-box /
+        # tun2socks still holding the shared "KaproTun" adapter; free it before
+        # we (re)create the TUN, else the start dies with
+        # "...file already exists" (v3.0.6).
+        self._free_tun_device()
         engine = resolve_engine(self.settings.get("tun_engine"))
         if engine == ENGINE_SING_BOX:
             try:
@@ -1065,6 +1108,19 @@ class ConnectionManager:
             time.sleep(1.5)
             if not self.sing_box_process.is_running():
                 tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
+                low = tail.lower()
+                if ("already exists" in low or "configure tun" in low
+                        or "create tun" in low):
+                    # Should be prevented by _free_tun_device(), but if the
+                    # adapter is still held (slow removal / another instance),
+                    # tell the user how to recover instead of a raw FATAL.
+                    raise ConnectionError(
+                        "sing-box не смог создать TUN-устройство «KaproTun» — "
+                        "оно занято другим процессом (орфан прошлого запуска или "
+                        "ещё живой legacy-туннель). Полностью закрой KaproTUN и "
+                        "запусти снова — при старте оно вычищает орфанные "
+                        "процессы — затем подключись."
+                        + (f"\n\nЛог sing-box:\n{tail}" if tail else ""))
                 raise ConnectionError(
                     "sing-box завершился сразу после старта"
                     + (f":\n{tail}" if tail else "."))

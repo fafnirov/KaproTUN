@@ -22,25 +22,28 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _kill_orphan_helpers() -> None:
-    """Force-kill any leftover xray / tun2socks processes.
+    """Force-kill any leftover xray / tun2socks / hysteria / sing-box processes.
 
     Why this is safe: the single-instance guard runs immediately before
     this — so if we got this far, we are the ONLY KaproTUN running.
-    Anything else with xray.exe or tun2socks.exe in its image name is
-    an orphan from a previous crashed KaproTUN run, holding file
-    handles that block the next download/start. Kill them.
+    Anything with one of those image names is an orphan from a previous
+    crashed/force-closed KaproTUN run, holding file handles or — critically —
+    the shared "KaproTun" TUN adapter, which blocks the next download/start.
+    Kill them.
 
-    Why this matters in practice: on Windows, an open file handle in
-    a running process makes the file un-deletable AND un-overwritable.
-    A fresh download of xray.exe over an orphaned-but-running copy
-    fails with `PermissionError [Errno 13]`, which surfaces as
-    "Не удалось скачать Xray-core" to the user.
+    Why this matters in practice: on Windows, an open file handle in a
+    running process makes the file un-deletable AND un-overwritable (a fresh
+    xray.exe download fails with PermissionError). And BOTH TUN engines name
+    their device "KaproTun" — an orphan sing-box.exe / tun2socks.exe still
+    owning that adapter makes the next sing-box start die with
+    "configure tun interface: Cannot create a file when that file already
+    exists." sing-box was missing from this list before v3.0.6.
     """
     # On Unix `pkill` is the closest equivalent. Both calls are
     # idempotent — they exit non-zero when no matching process exists,
     # which we swallow.
     if sys.platform == "win32":
-        for name in ("xray.exe", "tun2socks.exe", "hysteria.exe"):
+        for name in ("xray.exe", "tun2socks.exe", "hysteria.exe", "sing-box.exe"):
             try:
                 subprocess.run(
                     ["taskkill", "/F", "/IM", name],
@@ -49,7 +52,7 @@ def _kill_orphan_helpers() -> None:
             except (OSError, subprocess.SubprocessError):
                 pass
     else:
-        for name in ("xray", "tun2socks", "hysteria"):
+        for name in ("xray", "tun2socks", "hysteria", "sing-box"):
             try:
                 subprocess.run(
                     ["pkill", "-9", "-x", name],
