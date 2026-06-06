@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import platform
+import re
 import stat
 import sys
 import tarfile
@@ -30,16 +31,26 @@ import requests
 from . import net_download, paths
 
 SINGBOX_LATEST = "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-# Pinned fallback used only if the GitHub API is unreachable. The asset
-# filename drops the leading "v" from the tag.
+# The sing-box release we ship. We DELIBERATELY pin to the 1.12.x line and do
+# NOT track GitHub "latest" any more (see _fetch_release).
 #
-# MUST be >= 1.12.0: sing_box_config emits the modern config grammar (typed DNS
-# servers, `hijack-dns`/`sniff`/`route` rule actions, route.default_domain_
-# resolver). The old 1.11 fallback would REJECT that config — the legacy DNS
-# server shape it understood is deprecated in 1.12 and fatal in 1.13. Pinned to
-# a release validated end-to-end with `sing-box check` against the generated
-# config for every supported protocol.
-SINGBOX_PINNED_VERSION = "v1.13.12"
+# Why not 1.13.x: the 1.13 line regressed the VLESS data-plane on Windows — the
+# tunnel ESTABLISHES (the proxy CONNECT returns "200", REALITY handshake + auth
+# succeed) but PAYLOAD STALLS: HTTP/TLS bytes never flow, so every real request
+# times out. `sing-box check` can't catch it (it's a runtime data-path bug, not
+# a config-grammar error), which is exactly how v3.1.0/v3.1.1 shipped a broken
+# default engine. v3.1.2 rolls back to a proven 1.12.x release where the same
+# generated config carries real traffic end-to-end.
+#
+# Floor: MUST be >= 1.12.0 — sing_box_config emits the modern config grammar
+# (typed DNS servers, `hijack-dns`/`sniff`/`route` rule actions,
+# route.default_domain_resolver) that 1.11 would reject.
+SINGBOX_PINNED_VERSION = "v1.12.9"
+
+# Release lines known to break the VLESS data-plane on Windows. A binary at or
+# above this (major, minor) is treated as "not installed" so we replace it with
+# the pinned 1.12.x. Bump this once upstream fixes the regression.
+_BLOCKED_MINOR = (1, 13)
 
 KAPROTUN_MIRROR_BASE = "https://kaprovpn.pro/files"
 
@@ -88,8 +99,31 @@ def _pinned_fallback_url() -> str:
             f"{SINGBOX_PINNED_VERSION}/{_pinned_filename()}")
 
 
+def _parse_minor(version_str: str) -> Optional[tuple[int, int]]:
+    """Extract (major, minor) from a `sing-box version 1.12.9` string, or None
+    if it can't be parsed."""
+    m = re.search(r"(\d+)\.(\d+)\.\d+", version_str or "")
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def is_blocked_version() -> bool:
+    """True if the on-disk sing-box is from a release line we've blacklisted for
+    breaking the VLESS data-plane on Windows (>= 1.13). Returns False if there's
+    no binary or its version can't be parsed (don't churn a possibly-fine one)."""
+    if not paths.sing_box_exe().is_file():
+        return False
+    mm = _parse_minor(get_installed_version() or "")
+    return mm is not None and mm >= _BLOCKED_MINOR
+
+
 def is_installed() -> bool:
     if not paths.sing_box_exe().is_file():
+        return False
+    # A previously-downloaded 1.13.x stalls VLESS payloads — treat it as "not
+    # installed" so callers re-download the pinned 1.12.x over it (v3.1.2).
+    if is_blocked_version():
         return False
     # On Windows sing-box (like tun2socks) needs the WinTUN driver.
     if sys.platform == "win32":
@@ -114,19 +148,13 @@ def get_installed_version() -> Optional[str]:
 
 
 def _fetch_release() -> ReleaseInfo:
-    marker = _asset_marker()
-    ext = _asset_ext()
-    try:
-        r = requests.get(SINGBOX_LATEST, timeout=10, proxies=_NO_PROXY)
-        r.raise_for_status()
-        data = r.json()
-        version = data.get("tag_name", "unknown")
-        for asset in data.get("assets", []):
-            name = asset.get("name", "")
-            if marker in name and name.endswith(ext):
-                return ReleaseInfo(version, asset["browser_download_url"], name)
-    except Exception:
-        pass
+    """Resolve the sing-box asset to download.
+
+    v3.1.2: we no longer follow GitHub "latest". Tracking latest is what pulled
+    in the 1.13.x line whose VLESS data-plane stalls on Windows (tunnel up,
+    payload never flows). For a VPN client, a proven-stable engine beats a fresh
+    one, so we fetch EXACTLY the pinned 1.12.x release (mirror-first, GitHub
+    fallback). Bump SINGBOX_PINNED_VERSION to move it."""
     return ReleaseInfo(SINGBOX_PINNED_VERSION, _pinned_fallback_url(),
                        _pinned_filename())
 
@@ -223,11 +251,22 @@ def _extract_binary(data: bytes, target) -> None:
 
 
 def download_and_install(progress: ProgressCb = None) -> None:
-    """Install sing-box (and the WinTUN driver on Windows)."""
-    if not paths.sing_box_exe().is_file():
+    """Install sing-box (and the WinTUN driver on Windows).
+
+    v3.1.2: if a blacklisted 1.13.x binary is already on disk, delete it first
+    so we replace it with the pinned 1.12.x (otherwise the is_file() guard would
+    keep the broken engine forever). Best-effort unlink — a held file (sing-box
+    still running) is reaped by main._kill_orphan_helpers before we get here."""
+    exe = paths.sing_box_exe()
+    if exe.is_file() and is_blocked_version():
+        try:
+            exe.unlink()
+        except OSError:
+            pass
+    if not exe.is_file():
         release = _fetch_release()
         data = _download_with_fallback(release.filename, release.url, progress)
-        _extract_binary(data, paths.sing_box_exe())
+        _extract_binary(data, exe)
     if sys.platform == "win32" and not paths.wintun_dll().is_file():
         _install_wintun(progress)
 

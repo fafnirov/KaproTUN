@@ -475,8 +475,13 @@ class ConnectionManager:
         actually carries traffic. (No more cdn-cgi/trace egress match — it
         depended on the old custom DoH resolving and false-failed live tunnels.)
         """
-        waited = 0.0
-        while waited < deadline:
+        # Gate on REAL elapsed wall-clock, not the sum of `interval` ticks: each
+        # iteration's probes can themselves block for seconds (a dead transport
+        # times out the http probe ~5 s), so counting `waited += interval` made
+        # a nominal 15 s gate actually run ~2 minutes (20 iterations × ~6 s real)
+        # before failing — the user stared at "Проверяю…" far too long.
+        start = time.time()
+        while time.time() - start < deadline:
             dns_ok = dns_health.probe(timeout=1.5, attempts=1)
             transport_ok = (dns_health.singbox_outbound_probe(
                                 self._singbox_health_proxy_url(), timeout=2.5)
@@ -489,7 +494,6 @@ class ConnectionManager:
             if recent.count("crypto_error") >= 3:
                 return False
             time.sleep(interval)
-            waited += interval
         return (dns_health.probe(timeout=1.5, attempts=1)
                 and dns_health.singbox_outbound_probe(
                     self._singbox_health_proxy_url(), timeout=2.5))
