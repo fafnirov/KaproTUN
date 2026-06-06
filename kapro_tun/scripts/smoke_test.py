@@ -5458,6 +5458,42 @@ def _v3_ip_probe_cold_start_tolerant() -> None:
         raise AssertionError("ip-probe must pass retries>=4 for cold-start tolerance")
 
 
+def _v3_smart_split_dns() -> None:
+    # v3.0.12: leak-ON DNS follows the ROUTING split so a flaky proxy can't black
+    # out resolution for traffic that doesn't use the proxy.
+    #  - proxy-bound domains -> DoH (type=https, detour=proxy) with connect_timeout
+    #    (bounds the ~24s "exchange failed EOF" stall to ~5s).
+    #  - direct-list domains -> plain UDP dns-direct (NO detour), via a dns rule,
+    #    so they resolve reliably off the physical NIC (not a new leak — they're
+    #    reached directly anyway).
+    from kapro_tun.core import sing_box_config as sb
+    c = sb.build_config(parsed["vless"], ["gosuslugi.ru", "sberbank.ru"],
+                        server_ip="1.2.3.4", dns_leak_protection=True,
+                        route_ru_direct=True)
+    d = c["dns"]
+    servers = {s.get("tag"): s for s in d["servers"]}
+    rem = servers.get("dns-remote")
+    if not rem or rem.get("type") != "https" or rem.get("detour") != "proxy":
+        raise AssertionError("proxy DNS must be DoH (type=https, detour=proxy)")
+    if not rem.get("connect_timeout"):
+        raise AssertionError("proxy DoH must set connect_timeout (bound the EOF stall)")
+    dd = servers.get("dns-direct")
+    if not dd or dd.get("type") != "udp" or dd.get("detour"):
+        raise AssertionError("direct DNS must be plain UDP with NO detour")
+    rules = d.get("rules") or []
+    direct_rule = [r for r in rules if r.get("server") == "dns-direct"]
+    if not direct_rule:
+        raise AssertionError("a dns rule must route direct-list domains to dns-direct")
+    ds = direct_rule[0].get("domain_suffix") or []
+    if "gosuslugi.ru" not in ds or "sberbank.ru" not in ds:
+        raise AssertionError("the direct-list domains must resolve via dns-direct")
+    # leak-OFF must NOT carry a proxy DoH (DNS goes direct, ISP-visible).
+    c_off = sb.build_config(parsed["vless"], ["gosuslugi.ru"], server_ip="1.2.3.4",
+                            dns_leak_protection=False, route_ru_direct=True)
+    if any(s.get("detour") == "proxy" for s in c_off["dns"]["servers"]):
+        raise AssertionError("leak-OFF DNS must not ride the proxy")
+
+
 def _v3_ip_probe_bypasses_system_proxy() -> None:
     # v3.0.11: the IP-probe must NEVER route through a system/environment HTTP
     # proxy. An ELEVATED process can resolve a stale/foreign dead 127.0.0.1:<port>
@@ -5796,6 +5832,8 @@ check("ip-probe: cold-start tolerant retries>=4 (no false 'Ваш IP: —') (v3.
       _v3_ip_probe_cold_start_tolerant)
 check("ip-probe: trust_env=False — never hijacked by a system/env proxy (v3.0.11)",
       _v3_ip_probe_bypasses_system_proxy)
+check("dns: smart-split — direct list via direct DNS, rest via DoH+connect_timeout (v3.0.12)",
+      _v3_smart_split_dns)
 check("connect: forgiving — no CDN rollback, poll-based liveness warm-up (v3.0.8)",
       _v3_connect_is_forgiving)
 check("connect: classic alive on transport OR dns, not dns-only (v3.0.8)",

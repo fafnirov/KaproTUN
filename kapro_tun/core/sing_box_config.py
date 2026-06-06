@@ -185,28 +185,46 @@ def ensure_transport_supported(proxy) -> None:
         f"«Legacy (Xray + tun2socks)» в Настройках и подключись снова.")
 
 
-def _dns_block(dns_option: str, dns_leak_protection: bool) -> dict[str, Any]:
+def _dns_block(dns_option: str, dns_leak_protection: bool,
+               direct_domains: Optional[list[str]] = None) -> dict[str, Any]:
     opt = dns_options.get(dns_option)
     upstream = opt.plain_servers[0] if opt.plain_servers else _SYSTEM_DNS[0]
     # sing-box 1.12+ DNS server format: typed servers. Legacy {"address": ...}
     # is FATAL in 1.13.
     if dns_leak_protection:
-        # DNS rides the tunnel (detour=proxy) so the ISP can't see queries.
-        # CRITICAL: use DoH (type=https, port 443), NOT plain UDP. Most VLESS/
-        # REALITY proxy servers don't relay UDP (or relay it poorly), so DNS-
-        # over-UDP-through-proxy times out ~7 s — the YouTube/CDN/OpenAI "DNS
-        # hang" (v3.0.7). DoH is TCP-based (relayed as reliably as normal
-        # browsing), encrypted (the VPN server can't snoop the queries either),
-        # and on port 443, which no server blocks. server is an IP so there's no
-        # bootstrap-resolution chicken-and-egg.
-        return {
-            "servers": [
-                {"type": "https", "tag": "dns-remote", "server": upstream,
-                 "detour": "proxy"},
-            ],
+        # SMART-SPLIT DNS (v3.0.12) — the DNS path follows the ROUTING path, so a
+        # flaky proxy can't black out resolution for traffic that doesn't even use
+        # the proxy. Two servers:
+        #
+        #  * dns-remote (DoH, type=https, :443, detour=proxy) — for proxy-bound
+        #    traffic (everything not in the direct list). Leak-protected (the ISP
+        #    sees only VLESS bytes) and poison-proof (a Russian ISP resolver can't
+        #    tamper with blocked/foreign sites). DoH is TCP (relayed as reliably as
+        #    browsing), unlike UDP which most VLESS servers relay poorly (the v3.0.7
+        #    ~7 s hang). connect_timeout BOUNDS a flaky-proxy DNS stall to ~5 s
+        #    instead of the ~24 s "dns: exchange failed … EOF" blackout users hit
+        #    when an unstable server drops the single shared DoH connection.
+        #
+        #  * dns-direct (plain UDP, NO detour → resolves over the physical NIC) —
+        #    ONLY for the user's direct-list domains (RU banks/services reached on
+        #    their REAL IP). Reliable and fast, NEVER touches the flaky proxy, and
+        #    it is NOT a new leak: those sites are already reached directly, so the
+        #    ISP sees the connections regardless. This is exactly the leak-OFF
+        #    dns-direct mechanism, scoped to direct domains via a dns rule.
+        servers: list[dict[str, Any]] = [
+            {"type": "https", "tag": "dns-remote", "server": upstream,
+             "detour": "proxy", "connect_timeout": "5s"},
+        ]
+        block: dict[str, Any] = {
+            "servers": servers,
             "final": "dns-remote",
             "strategy": "ipv4_only",
         }
+        clean = sorted({d.strip().lower() for d in (direct_domains or []) if d.strip()})
+        if clean:
+            servers.append({"type": "udp", "tag": "dns-direct", "server": upstream})
+            block["rules"] = [{"domain_suffix": clean, "server": "dns-direct"}]
+        return block
     # Opt-out: DNS goes direct (ISP-visible) — matches the classic leak-off UX.
     # NO detour here: sing-box 1.13 rejects `"detour": "direct"` because the
     # `direct` outbound is empty ("detour to an empty direct outbound makes no
@@ -309,7 +327,7 @@ def build_config(
     # the signature for callers/future use.
     _ = (block_ads, on_log)
 
-    dns_block = _dns_block(dns_option, dns_leak_protection)
+    dns_block = _dns_block(dns_option, dns_leak_protection, direct_domains)
     return {
         "log": {"level": log_level, "timestamp": True},
         "dns": dns_block,
