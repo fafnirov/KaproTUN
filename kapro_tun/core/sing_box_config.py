@@ -27,7 +27,23 @@ from . import dns_options, geoip_ru, paths
 # TUN device + addressing — mirrors the classic engine so nothing else changes.
 TUN_DEVICE_NAME = "KaproTun"
 TUN_INET4 = "10.255.0.2/30"
-TUN_MTU = 1500
+# v3.0.9: give the TUN a ULA IPv6 address so auto_route ALSO captures ::/0 into
+# the tunnel. Without this the TUN was IPv4-only, native IPv6 stayed on the
+# physical NIC, and IPv6-leak protection had to firewall-block 2000::/3 — which
+# returns WSAEACCES → the browser's ERR_NETWORK_ACCESS_DENIED. With v6 captured
+# in-tunnel we instead REJECT global-unicast v6 with a clean TCP RST (see the
+# route rules), so Happy-Eyeballs falls back to IPv4 instantly and v6 never leaks.
+TUN_INET6 = "fdfe:dcba:9876::1/126"
+# v3.0.9: 9000 (sing-box's documented cross-platform default), was 1500. A larger
+# TUN MTU lets the OS/wintun hand sing-box big receive buffers; sing-box segments
+# to the real path MTU on egress, so per-packet syscall/copy overhead drops sharply
+# and single-stream throughput rises. On-wire egress MTU is unchanged.
+TUN_MTU = 9000
+# v3.0.9: "mixed" = kernel/system TCP stack (fast — web/video/downloads) + gVisor
+# only for UDP. This is sing-box's OWN default on Windows; the prior "gvisor"
+# (whole L3→L4 in userspace) was the documented worst case for Windows throughput
+# and CPU and was the main cause of the slow tunnel.
+TUN_STACK = "mixed"
 
 # Private / LAN / Docker / link-local / loopback + multicast/broadcast that must
 # always stay OFF the tunnel (routed to `direct`, which exits the physical NIC).
@@ -39,6 +55,15 @@ PRIVATE_CIDRS: list[str] = [
     "127.0.0.0/8",
     "224.0.0.0/4",        # multicast
     "255.255.255.255/32",  # limited broadcast
+]
+
+# IPv6 LAN / ULA / link-local / multicast — kept DIRECT (NAS, printers, local
+# discovery keep working) and, crucially, NOT rejected by the global-v6 reject
+# rule below. Everything else in global unicast (2000::/3) is rejected in-tunnel.
+PRIVATE_CIDRS6: list[str] = [
+    "fc00::/7",     # Unique Local Addresses (incl. our own TUN_INET6)
+    "fe80::/10",    # link-local
+    "ff00::/8",     # multicast
 ]
 
 # Leak-protected system DNS upstreams (shared idea with the classic engine):
@@ -255,6 +280,15 @@ def build_config(
     rules.append({"protocol": "dns", "action": "hijack-dns"})
     # Private / LAN / Docker / multicast — never tunnel.
     rules.append({"ip_cidr": list(PRIVATE_CIDRS), "action": "route", "outbound": "direct"})
+    # IPv6 (v3.0.9): the TUN now carries an inet6 address, so auto_route captures
+    # ::/0 into the tunnel. LAN/ULA/link-local/multicast v6 stays DIRECT (NAS,
+    # printers, local discovery). All GLOBAL-UNICAST v6 (2000::/3) is REJECTED
+    # in-tunnel with a TCP RST (method=default → RST for TCP, ICMP unreachable for
+    # UDP): the browser's IPv6 attempt fails instantly and Happy-Eyeballs falls
+    # back to IPv4 — NO firewall WSAEACCES, hence no ERR_NETWORK_ACCESS_DENIED — and
+    # v6 never egresses the physical NIC (no leak). LAN-direct MUST precede reject.
+    rules.append({"ip_cidr": list(PRIVATE_CIDRS6), "action": "route", "outbound": "direct"})
+    rules.append({"ip_cidr": ["2000::/3"], "action": "reject", "method": "default"})
     # Always-proxy critical geo-restricted services BEFORE any direct/bypass
     # rule, so a CDN IP in geoip:ru can't pull them out the real interface.
     rules.append({"domain_suffix": list(_ALWAYS_PROXY_SUFFIXES),
@@ -283,11 +317,17 @@ def build_config(
             "type": "tun",
             "tag": "tun-in",
             "interface_name": TUN_DEVICE_NAME,
-            "address": [TUN_INET4],
+            # Both families → auto_route captures 0.0.0.0/0 AND ::/0 into the TUN,
+            # so native IPv6 can't bypass the tunnel on the physical NIC.
+            "address": [TUN_INET4, TUN_INET6],
             "mtu": TUN_MTU,
             "auto_route": True,
             "strict_route": False,
-            "stack": "gvisor",
+            "stack": TUN_STACK,
+            # Full-cone NAT for the gVisor UDP half of "mixed": QUIC/HTTP3
+            # (YouTube/Google video) and WebRTC reuse one mapping instead of
+            # spawning per-destination sessions → less churn, better UDP throughput.
+            "endpoint_independent_nat": True,
         }],
         "outbounds": [
             outbound,

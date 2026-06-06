@@ -1435,6 +1435,23 @@ class ConnectionManager:
         """
         if not self.settings.get("ipv6_leak_protection", True):
             return
+        # v3.0.9: only the sing-box TUN captures IPv6 in-tunnel (inet6 address +
+        # auto_route) and REJECTS global-unicast v6 with a TCP RST. There the
+        # netsh firewall block is BOTH redundant AND the direct cause of
+        # ERR_NETWORK_ACCESS_DENIED (a firewall DROP is WSAEACCES at the Winsock
+        # layer, surfaced as a page error instead of an IPv4 fallback). Skip it
+        # ONLY for the sing-box TUN dataplane — HTTP-proxy mode (no TUN) and the
+        # classic v4-only tun2socks engine still NEED the firewall block, so they
+        # must NOT take this branch even if tun_engine is set to sing-box.
+        if (self.current_mode() == MODE_TUN
+                and self.current_engine() == ENGINE_SING_BOX):
+            self._log("[*] IPv6-защита обеспечивается самим sing-box (туннель "
+                      "ловит IPv6 и отбивает RST) — firewall-блок не нужен.")
+            try:
+                ipv6_block.remove()
+            except Exception:
+                pass
+            return
         if not ipv6_block.is_supported():
             self._log("[!] IPv6-leak protection пока работает только на Windows")
             return

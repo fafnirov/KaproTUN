@@ -9,8 +9,8 @@ import sys
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from .core import (autostart, i18n, ipv6_block, killswitch, storage,
-                   system_proxy, tun_recovery, webrtc_block)
+from .core import (autostart, firewall_sweep, i18n, ipv6_block, killswitch,
+                   storage, system_proxy, tun_recovery, webrtc_block)
 from .gui import icons
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
@@ -60,6 +60,23 @@ def _kill_orphan_helpers() -> None:
                 )
             except (OSError, subprocess.SubprocessError):
                 pass
+        return
+
+    # v3.0.9: a force-killed (/F) sing-box can't run its own auto_route cleanup,
+    # so a leftover default route via the dead "KaproTun" adapter can survive and
+    # black-hole the machine ("Доступ в интернет заблокирован"). If the adapter or
+    # its routes linger, delete ONLY routes bound to the KaproTun interface — never
+    # the real NIC's default route. No-op when the adapter already vanished with
+    # the process (the common case), so it's safe belt-and-suspenders.
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-NetRoute -InterfaceAlias 'KaproTun' -ErrorAction SilentlyContinue"
+             " | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue"],
+            capture_output=True, timeout=10, creationflags=_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _clear_stale_system_proxy() -> None:
@@ -219,6 +236,23 @@ def _run_app() -> int:
             window.logs_page.append(f"[восстановление] {_action}")
     except Exception:
         pass
+
+    # v3.0.9: brand-prefix firewall sweep. The per-feature removes above only
+    # delete their EXACT current rule names — they miss orphans from pre-rename
+    # "KaproVPN-*" builds and ad-hoc suffixes (e.g. "KaproVPN-ipv6-block-TEST"),
+    # which block 2000::/3 outbound PERMANENTLY and surface in the browser as
+    # ERR_NETWORK_ACCESS_DENIED even with the VPN off. Sweep them by prefix.
+    try:
+        for _name in firewall_sweep.sweep():
+            window.logs_page.append(f"[firewall] удалено правило-сирота: {_name}")
+    except Exception:
+        pass
+
+    # v3.0.9: ANY QApplication.quit() (tray button, OS session-end, installer
+    # ping) must tear the tunnel down via the existing disconnect() — not just
+    # the tray path — so a quit can't orphan sing-box with the TUN up. Guarded
+    # against double-run inside _on_quit_for_real.
+    app.aboutToQuit.connect(window._on_quit_for_real)
 
     # Re-route "show" pings from any future second-launch attempts to
     # the same code path the tray icon uses.

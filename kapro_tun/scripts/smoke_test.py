@@ -5351,6 +5351,86 @@ def _v3_dns_and_split_routing() -> None:
                         raise AssertionError(f"forced-proxy domain in a DIRECT rule: {d}")
 
 
+def _v3_ipv6_capture_and_throughput() -> None:
+    # v3.0.9: IPv6 is captured INSIDE the sing-box TUN and rejected in-tunnel with
+    # a TCP RST (no netsh firewall block → no WSAEACCES → no ERR_NETWORK_ACCESS_DENIED),
+    # while v6 still never leaks out the physical NIC. Plus the Windows throughput
+    # tuning: mixed stack, MTU 9000, endpoint_independent_nat.
+    from kapro_tun.core import sing_box_config as sb
+    c = sb.build_config(parsed["vless"], ["example.com"], server_ip="1.2.3.4",
+                        dns_leak_protection=True, route_ru_direct=True)
+    inb = c["inbounds"][0]
+    # (a) the TUN carries an inet6 address so auto_route captures ::/0.
+    addrs = inb.get("address") or []
+    if not any(":" in a for a in addrs):
+        raise AssertionError("TUN must carry an inet6 address (capture IPv6 in-tunnel)")
+    # (b) throughput tuning.
+    if inb.get("stack") != "mixed":
+        raise AssertionError("TUN stack must be 'mixed' (kernel TCP) for Windows throughput")
+    if int(inb.get("mtu", 0)) < 9000:
+        raise AssertionError("TUN mtu must be >= 9000 for throughput")
+    if inb.get("endpoint_independent_nat") is not True:
+        raise AssertionError("endpoint_independent_nat must be enabled for QUIC/UDP")
+    rules = c["route"]["rules"]
+    # (c) global-unicast IPv6 is REJECTED in-tunnel (not firewall-blocked).
+    reject = [r for r in rules if r.get("action") == "reject"]
+    if not any("2000::/3" in (r.get("ip_cidr") or []) for r in reject):
+        raise AssertionError("global-unicast IPv6 (2000::/3) must be rejected in-tunnel")
+    # (d) LAN v6 must NOT be in any reject rule (NAS / printers keep working).
+    for r in reject:
+        for lan in ("fc00::/7", "fe80::/10", "ff00::/8"):
+            if lan in (r.get("ip_cidr") or []):
+                raise AssertionError(f"LAN IPv6 {lan} must NOT be rejected")
+
+    def idx(pred):
+        for i, r in enumerate(rules):
+            if pred(r):
+                return i
+        return None
+    # (e) LAN-v6 direct rule must precede the global-v6 reject (first match wins).
+    i_lan6 = idx(lambda r: r.get("outbound") == "direct"
+                 and "fc00::/7" in (r.get("ip_cidr") or []))
+    i_rej = idx(lambda r: r.get("action") == "reject"
+                and "2000::/3" in (r.get("ip_cidr") or []))
+    if i_lan6 is None or i_rej is None or i_lan6 >= i_rej:
+        raise AssertionError("LAN-v6 direct rule must precede the global-v6 reject")
+
+
+def _v3_singbox_skips_firewall_ipv6_block() -> None:
+    # v3.0.9: under the sing-box engine the netsh firewall IPv6 block (the direct
+    # cause of ERR_NETWORK_ACCESS_DENIED) must be SKIPPED — the TUN now handles v6
+    # in-tunnel — and any stale block removed, BEFORE install() is ever reached.
+    import inspect as _ins
+    from kapro_tun.core import controller as _C
+    src = _ins.getsource(_C.ConnectionManager._maybe_arm_ipv6_block)
+    if "ENGINE_SING_BOX" not in src or "current_engine" not in src:
+        raise AssertionError("_maybe_arm_ipv6_block must gate on the sing-box engine")
+    i_engine = src.find("ENGINE_SING_BOX")
+    i_install = src.find("ipv6_block.install()")
+    if i_install != -1 and i_engine > i_install:
+        raise AssertionError("the sing-box skip must come BEFORE ipv6_block.install()")
+
+
+def _v3_firewall_sweep_prefix() -> None:
+    # v3.0.9: the startup brand-prefix sweep must match BOTH the current brand and
+    # the legacy pre-rename brand, so old-brand / odd-suffix orphans (e.g.
+    # 'KaproVPN-ipv6-block-TEST', the live ERR_NETWORK_ACCESS_DENIED cause) get
+    # purged. Surface methods must never raise on any platform.
+    from kapro_tun.core import firewall_sweep as fs
+    if "KaproTUN-" not in fs._RULE_NAME_PREFIXES or "KaproVPN-" not in fs._RULE_NAME_PREFIXES:
+        raise AssertionError("firewall_sweep must match both KaproTUN- and KaproVPN- prefixes")
+    for f in (fs.is_supported, fs.has_orphans):
+        try:
+            f()
+        except Exception as e:
+            raise AssertionError(f"firewall_sweep.{f.__name__} must not raise: "
+                                 f"{type(e).__name__}: {e}")
+    # win_job surface must never raise either (no-op / False off-Windows).
+    from kapro_tun.core import win_job
+    if win_job.assign(0) is not False:
+        raise AssertionError("win_job.assign(0) must be a safe False no-op")
+
+
 def _v3_singbox_dns_watchdog_guarded() -> None:
     # 19) The runtime DNS watchdog must guard sing-box in BOTH leak modes (the
     #     bug: tun_dns_guarded() was gated on dns_leak_protection, so sing-box
@@ -5660,6 +5740,12 @@ check("watchdog: sing-box DNS guarded both leak modes, sustained-failure debounc
       _v3_singbox_dns_watchdog_guarded)
 check("disconnect/rollback stops sing-box → system DNS/routes restored",
       _v3_disconnect_restores_dns)
+check("ipv6: captured in-tunnel + 2000::/3 reject (no WSAEACCES), mixed/9000/EIN (v3.0.9)",
+      _v3_ipv6_capture_and_throughput)
+check("ipv6: sing-box engine skips the netsh firewall block (v3.0.9)",
+      _v3_singbox_skips_firewall_ipv6_block)
+check("firewall_sweep: matches KaproTUN-/KaproVPN- prefixes; win_job safe no-op (v3.0.9)",
+      _v3_firewall_sweep_prefix)
 check("connect: forgiving — no CDN rollback, poll-based liveness warm-up (v3.0.8)",
       _v3_connect_is_forgiving)
 check("connect: classic alive on transport OR dns, not dns-only (v3.0.8)",

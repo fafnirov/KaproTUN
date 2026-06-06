@@ -183,6 +183,16 @@ class SingBoxProcess:
         )
         self._started_at = time.time()
         self._last_pid = self._proc.pid
+        # Kernel backstop (v3.0.9): bind sing-box to the GUI's kill-on-close Job
+        # Object so a non-graceful GUI exit (crash / taskkill / logoff) can't
+        # orphan it with the TUN up + default route hijacked. Best-effort; the
+        # Python-level teardown still runs on a clean quit.
+        if sys.platform == "win32":
+            try:
+                from . import win_job
+                win_job.assign(self._proc.pid)
+            except Exception:
+                pass
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 

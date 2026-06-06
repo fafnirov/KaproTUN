@@ -3096,7 +3096,14 @@ class MainWindow(QMainWindow):
             self._on_quit_for_real()
 
     def _on_quit_for_real(self) -> None:
-        """Disconnect, tear down tray, terminate the QApplication event loop."""
+        """Disconnect, tear down tray, terminate the QApplication event loop.
+
+        v3.0.9: this is now the SINGLE source of truth for shutdown — the tray
+        "Выход", the closeEvent real-quit, the installer ping, AND
+        QApplication.aboutToQuit (OS session-end / any quit()) all route here.
+        Guard against double-run so disconnect() fires exactly once."""
+        if getattr(self, "_really_quitting", False):
+            return
         self._really_quitting = True
         try:
             self._dns_watchdog.stop()
