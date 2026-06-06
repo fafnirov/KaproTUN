@@ -5431,6 +5431,33 @@ def _v3_firewall_sweep_prefix() -> None:
         raise AssertionError("win_job.assign(0) must be a safe False no-op")
 
 
+def _v3_ip_probe_cold_start_tolerant() -> None:
+    # v3.0.10: the IP-probe worker must use a cold-start-tolerant retry window.
+    # The probe fires right after connect while the REALITY tunnel's proxy pool is
+    # still warming up (~10s); a too-short 2-retry window failed and left the UI
+    # showing "Ваш IP: —" on a perfectly working VPN. Assert retries>=4.
+    import os as _o
+    _o.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    import inspect as _ins
+    import re as _re
+    from kapro_tun.gui import main_window as _mw
+    src = None
+    for _name, obj in vars(_mw).items():
+        if isinstance(obj, type) and hasattr(obj, "run"):
+            try:
+                s = _ins.getsource(obj.run)
+            except (OSError, TypeError):
+                continue
+            if "fetch_public_ip" in s:
+                src = s
+                break
+    if src is None:
+        raise AssertionError("could not find the IP-probe worker run()")
+    m = _re.search(r"retries\s*=\s*(\d+)", src)
+    if not m or int(m.group(1)) < 4:
+        raise AssertionError("ip-probe must pass retries>=4 for cold-start tolerance")
+
+
 def _v3_singbox_dns_watchdog_guarded() -> None:
     # 19) The runtime DNS watchdog must guard sing-box in BOTH leak modes (the
     #     bug: tun_dns_guarded() was gated on dns_leak_protection, so sing-box
@@ -5746,6 +5773,8 @@ check("ipv6: sing-box engine skips the netsh firewall block (v3.0.9)",
       _v3_singbox_skips_firewall_ipv6_block)
 check("firewall_sweep: matches KaproTUN-/KaproVPN- prefixes; win_job safe no-op (v3.0.9)",
       _v3_firewall_sweep_prefix)
+check("ip-probe: cold-start tolerant retries>=4 (no false 'Ваш IP: —') (v3.0.10)",
+      _v3_ip_probe_cold_start_tolerant)
 check("connect: forgiving — no CDN rollback, poll-based liveness warm-up (v3.0.8)",
       _v3_connect_is_forgiving)
 check("connect: classic alive on transport OR dns, not dns-only (v3.0.8)",

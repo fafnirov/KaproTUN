@@ -1374,10 +1374,20 @@ class _IpProbeWorker(QThread):
     def run(self) -> None:
         from ..core import ip_probe
         try:
+            # v3.0.10: be cold-start tolerant. The probe fires right after connect,
+            # while the REALITY tunnel's proxy connection pool is still warming up —
+            # the first few HTTPS requests can time out for ~10 s even though the
+            # tunnel is perfectly healthy (general traffic already flows). A short
+            # 2-retry window left the UI showing "Ваш IP: —" and made a WORKING VPN
+            # look disconnected. Widen the warm-up window to ~12 s (matches the
+            # v3.0.8 connect-liveness poll). Returns on the first success, so a warm
+            # tunnel still resolves the IP in well under a second.
             info = ip_probe.fetch_public_ip(
                 socks_proxy=self._socks_proxy,
                 locale=self._locale,
                 debug=self.diag.emit,
+                retries=4,
+                retry_delay=2.5,
             )
         except Exception as e:
             # Defence in depth — ip_probe already catches everything,
