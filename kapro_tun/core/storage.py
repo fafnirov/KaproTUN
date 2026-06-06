@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import paths, secrets_store
-from .parser import ProxyConfig
+from .parser import ProxyConfig, parse as _parse_url
 
 _log = logging.getLogger("kaprotun.storage")
 
@@ -157,11 +157,25 @@ def load_configs() -> list[ProxyConfig]:
     out: list[ProxyConfig] = []
     for item in raw if isinstance(raw, list) else []:
         try:
+            raw_url = str(item["raw_url"])
+            # `network` (transport: tcp/ws/grpc/xhttp/…) drives the XHTTP transport
+            # gate in sing_box_config. It IS persisted (asdict), but historically
+            # was never read back here, so every loaded config had network="".
+            # Read it; when absent or empty (configs saved before it was filled),
+            # recover it by re-parsing the share URL so the gate sees the real
+            # transport instead of leaning on the raw-url substring fallback.
+            net = str(item.get("network", "") or "")
+            if not net:
+                try:
+                    net = _parse_url(raw_url).network
+                except Exception:
+                    net = ""
             out.append(ProxyConfig(
                 name=str(item["name"]),
                 protocol=str(item["protocol"]),
-                raw_url=str(item["raw_url"]),
+                raw_url=raw_url,
                 outbound=dict(item.get("outbound", {})),
+                network=net,
             ))
         except (KeyError, TypeError):
             continue
