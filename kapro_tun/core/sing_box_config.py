@@ -22,7 +22,7 @@ import socket
 import struct
 from typing import Any, Optional
 
-from . import dns_options, geoip_ru, paths
+from . import geoip_ru, paths
 
 # TUN device + addressing — mirrors the classic engine so nothing else changes.
 TUN_DEVICE_NAME = "KaproTun"
@@ -68,10 +68,6 @@ PRIVATE_CIDRS6: list[str] = [
     "ff00::/8",     # multicast
 ]
 
-# Leak-protected system DNS upstreams (shared idea with the classic engine):
-# plain DNS sent THROUGH the tunnel, so the ISP sees only encrypted bytes.
-_SYSTEM_DNS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
-
 # Globally-restricted services that must ALWAYS ride the proxy, even with
 # route_ru_direct on. Their CDNs frequently resolve to IPs that land in
 # geoip:ru (Cloudflare / Fastly RU edge), and a geoip:ru rule would then send
@@ -102,20 +98,6 @@ _ALWAYS_PROXY_SUFFIXES = [
     "ggpht.com",            # YouTube avatars/thumbs
     "youtubei.googleapis.com",
 ]
-
-
-def _dns_resolver_ips(dns_option: str) -> list[str]:
-    """The plain upstream resolver IP(s) the leak-OFF DNS dials. Used to route
-    that DNS traffic straight out the physical NIC (fast, ISP-visible) instead
-    of letting it crawl through the proxy."""
-    opt = dns_options.get(dns_option)
-    ips = list(opt.plain_servers) if opt.plain_servers else list(_SYSTEM_DNS)
-    out: list[str] = []
-    for ip in ips:
-        ip = str(ip).strip()
-        if ip and ip not in out:
-            out.append(ip)
-    return out[:3]
 
 
 class UnsupportedBySingBox(Exception):
@@ -191,43 +173,32 @@ def ensure_transport_supported(proxy) -> None:
         f"Возьми сервер на обычном TCP / WS / gRPC.")
 
 
-def _dns_block(dns_option: str, dns_leak_protection: bool,
-               direct_domains: Optional[list[str]] = None) -> dict[str, Any]:
-    opt = dns_options.get(dns_option)
-    upstream = opt.plain_servers[0] if opt.plain_servers else _SYSTEM_DNS[0]
-    # sing-box 1.12+ DNS server format: typed servers. Legacy {"address": ...}
-    # is FATAL in 1.13.
-    if dns_leak_protection:
-        # v3.0.13: encrypted DNS must not depend on the selected VPN transport.
-        # A dead/invalid Hysteria2 or a flaky VLESS connection previously took
-        # the shared DoH connection down with it, blacking out the whole machine
-        # even though DNS leak protection was supposed to improve reliability.
-        #
-        # Direct DoH still protects query contents: the ISP sees an HTTPS
-        # connection to the configured public resolver, not plaintext UDP/53 or
-        # the requested domain. The resolver endpoint is routed DIRECT by an
-        # explicit route rule below, while resolved application traffic still
-        # follows forced-proxy/direct/geoip rules normally.
-        _ = direct_domains
-        return {
-            "servers": [
-                {"type": "https", "tag": "dns-secure-direct",
-                 "server": upstream, "connect_timeout": "4s"},
-            ],
-            "final": "dns-secure-direct",
-            "strategy": "ipv4_only",
-        }
-    # Opt-out: DNS goes direct (ISP-visible) — matches the classic leak-off UX.
-    # NO detour here: sing-box 1.13 rejects `"detour": "direct"` because the
-    # `direct` outbound is empty ("detour to an empty direct outbound makes no
-    # sense"). A DNS server with no detour already resolves over the default
-    # (direct) path via auto_detect_interface, which is exactly the leak-off
-    # behaviour we want.
+def _dns_block() -> dict[str, Any]:
+    """DNS is ALWAYS the system resolver (v3.1.1).
+
+    The previous custom DoH / smart-split resolver was DPI-throttled on many
+    RU networks: the direct DoH exchange to a public resolver timed out
+    ("dns: exchange failed ... context deadline exceeded"), which black-holed
+    DNS *and* failed the connect-gate's egress trace — so a perfectly good VPN
+    transport got reported as "doesn't pass real traffic". A `type: local`
+    server resolves through the OS resolver over the physical NIC (the user's
+    already-working ISP/router DNS), so DNS can never be the thing that blocks a
+    connect. App :53 is still hijacked into this module (see the route rules),
+    so every lookup follows one consistent, reliable path.
+
+    Trade-off the user explicitly chose: queries reach the system DNS as plain
+    UDP/53 (no DoH), i.e. the ISP can see requested domains — reliability over
+    query-content hiding. `ipv4_only` keeps apps off AAAA, matching the
+    in-tunnel 2000::/3 reject so no app wastes time on an IPv6 attempt.
+
+    No loop: `local` does NOT ride a sing-box outbound — it dials the OS
+    resolver, which sing-box binds to the default physical interface
+    (auto_detect_interface). On Windows that means the stub at 127.0.0.1:53 and
+    any upstream it forwards to leave via the real NIC, NOT back through the TUN,
+    so the hijacked-:53 → local-resolve path can't re-capture itself."""
     return {
-        "servers": [
-            {"type": "udp", "tag": "dns-direct", "server": upstream},
-        ],
-        "final": "dns-direct",
+        "servers": [{"type": "local", "tag": "local"}],
+        "final": "local",
         "strategy": "ipv4_only",
     }
 
@@ -246,7 +217,12 @@ def build_config(
 ) -> dict[str, Any]:
     """Full sing-box config dict for TUN mode. Raises UnsupportedBySingBox if
     the proxy can't be faithfully reproduced. `on_log` (optional) receives
-    human notices about limitations (e.g. ad-block)."""
+    human notices about limitations (e.g. ad-block).
+
+    `dns_option` / `dns_leak_protection` are accepted for call-site
+    compatibility but IGNORED as of v3.1.1: DNS is always the system resolver
+    (see _dns_block). They stay in the signature so older callers/tests don't
+    break, not because they do anything."""
     outbound = dict(proxy.outbound)
     ensure_supported(outbound)
     # Transport gate: reject XHTTP/splithttp etc. that the parser can't render
@@ -271,20 +247,10 @@ def build_config(
         {"action": "sniff"},
         {"inbound": ["health-probe"], "action": "route", "outbound": "proxy"},
     ]
-    # Resolver egress must never fall through to final=proxy:
-    #   leak ON  -> encrypted DoH direct on TCP/443
-    #   leak OFF -> plaintext DNS direct on UDP/TCP 53
-    # This rule is before hijack-dns so sing-box's own upstream exchange cannot
-    # be re-hijacked into a loop.
-    resolver_ips = _dns_resolver_ips(dns_option)
-    if resolver_ips:
-        rules.append({
-            "ip_cidr": [f"{ip}/32" for ip in resolver_ips],
-            "port": [443] if dns_leak_protection else [53],
-            "action": "route",
-            "outbound": "direct",
-        })
-    # Hijack all OTHER DNS to the dns module (replaces the old dns-out outbound).
+    # Hijack all DNS (:53) into the dns module, which resolves via the system
+    # resolver (type: local) over the physical NIC. No resolver-IP carve-out
+    # rule is needed any more: `local` dials the OS resolver directly instead of
+    # riding a sing-box outbound, so there is nothing to re-hijack into a loop.
     rules.append({"protocol": "dns", "action": "hijack-dns"})
     # Private / LAN / Docker / multicast — never tunnel.
     rules.append({"ip_cidr": list(PRIVATE_CIDRS), "action": "route", "outbound": "direct"})
@@ -315,9 +281,9 @@ def build_config(
     # is the active engine, so the limitation is surfaced there ONCE rather than
     # spamming the Logs page on every (re)connect (v3.0.3). `on_log` is kept in
     # the signature for callers/future use.
-    _ = (block_ads, on_log)
+    _ = (block_ads, on_log, dns_option, dns_leak_protection)
 
-    dns_block = _dns_block(dns_option, dns_leak_protection, direct_domains)
+    dns_block = _dns_block()
     return {
         "log": {"level": log_level, "timestamp": True},
         "dns": dns_block,

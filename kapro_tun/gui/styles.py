@@ -606,7 +606,7 @@ def get_qss(theme: str = "auto") -> str:
     """Return the QSS string for a settings value.
 
     theme: "auto" (follow OS), "dark", "light". Unknown values fall
-    back to dark — same charity policy as dns_options.get().
+    back to dark (forgiving: a bad/missing setting never errors the UI).
     """
     if theme == "light":
         return LIGHT_QSS

@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..core import (
-    admin, app_log, autostart, dns_options, sing_box_config,
+    admin, app_log, autostart, sing_box_config,
     sing_box_installer, storage, updater, xray_stats,
 )
 from ..core import controller as _controller
@@ -457,102 +457,34 @@ class SettingsPage(QWidget):
         ip_probe_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(ip_probe_hint)
 
-        # --- DNS server choice ---
-        # Some subscription providers don't filter ads at the DNS layer, so
-        # picking AdGuard here gives ad-blocking that works on any server.
-        # System is the leave-it-alone default. RadioButton group instead of
-        # a combo so the user sees all four options + their hints at once —
-        # they're meaningfully different and a one-line dropdown loses that.
+        # --- DNS (v3.1.1: always the system resolver) ---
+        # No DNS-server picker / leak toggle any more. The old custom DoH /
+        # smart-split resolver got DPI-throttled on RU networks: DoH exchanges
+        # timed out ("context deadline exceeded"), which black-holed DNS AND
+        # false-failed the connect-gate, so a working tunnel reported "doesn't
+        # pass traffic". DNS is now ALWAYS the system resolver — app :53 is
+        # hijacked into sing-box and answered via type:local over the physical
+        # NIC (the user's already-working ISP/router DNS), one reliable path.
         sep_dns = QFrame()
         sep_dns.setFrameShape(QFrame.HLine)
         outer.addWidget(sep_dns)
 
-        dns_label = QLabel("DNS-сервер")
+        dns_label = QLabel("DNS")
         dns_label.setObjectName("h2")
         outer.addWidget(dns_label)
-
-        self.dns_group = QButtonGroup(self)
-        self.dns_group.setExclusive(True)
-        self._dns_radios: dict[str, QRadioButton] = {}
-        self._ublock_helper: Optional[QLabel] = None
-        current_dns = str(manager.settings.get("dns_option", dns_options.DEFAULT_KEY))
-        for opt in dns_options.OPTIONS:
-            radio = QRadioButton(opt.label_ru)
-            radio.setChecked(opt.key == current_dns)
-            radio.toggled.connect(
-                lambda checked, k=opt.key: self._on_dns_option_changed(k, checked)
-            )
-            self.dns_group.addButton(radio)
-            outer.addWidget(radio)
-            hint = QLabel(opt.hint_ru)
-            hint.setObjectName("dim")
-            hint.setWordWrap(True)
-            hint.setContentsMargins(28, 0, 0, 4)
-            outer.addWidget(hint)
-            self._dns_radios[opt.key] = radio
-
-            # YouTube-ads helper — shown only under AdGuard, because that's
-            # the option users pick for "block ads" and immediately notice
-            # YouTube isn't covered. Native YT ads come from the same
-            # domains as content (googlevideo.com) so no DNS/SNI filter
-            # can touch them — only DOM-level browser extensions can.
-            # Rather than fake a fix or hide the limitation, point users
-            # at the tool that actually works, with a one-click link.
-            if opt.key == "adguard":
-                self._ublock_helper = QLabel(
-                    "📺 <b>YouTube-реклама всё равно показывается?</b> "
-                    "Это нативные ad'ы — режутся только браузером. Установи "
-                    "<a href='https://ublockorigin.com/' style='color:#f59e0b'>"
-                    "uBlock Origin</a> для Chrome/Firefox/Edge — 30 секунд, "
-                    "бесплатно, режет YouTube-ads на 100% (поверх нашего AdGuard)."
-                )
-                self._ublock_helper.setObjectName("dim")
-                self._ublock_helper.setWordWrap(True)
-                self._ublock_helper.setTextFormat(Qt.RichText)
-                self._ublock_helper.setOpenExternalLinks(True)
-                self._ublock_helper.setContentsMargins(28, 4, 0, 8)
-                self._ublock_helper.setVisible(opt.key == current_dns)
-                outer.addWidget(self._ublock_helper)
-
-        dns_footer = QLabel(
-            "DoH (зашифрованный DNS) — провайдер не видит запросы. "
-            "Применяется при следующем подключении."
+        dns_note = QLabel(
+            "Используется системный DNS — тот же резолвер, что и без VPN. "
+            "Все запросы внутри туннеля идут одним надёжным путём. Отдельные "
+            "DoH-резолверы убраны: их часто режут на уровне провайдера, и из-за "
+            "этого подключение ошибочно срывалось.\n"
+            "Важно: провайдер может видеть запрашиваемые домены — DNS не "
+            "шифруется. Это плата за надёжность; содержимое трафика остаётся "
+            "внутри туннеля."
         )
-        dns_footer.setObjectName("dim")
-        dns_footer.setWordWrap(True)
-        dns_footer.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(dns_footer)
-
-        # --- DNS leak protection toggle (v1.16.8) ---
-        # Independent of the DNS option above. When ON, xray hijacks all
-        # :53 traffic to its dns-out outbound, re-resolves through the
-        # selected provider (or Cloudflare fallback for System), and
-        # transports the upstream query through the VPN tunnel. The
-        # physical NIC's DNS is also cleared at connect so Windows'
-        # Smart Multi-Homed Name Resolution can't query the ISP-DNS
-        # in parallel. Result: ISP sees only encrypted VPN bytes.
-        # OFF preserves the legacy "direct :53" path for users with
-        # Pi-hole / corporate / locally-pinned DNS that they need.
-        self.dns_leak_check = QCheckBox("Защита от DNS-утечек")
-        self.dns_leak_check.setChecked(
-            bool(manager.settings.get("dns_leak_protection", True))
-        )
-        self.dns_leak_check.toggled.connect(self._on_dns_leak_changed)
-        outer.addWidget(self.dns_leak_check)
-        dns_leak_hint = QLabel(
-            "С включённой защитой: все DNS-запросы перенаправляются на "
-            "выбранный DNS-сервер выше (или Cloudflare 1.1.1.1 для "
-            "опции «Системный»), маршрут через VPN. Провайдер видит "
-            "только зашифрованный VPN-трафик. "
-            "<b>Выключите</b>, если у вас Pi-hole, корпоративный DNS или "
-            "локально настроенный резолвер, который должен реально "
-            "отвечать на запросы."
-        )
-        dns_leak_hint.setObjectName("dim")
-        dns_leak_hint.setWordWrap(True)
-        dns_leak_hint.setTextFormat(Qt.RichText)
-        dns_leak_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(dns_leak_hint)
+        dns_note.setObjectName("dim")
+        dns_note.setWordWrap(True)
+        dns_note.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(dns_note)
 
         # --- Routing: ad-block + RU-direct (v1.19.0) ---------------------
         # Both apply at the xray routing layer via the bundled geo data
@@ -798,10 +730,6 @@ class SettingsPage(QWidget):
         self._manager.update_settings(webrtc_leak_protection=checked)
         self.settings_changed.emit()
 
-    def _on_dns_leak_changed(self, checked: bool) -> None:
-        self._manager.update_settings(dns_leak_protection=checked)
-        self.settings_changed.emit()
-
     def _on_route_ru_direct_changed(self, checked: bool) -> None:
         self._manager.update_settings(route_ru_direct=checked)
         self.settings_changed.emit()
@@ -819,19 +747,6 @@ class SettingsPage(QWidget):
         self._manager.update_settings(public_ip_probe=checked)
         self.settings_changed.emit()
 
-    def _on_dns_option_changed(self, key: str, checked: bool) -> None:
-        # Both old and new radios fire toggled() — we only care about the
-        # one being newly selected (checked=True). Saved immediately;
-        # applied at the next connect (xray needs a restart to re-read
-        # the dns block and the TUN adapter's resolver gets re-pinned in
-        # _connect_tun).
-        if not checked:
-            return
-        self._manager.update_settings(dns_option=key)
-        # Show YouTube-ads helper only when AdGuard is active — under
-        # the other options it'd be confusing noise.
-        if self._ublock_helper is not None:
-            self._ublock_helper.setVisible(key == "adguard")
         self.settings_changed.emit()
 
     def _on_theme_changed(self, _index: int) -> None:

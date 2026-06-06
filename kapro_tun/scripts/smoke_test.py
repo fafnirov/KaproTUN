@@ -181,7 +181,7 @@ def _import_core() -> None:
     from kapro_tun.core import (  # noqa: F401
         controller, parser, storage, paths,
         subscription, geoip_ru, killswitch, i18n, system_proxy,
-        ip_probe, dns_options, secrets_store, ipv6_block,
+        ip_probe, secrets_store, ipv6_block,
         bandwidth_history, webrtc_block, leak_test, crash_handler,
         sing_box_config, sing_box_installer, sing_box_process,
     )
@@ -4171,46 +4171,35 @@ def _v3_private_bypass() -> None:
 
 
 def _v3_dns_hijack_and_leak() -> None:
-    # 4) DNS: all :53 is hijacked. Leak ON uses encrypted direct DoH so a dead
-    #    proxy transport cannot black out DNS; leak OFF uses plaintext direct DNS.
-    on = _sb_v3.build_config(parsed["vless"], [], server_ip="1.2.3.4",
-                             dns_leak_protection=True)
+    # 4) v3.1.1: DNS is ALWAYS the system resolver. All :53 is hijacked into the
+    #    dns module, which is a single `type: local` server (the OS resolver over
+    #    the physical NIC). The old custom DoH / smart-split was DPI-throttled on
+    #    RU networks — DoH timeouts black-holed DNS and false-failed the connect
+    #    gate — so it is gone. The dns_leak_protection kwarg is accepted but must
+    #    have NO effect on the produced config.
+    c = _sb_v3.build_config(parsed["vless"], [], server_ip="1.2.3.4")
     # Modern grammar: DNS hijack is a route ACTION, not a route-to-outbound.
     if not any(r.get("protocol") == "dns" and r.get("action") == "hijack-dns"
-               for r in on["route"]["rules"]):
+               for r in c["route"]["rules"]):
         raise AssertionError("missing DNS hijack rule (protocol:dns → hijack-dns)")
-    secure = on["dns"]["servers"]
-    if not secure or not all(s.get("type") == "https" for s in secure):
-        raise AssertionError("leak-ON DNS must use encrypted DoH")
-    if any(s.get("detour") for s in secure):
-        raise AssertionError("leak-ON DNS must not depend on the proxy transport")
-    resolver_rule = [
-        r for r in on["route"]["rules"]
-        if r.get("outbound") == "direct" and r.get("port") == [443]
-    ]
-    if not resolver_rule:
-        raise AssertionError("secure DoH endpoint must be routed direct")
-    # Typed DNS servers (1.12+) — the legacy {"address": ...} shape is fatal on
-    # current binaries, so every server must carry an explicit type + server.
-    for s in on["dns"]["servers"]:
-        if "address" in s or not s.get("type") or not s.get("server"):
-            raise AssertionError("DNS servers must use the 1.12+ typed format")
+    servers = c["dns"]["servers"]
+    if servers != [{"type": "local", "tag": "local"}]:
+        raise AssertionError(f"DNS must be a single system (type:local) server, got {servers}")
+    if c["dns"].get("strategy") != "ipv4_only":
+        raise AssertionError("DNS strategy must be ipv4_only (matches 2000::/3 reject)")
+    # No DoH and no resolver-IP carve-out route rule may survive.
+    if any(s.get("type") == "https" for s in servers):
+        raise AssertionError("custom DoH must be gone — DNS is system only")
+    if any(r.get("outbound") == "direct" and r.get("port") in ([443], [53])
+           for r in c["route"]["rules"]):
+        raise AssertionError("resolver-IP carve-out rule must be gone (type:local self-egresses)")
+    # The ignored leak kwarg must not change the output.
+    on = _sb_v3.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                             dns_leak_protection=True)
     off = _sb_v3.build_config(parsed["vless"], [], server_ip="1.2.3.4",
                               dns_leak_protection=False)
-    # Leak-OFF: DNS must NOT ride the proxy. It must also carry NO detour at
-    # all — sing-box 1.13 rejects `"detour": "direct"` ("detour to an empty
-    # direct outbound makes no sense"); a detour-less server already resolves
-    # over the default (direct) path, which is the leak-off behaviour.
-    off_servers = off["dns"]["servers"]
-    if not off_servers:
-        raise AssertionError("leak-OFF must still define a DNS server")
-    for s in off_servers:
-        if s.get("detour") == "proxy":
-            raise AssertionError("leak-OFF DNS must not ride the proxy")
-        if "detour" in s:
-            raise AssertionError(
-                "leak-OFF DNS server must have NO detour (1.13 rejects "
-                "detour=direct to the empty direct outbound)")
+    if on["dns"] != off["dns"] or on["dns"] != c["dns"]:
+        raise AssertionError("dns_leak_protection must be ignored — DNS always system")
 
 
 def _v3_unsupported_raises() -> None:
@@ -4626,16 +4615,11 @@ def _v3_block_ads_warning_once() -> None:
 
 
 def _v3_dns_and_split_routing() -> None:
-    # 18) v3.0.5 DNS + split-routing fixes for the 'ChatGPT loads but
-    #     files.oaiusercontent.com / Yandex images hang' bug:
-    #     - leak-OFF: the upstream resolver's :53 is routed DIRECT (fast,
-    #       ISP-visible) BEFORE hijack-dns — not crawled through the proxy;
-    #       the dns server carries NO forbidden detour=direct.
-    #     - leak-ON: encrypted DoH goes direct on :443, independent of the VPN
-    #       transport. Query contents remain encrypted; no plaintext :53 leak.
-    #     - OpenAI/CDN domains are force-proxied BEFORE any direct/geoip:ru rule,
-    #       and never appear in a direct rule, so route_ru_direct can't pull a
-    #       CDN IP out the real interface.
+    # 18) v3.1.1: DNS is always the system resolver (type:local); this test now
+    #     guards the SPLIT-ROUTING half of the old 'ChatGPT loads but
+    #     oaiusercontent / Yandex images hang' fix: OpenAI/CDN/YouTube domains are
+    #     force-proxied BEFORE any direct/geoip:ru rule and never appear in a
+    #     direct rule, so route_ru_direct can't pull a CDN IP out the real NIC.
     from kapro_tun.core import sing_box_config as sb
 
     def build(leak, ru):
@@ -4649,33 +4633,15 @@ def _v3_dns_and_split_routing() -> None:
                 return i
         return None
 
-    # --- leak-OFF ---
-    c_off, rules_off = build(False, True)
-    for s in c_off["dns"]["servers"]:
-        if s.get("detour"):
-            raise AssertionError("leak-OFF dns server must have NO detour (1.13 fatal)")
-    i_res = idx(rules_off, lambda r: r.get("outbound") == "direct"
-                and r.get("port") == [53] and isinstance(r.get("ip_cidr"), list))
-    i_hijack = idx(rules_off, lambda r: r.get("action") == "hijack-dns")
-    if i_res is None:
-        raise AssertionError("leak-OFF must route the upstream resolver :53 DIRECT")
-    if i_hijack is None or i_res >= i_hijack:
-        raise AssertionError("resolver-direct rule must come BEFORE hijack-dns")
-    upstream = c_off["dns"]["servers"][0]["server"]
-    if f"{upstream}/32" not in rules_off[i_res]["ip_cidr"]:
-        raise AssertionError("the leak-OFF upstream IP must be in the direct rule")
-
-    # --- leak-ON ---
-    c_on, rules_on = build(True, True)
-    if not all(s.get("type") == "https" for s in c_on["dns"]["servers"]):
-        raise AssertionError("leak-ON DNS must use DoH")
-    if any(s.get("detour") for s in c_on["dns"]["servers"]):
-        raise AssertionError("leak-ON DNS must not depend on proxy transport")
-    if any(r.get("port") == [53] and r.get("outbound") == "direct" for r in rules_on):
-        raise AssertionError("leak-ON must NOT route resolver :53 direct (privacy leak)")
-    if not any(r.get("port") == [443] and r.get("outbound") == "direct"
-               for r in rules_on):
-        raise AssertionError("leak-ON DoH endpoint must route direct on :443")
+    # --- DNS is system in every mode, the leak kwarg is ignored ---
+    c_dns, rules_dns = build(True, True)
+    if c_dns["dns"]["servers"] != [{"type": "local", "tag": "local"}]:
+        raise AssertionError("DNS must be a single system (type:local) server")
+    if not any(r.get("action") == "hijack-dns" for r in rules_dns):
+        raise AssertionError("app :53 must still be hijacked into the system resolver")
+    if any(r.get("outbound") == "direct" and r.get("port") in ([443], [53])
+           for r in rules_dns):
+        raise AssertionError("no resolver-IP carve-out rule may survive (type:local self-egresses)")
 
     # --- OpenAI/CDN/YouTube force-proxy ordering, in BOTH leak modes ---
     # v3.0.7 adds YouTube/Google-CDN suffixes (youtube.com, googlevideo.com,
@@ -4828,35 +4794,6 @@ def _v3_ip_probe_cold_start_tolerant() -> None:
         raise AssertionError("IP display probe timeout must stay short")
 
 
-def _v3_smart_split_dns() -> None:
-    # v3.0.13 supersedes proxy-dependent smart-split DNS. Leak-ON DNS is
-    # encrypted direct DoH for every domain: reliable even when the selected VPN
-    # transport is dead, while query contents remain hidden from the ISP.
-    from kapro_tun.core import sing_box_config as sb
-    c = sb.build_config(parsed["vless"], ["gosuslugi.ru", "sberbank.ru"],
-                        server_ip="1.2.3.4", dns_leak_protection=True,
-                        route_ru_direct=True)
-    d = c["dns"]
-    servers = d["servers"]
-    if len(servers) != 1 or servers[0].get("type") != "https":
-        raise AssertionError("leak-ON DNS must be a single encrypted DoH server")
-    if servers[0].get("detour"):
-        raise AssertionError("DoH must not depend on the selected proxy transport")
-    if not servers[0].get("connect_timeout"):
-        raise AssertionError("direct DoH must have a bounded connect timeout")
-    if d.get("rules"):
-        raise AssertionError("all domains must use the reliable encrypted resolver")
-    route_rules = c["route"]["rules"]
-    if not any(r.get("port") == [443] and r.get("outbound") == "direct"
-               for r in route_rules):
-        raise AssertionError("the DoH endpoint must route direct on :443")
-    # leak-OFF must NOT carry a proxy DoH (DNS goes direct, ISP-visible).
-    c_off = sb.build_config(parsed["vless"], ["gosuslugi.ru"], server_ip="1.2.3.4",
-                            dns_leak_protection=False, route_ru_direct=True)
-    if any(s.get("detour") == "proxy" for s in c_off["dns"]["servers"]):
-        raise AssertionError("leak-OFF DNS must not ride the proxy")
-
-
 def _v3_ip_probe_bypasses_system_proxy() -> None:
     # v3.0.11: the IP-probe must NEVER route through a system/environment HTTP
     # proxy. An ELEVATED process can resolve a stale/foreign dead 127.0.0.1:<port>
@@ -4942,11 +4879,11 @@ def _v3_connect_is_forgiving() -> None:
     dns_src = _ins.getsource(_C.ConnectionManager._wait_for_singbox_ready)
     if "while" not in dns_src or "deadline" not in dns_src or "return True" not in dns_src:
         raise AssertionError("_wait_for_singbox_ready must be a bounded poll loop")
-    if "singbox_system_tun_healthy" not in dns_src:
-        raise AssertionError("sing-box readiness must compare proxy and system TUN egress")
+    if "singbox_outbound_probe" not in dns_src:
+        raise AssertionError("sing-box readiness must probe the proxy outbound for live transport (v3.1.1)")
     runtime_src = _ins.getsource(_C.ConnectionManager.tun_runtime_healthy)
-    if "singbox_system_tun_healthy" not in runtime_src:
-        raise AssertionError("runtime watchdog must compare proxy and system TUN egress")
+    if "singbox_outbound_probe" not in runtime_src:
+        raise AssertionError("runtime watchdog must probe the proxy outbound for live transport (v3.1.1)")
     run_src = _ins.getsource(_C.ConnectionManager._wait_until_running)
     if "while" not in run_src or "is_running()" not in run_src:
         raise AssertionError("_wait_until_running must poll is_running() until a deadline")
@@ -5167,7 +5104,7 @@ def _smoke_does_not_touch_real_app_log() -> None:
 check("migration: default engine sing-box; old settings migrate", _v3_migration_default)
 check("config: native-TUN structure + pinned server + loop killer", _v3_config_structure)
 check("config: private/LAN/Docker (172.19.2.109) bypass", _v3_private_bypass)
-check("config: DNS hijack + leak ON direct DoH / OFF direct plaintext", _v3_dns_hijack_and_leak)
+check("config: DNS always system (type:local) + :53 hijacked, leak kwarg ignored", _v3_dns_hijack_and_leak)
 check("config: unsupported protocol/plugin raises", _v3_unsupported_raises)
 check("dispatch: unsupported → legacy error, no silent switch", _v3_dispatch_no_silent_switch)
 check("dispatch: engine=sing-box routes to sing-box; runtime fail no fallback",
@@ -5189,7 +5126,7 @@ check("logs: sing-box benign/ICMP hidden, transient startup-visible, fatal stays
       _v3_singbox_log_noise_classification)
 check("logs: block_ads notice logs once per launch, not per reconnect",
       _v3_block_ads_warning_once)
-check("dns/routing: leak-off direct, leak-on direct DoH, OpenAI force-proxy",
+check("dns/routing: DNS always system + OpenAI/CDN/YouTube force-proxy ordering",
       _v3_dns_and_split_routing)
 check("watchdog: sing-box DNS guarded both leak modes, sustained-failure debounce",
       _v3_singbox_dns_watchdog_guarded)
@@ -5205,8 +5142,6 @@ check("ip-probe: one short optional attempt, never a connect gate (v3.0.13)",
       _v3_ip_probe_cold_start_tolerant)
 check("ip-probe: trust_env=False — never hijacked by a system/env proxy (v3.0.11)",
       _v3_ip_probe_bypasses_system_proxy)
-check("dns: direct encrypted DoH is independent of VPN transport (v3.0.13)",
-      _v3_smart_split_dns)
 check("connect: forgiving — no CDN rollback, poll-based liveness warm-up (v3.0.8)",
       _v3_connect_is_forgiving)
 check("connect: system TUN egress must match proxy VPN IP (v3.0.13)",

@@ -11,7 +11,7 @@ import time
 from typing import Callable, Optional
 
 from . import (
-    admin, app_log, dns_options, dns_health, ipv6_block, killswitch,
+    admin, app_log, dns_health, ipv6_block, killswitch,
     paths, proc_stats, storage, tun_recovery, webrtc_block,
 )
 from .parser import ProxyConfig
@@ -53,13 +53,6 @@ TUN_MASK = "255.255.255.0"
 # protection is ON we DON'T use this list (see _LEAK_PROTECTED_TUN_DNS): DNS
 # must tunnel, so we use diverse upstreams that are NOT bypassed.
 TUN_DNS = ["77.88.8.8", "1.1.1.1"]
-
-# TUN-adapter resolvers when leak protection is ON — DNS rides the tunnel, so
-# these MUST be servers we deliberately route through it (via xray's :53
-# carve-out), NOT bypassed. Three different operators (Cloudflare/Google/Quad9)
-# for failover; same list xray's dns block + carve-out use, so the OS and xray
-# agree. None sit inside the always-bypassed RU service blocks below.
-_LEAK_PROTECTED_TUN_DNS = list(dns_options.LEAK_PROTECTED_SYSTEM_UPSTREAMS)
 
 # Public DNS-resolver host routes. Pinning these to the physical NIC means DNS
 # queries to them go DIRECT — correct ONLY when leak protection is OFF. With
@@ -313,16 +306,19 @@ class ConnectionManager:
         return self.is_connected()
 
     def tun_runtime_healthy(self) -> bool:
-        """Real data-plane health: DNS resolves AND the sing-box outbound carries
-        traffic whose public egress IP matches the system TUN's. A direct secure
-        resolver can stay healthy while the VPN outbound is dead, so DNS alone is
-        not enough."""
+        """Real data-plane health: DNS resolves AND the sing-box proxy outbound
+        actually carries HTTP. We test the outbound via the loopback health-probe
+        inbound (pinned to outbound=proxy) — a 2xx/3xx there proves the VPN
+        transport is alive. (v3.1.1: dropped the strict proxy==system egress-IP
+        match — with native sing-box auto_route owning the TUN, a live proxy
+        already implies captured system traffic, and the double cdn-cgi/trace was
+        a frequent false-negative that flapped the watchdog.)"""
         if not self.tun_dns_guarded():
             return True
         try:
             if not dns_health.probe(timeout=2.5, attempts=2):
                 return False
-            return dns_health.singbox_system_tun_healthy(
+            return dns_health.singbox_outbound_probe(
                 self._singbox_health_proxy_url(), timeout=2.5)
         except Exception as exc:
             self._log(f"[watchdog] health probe failed: {type(exc).__name__}: {exc}")
@@ -470,17 +466,20 @@ class ConnectionManager:
 
     def _wait_for_singbox_ready(self, deadline: float = 15.0,
                                 interval: float = 0.75) -> bool:
-        """Require both working DNS and real application traffic through TUN.
+        """Require working system DNS AND a live proxy transport.
 
-        DNS is independent direct DoH in v3.0.13, so it cannot prove that the
-        selected VLESS/Trojan/Hysteria2 transport works. The second probe enters
-        a loopback-only sing-box inbound that is explicitly routed to proxy.
+        DNS now resolves via the system resolver (v3.1.1), so a passing dns probe
+        proves names resolve but says nothing about the VPN. The transport probe
+        enters a loopback-only sing-box inbound pinned to outbound=proxy: a
+        2xx/3xx there proves the selected VLESS/Trojan/Hysteria2 transport
+        actually carries traffic. (No more cdn-cgi/trace egress match — it
+        depended on the old custom DoH resolving and false-failed live tunnels.)
         """
         waited = 0.0
         while waited < deadline:
             dns_ok = dns_health.probe(timeout=1.5, attempts=1)
-            transport_ok = (dns_health.singbox_system_tun_healthy(
-                                self._singbox_health_proxy_url(), timeout=2.0)
+            transport_ok = (dns_health.singbox_outbound_probe(
+                                self._singbox_health_proxy_url(), timeout=2.5)
                             if dns_ok else False)
             if dns_ok and transport_ok:
                 return True
@@ -492,8 +491,8 @@ class ConnectionManager:
             time.sleep(interval)
             waited += interval
         return (dns_health.probe(timeout=1.5, attempts=1)
-                and dns_health.singbox_system_tun_healthy(
-                    self._singbox_health_proxy_url(), timeout=2.0))
+                and dns_health.singbox_outbound_probe(
+                    self._singbox_health_proxy_url(), timeout=2.5))
 
     def _connect_tun_sing_box(self, config: ProxyConfig, direct_domains: list[str]) -> None:
         """sing-box native-TUN connect (v3.0.0 primary). sing-box owns the TUN
@@ -518,8 +517,7 @@ class ConnectionManager:
                 f"Не удалось резолвнуть VPN-сервер «{server_host}»: {e}") from e
 
         self._log("[*] Движок: sing-box (нативный TUN, без tun2socks/SOCKS-моста)")
-        dns_option = str(self.settings.get("dns_option", "system"))
-        dns_leak = bool(self.settings.get("dns_leak_protection", True))
+        # v3.1.1: DNS is always the system resolver — no dns_option / leak toggle.
         block_ads = bool(self.settings.get("block_ads", False))
         route_ru_direct = bool(self.settings.get("route_ru_direct", False))
 
@@ -532,7 +530,6 @@ class ConnectionManager:
         # has started yet, so nothing to roll back).
         cfg_path = sing_box_config.write_config(
             config, direct_domains, server_ip=server_ip,
-            dns_option=dns_option, dns_leak_protection=dns_leak,
             block_ads=block_ads, route_ru_direct=route_ru_direct,
             on_log=self._log,
         )
