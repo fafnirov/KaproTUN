@@ -4687,8 +4687,8 @@ def _v3_dns_and_split_routing() -> None:
 def _v3_ipv6_capture_and_throughput() -> None:
     # v3.0.9: IPv6 is captured INSIDE the sing-box TUN and rejected in-tunnel with
     # a TCP RST (no netsh firewall block → no WSAEACCES → no ERR_NETWORK_ACCESS_DENIED),
-    # while v6 still never leaks out the physical NIC. Plus the Windows throughput
-    # tuning: mixed stack, encapsulation-safe MTU, endpoint_independent_nat.
+    # while v6 still never leaks out the physical NIC. Plus the Windows data-path
+    # tuning: gvisor stack, encapsulation-safe MTU, endpoint_independent_nat.
     from kapro_tun.core import sing_box_config as sb
     c = sb.build_config(parsed["vless"], ["example.com"], server_ip="1.2.3.4",
                         dns_leak_protection=True, route_ru_direct=True)
@@ -4697,9 +4697,12 @@ def _v3_ipv6_capture_and_throughput() -> None:
     addrs = inb.get("address") or []
     if not any(":" in a for a in addrs):
         raise AssertionError("TUN must carry an inet6 address (capture IPv6 in-tunnel)")
-    # (b) throughput tuning.
-    if inb.get("stack") != "mixed":
-        raise AssertionError("TUN stack must be 'mixed' (kernel TCP) for Windows throughput")
+    # (b) stack: gvisor (v3.1.3). The kernel-TCP "mixed"/"system" paths carry no
+    # traffic at all on some real Windows machines (driver/AV/network-filter
+    # interaction) — tunnel up, egress IP flips, every request URLErrors. gVisor
+    # (full userspace) is the universally-working path, so it's the default.
+    if inb.get("stack") != "gvisor":
+        raise AssertionError("TUN stack must be 'gvisor' (works on Windows where 'mixed' carries no traffic)")
     mtu = int(inb.get("mtu", 0))
     if not 1280 <= mtu <= 1500:
         raise AssertionError("TUN mtu must be internet-safe (1280..1500)")
@@ -5132,7 +5135,7 @@ check("watchdog: sing-box DNS guarded both leak modes, sustained-failure debounc
       _v3_singbox_dns_watchdog_guarded)
 check("disconnect/rollback stops sing-box → system DNS/routes restored",
       _v3_disconnect_restores_dns)
-check("ipv6: captured + rejected, mixed stack, safe MTU/EIN (v3.0.13)",
+check("ipv6: captured + rejected, gvisor stack, safe MTU/EIN (v3.0.13)",
       _v3_ipv6_capture_and_throughput)
 check("ipv6: sing-box engine skips the netsh firewall block (v3.0.9)",
       _v3_singbox_skips_firewall_ipv6_block)

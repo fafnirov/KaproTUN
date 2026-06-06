@@ -39,11 +39,17 @@ TUN_INET6 = "fdfe:dcba:9876::1/126"
 # fragmentation was filtered. 1400 leaves room for VLESS/REALITY and other
 # encapsulation overhead without depending on ICMP fragmentation feedback.
 TUN_MTU = 1400
-# v3.0.9: "mixed" = kernel/system TCP stack (fast — web/video/downloads) + gVisor
-# only for UDP. This is sing-box's OWN default on Windows; the prior "gvisor"
-# (whole L3→L4 in userspace) was the documented worst case for Windows throughput
-# and CPU and was the main cause of the slow tunnel.
-TUN_STACK = "mixed"
+# TUN network stack. "gvisor" runs the whole L3→L4 in userspace; "mixed" uses
+# the kernel TCP stack (only UDP via gVisor) and is faster ON PAPER — but on
+# real Windows machines (drivers / AV / 3rd-party network filters) the kernel
+# path through WinTUN frequently carries NO traffic at all: the tunnel comes up,
+# the egress IP flips to the VPN, yet every app request dies with a connection
+# error (v3.1.3 field repro: `mixed`/`system` → 100% URLError, `gvisor` →
+# Google/Telegram load fine). gVisor is the universally-working path, so we
+# default to it for reliability over a throughput optimisation that doesn't
+# deliver when it doesn't connect. (A future Settings toggle could let advanced
+# users pick `mixed` where their NIC supports it.)
+TUN_STACK = "gvisor"
 HEALTH_PROXY_HOST = "127.0.0.1"
 HEALTH_PROXY_PORT = 2082
 
