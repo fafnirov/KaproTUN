@@ -37,11 +37,11 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..core import (
-    admin, app_log, autostart, dns_options, sing_box_config, sing_box_installer, storage,
-    tun2socks_installer, tun2socks_process, updater, xray_installer, xray_stats,
+    admin, app_log, autostart, dns_options, sing_box_config,
+    sing_box_installer, storage, updater, xray_stats,
 )
 from ..core import controller as _controller
-from ..core.controller import MODE_HTTP_PROXY, MODE_TUN
+from ..core.controller import MODE_TUN
 from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
 from ..core.parser import ProxyConfig
@@ -54,8 +54,7 @@ from .stats_page import StatsPage
 from .world_map import WorldMapWidget
 from . import window_resize
 from .configs_picker import ConfigsPickerDialog
-from .installer_dialog import (ensure_geoip_ru_cached, ensure_sing_box_installed,
-                               ensure_tun2socks_installed, ensure_xray_installed)
+from .installer_dialog import (ensure_geoip_ru_cached, ensure_sing_box_installed)
 from .sites_dialog import SitesDialog
 from .sparkline import TrafficSparkline
 from .titlebar import TitleBar
@@ -297,47 +296,8 @@ class SettingsPage(QWidget):
         title.setObjectName("h1")
         outer.addWidget(title)
 
-        # --- Mode (http proxy vs TUN) ---
-        mode_label = QLabel("Режим работы")
-        mode_label.setObjectName("h2")
-        outer.addWidget(mode_label)
-
-        self.mode_group = QButtonGroup(self)
-        self.radio_http = QRadioButton("HTTP-прокси (только браузер)")
-        # Per-OS phrasing for the admin requirement — Windows users see
-        # "UAC", Unix users see "sudo/root".
-        tun_admin_label = {
-            "win32":  "TUN (все приложения, нужен админ)",
-            "darwin": "TUN (все приложения, нужен sudo)",
-        }.get(sys.platform, "TUN (все приложения, нужен root)")
-        self.radio_tun = QRadioButton(tun_admin_label)
-        self.mode_group.addButton(self.radio_http)
-        self.mode_group.addButton(self.radio_tun)
-        current_mode = manager.settings.get("mode", MODE_HTTP_PROXY)
-        if current_mode == MODE_TUN:
-            self.radio_tun.setChecked(True)
-        else:
-            self.radio_http.setChecked(True)
-        self.radio_http.toggled.connect(self._on_mode_changed)
-        self.radio_tun.toggled.connect(self._on_mode_changed)
-        outer.addWidget(self.radio_http)
-        http_hint = QLabel(
-            "Защищает только приложения, понимающие HTTP-прокси (браузеры). "
-            "Остальное — ТГ, игры, системный трафик — идёт мимо туннеля, "
-            "через ваш реальный IP. Это не «VPN на всю систему». Для полной "
-            "защиты выберите TUN."
-        )
-        http_hint.setObjectName("dim")
-        http_hint.setWordWrap(True)
-        http_hint.setContentsMargins(28, 0, 0, 4)
-        outer.addWidget(http_hint)
-        outer.addWidget(self.radio_tun)
-        tun_hint = QLabel("Туннелирует все программы системно (весь трафик через VPN): ТГ, Steam, игры.")
-        tun_hint.setObjectName("dim")
-        tun_hint.setWordWrap(True)
-        tun_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(tun_hint)
-
+        # v3.1.0: KaproTUN is TUN-only (sing-box). No mode/engine choice — the
+        # whole system is tunnelled. Admin is always required for the TUN device.
         # Admin status / relaunch button shown only when relevant
         self._admin_row = QHBoxLayout()
         self._admin_label = QLabel()
@@ -350,40 +310,6 @@ class SettingsPage(QWidget):
         admin_row_widget.setLayout(self._admin_row)
         outer.addWidget(admin_row_widget)
         self._refresh_admin_row()
-
-        sep0 = QFrame()
-        sep0.setFrameShape(QFrame.HLine)
-        outer.addWidget(sep0)
-
-        # --- Port ---
-        port_block = QVBoxLayout()
-        port_block.setSpacing(4)
-        port_label = QLabel("Порт локального прокси")
-        port_block.addWidget(port_label)
-        self.port_spin = QSpinBox()
-        self.port_spin.setRange(1024, 65535)
-        self.port_spin.setValue(int(manager.settings.get("listen_port", 2080)))
-        self.port_spin.setFixedWidth(110)  # don't stretch across the row
-        self.port_spin.valueChanged.connect(self._on_port_changed)
-        port_block.addWidget(self.port_spin)
-        port_hint = QLabel("Браузер должен ходить на 127.0.0.1:<этот порт>")
-        port_hint.setObjectName("dim")
-        port_block.addWidget(port_hint)
-        outer.addLayout(port_block)
-
-        # --- Auto system proxy ---
-        self.auto_proxy_check = QCheckBox(
-            "Автоматически ставить системный прокси Windows"
-        )
-        self.auto_proxy_check.setChecked(
-            bool(manager.settings.get("auto_set_system_proxy", True))
-        )
-        self.auto_proxy_check.toggled.connect(self._on_auto_proxy_changed)
-        outer.addWidget(self.auto_proxy_check)
-        proxy_hint = QLabel("Только для HTTP-режима. В TUN не нужно.")
-        proxy_hint.setObjectName("dim")
-        proxy_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(proxy_hint)
 
         # --- Auto-start with Windows ---
         sep_startup = QFrame()
@@ -640,40 +566,6 @@ class SettingsPage(QWidget):
         routing_label.setObjectName("h2")
         outer.addWidget(routing_label)
 
-        self.block_ads_check = QCheckBox("Блокировать рекламу и трекеры")
-        self.block_ads_check.setChecked(
-            bool(manager.settings.get("block_ads", False))
-        )
-        self.block_ads_check.toggled.connect(self._on_block_ads_changed)
-        outer.addWidget(self.block_ads_check)
-        block_ads_hint = QLabel(
-            "Режет ~10 тыс. рекламных и трекерных доменов прямо в туннеле "
-            "(geosite:category-ads-all) — работает при любом DNS, в отличие "
-            "от DoH-блок-листа, который обходят браузеры со своим DNS. "
-            "Нативную YouTube-рекламу не трогает (нужен uBlock Origin в "
-            "браузере). Применяется при следующем подключении."
-        )
-        block_ads_hint.setObjectName("dim")
-        block_ads_hint.setWordWrap(True)
-        block_ads_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(block_ads_hint)
-
-        # v3.0.3: ad-block is an Xray routing feature (geosite:category-ads-all);
-        # the sing-box engine doesn't ship the geosite DB, so it can't block ads.
-        # When sing-box is the active TUN engine we disable the checkbox and show
-        # this note so we never promise blocking that won't happen. The stored
-        # setting is preserved — switching to legacy (or HTTP mode) re-activates
-        # it. Visibility toggled by _sync_block_ads_for_engine().
-        self._block_ads_engine_note = QLabel(
-            "⚠ Работает только на движке «Legacy (Xray + tun2socks)» или в "
-            "HTTP-режиме. На основном движке sing-box блокировка неактивна — "
-            "переключи движок в разделе «Движок TUN» ниже."
-        )
-        self._block_ads_engine_note.setObjectName("dim")
-        self._block_ads_engine_note.setWordWrap(True)
-        self._block_ads_engine_note.setContentsMargins(28, 0, 0, 0)
-        self._block_ads_engine_note.setVisible(False)
-        outer.addWidget(self._block_ads_engine_note)
 
         self.ru_direct_check = QCheckBox("Российские сайты напрямую (по гео-IP)")
         self.ru_direct_check.setChecked(
@@ -696,85 +588,6 @@ class SettingsPage(QWidget):
         ru_direct_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(ru_direct_hint)
 
-        # --- Hysteria2 link speed → brutal congestion control (v1.19.6) ---
-        sep_hy = QFrame()
-        sep_hy.setFrameShape(QFrame.HLine)
-        outer.addWidget(sep_hy)
-
-        hy_label = QLabel("Скорость канала (для Hysteria2)")
-        hy_label.setObjectName("h2")
-        outer.addWidget(hy_label)
-
-        # v1.20.0: auto-measure (default). The app measures the raw link at
-        # connect time and feeds hysteria — no manual speedtest needed.
-        self.hy_auto_check = QCheckBox("Авто-замер скорости (рекомендуется)")
-        self.hy_auto_check.setChecked(bool(manager.settings.get("hysteria_auto_bandwidth", True)))
-        self.hy_auto_check.toggled.connect(self._on_hy_auto_changed)
-        outer.addWidget(self.hy_auto_check)
-        hy_auto_hint = QLabel(
-            "В авто-режиме применяется безопасный запас: берётся ≈75% от "
-            "замеренной загрузки и ≈50% от отдачи, чтобы Hysteria2 не забивал "
-            "канал и не ронял соединение под нагрузкой (Telegram, торренты). "
-            "Ручной ввод (галка снята) используется как есть, без запаса."
-        )
-        hy_auto_hint.setObjectName("dim")
-        hy_auto_hint.setWordWrap(True)
-        hy_auto_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(hy_auto_hint)
-
-        # Hysteria2 speed controls — a 2-column grid (label | spinbox) with a
-        # stretch column on the right, and "Перемерить" on its own spanning
-        # row. The old single QHBoxLayout summed two wide spinboxes + the button
-        # into a minimum width that exceeded the fixed 480/460-px window, which
-        # forced the whole scroll content WIDER than the viewport and clipped
-        # every description label on the right (the horizontal scrollbar is off
-        # by design). A grid keeps the minimum width to one label + one spinbox.
-        hy_grid = QGridLayout()
-        hy_grid.setContentsMargins(0, 0, 0, 0)
-        hy_grid.setHorizontalSpacing(10)
-        hy_grid.setVerticalSpacing(8)
-
-        self.hy_down_spin = QSpinBox()
-        self.hy_down_spin.setRange(0, 10000)
-        self.hy_down_spin.setSuffix(" Мбит/с")
-        self.hy_down_spin.setMaximumWidth(150)  # don't balloon / stretch the column
-        self.hy_down_spin.setValue(int(manager.settings.get("hysteria_down_mbps", 0) or 0))
-        self.hy_down_spin.valueChanged.connect(self._on_hy_down_changed)
-
-        self.hy_up_spin = QSpinBox()
-        self.hy_up_spin.setRange(0, 10000)
-        self.hy_up_spin.setSuffix(" Мбит/с")
-        self.hy_up_spin.setMaximumWidth(150)
-        self.hy_up_spin.setValue(int(manager.settings.get("hysteria_up_mbps", 0) or 0))
-        self.hy_up_spin.valueChanged.connect(self._on_hy_up_changed)
-
-        self.hy_remeasure_btn = QPushButton("↻ Перемерить")
-        self.hy_remeasure_btn.setToolTip("Сбросить замер — приложение измерит скорость заново при следующем подключении")
-        self.hy_remeasure_btn.clicked.connect(self._on_hy_remeasure)
-
-        hy_grid.addWidget(QLabel("Загрузка:"), 0, 0)
-        hy_grid.addWidget(self.hy_down_spin, 0, 1)
-        hy_grid.addWidget(QLabel("Отдача:"), 1, 0)
-        hy_grid.addWidget(self.hy_up_spin, 1, 1)
-        hy_grid.addWidget(self.hy_remeasure_btn, 2, 0, 1, 2, Qt.AlignLeft)
-        hy_grid.setColumnStretch(2, 1)  # empty right column absorbs slack
-        outer.addLayout(hy_grid)
-
-        hy_hint = QLabel(
-            "Только для Hysteria2-серверов. В режиме <b>авто</b> приложение само "
-            "замеряет скорость канала при подключении и включает быстрый режим "
-            "Hysteria2 (brutal CC) — туннель тянет больше и не захлёбывается под "
-            "торрентами. Сними галку, чтобы вписать скорость вручную "
-            "(<b>0 = авто/BBR</b>). Не завышай вручную: значение выше реальной "
-            "скорости только вредит. Применяется при следующем подключении."
-        )
-        hy_hint.setObjectName("dim")
-        hy_hint.setWordWrap(True)
-        hy_hint.setTextFormat(Qt.RichText)
-        hy_hint.setOpenExternalLinks(True)
-        hy_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(hy_hint)
-        self._sync_hy_fields()
 
         # --- Language toggle ---
         # Lives in Security section because it's the only other "global
@@ -852,84 +665,6 @@ class SettingsPage(QWidget):
         theme_hint.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(theme_hint)
 
-        # --- Performance / memory preset (v2.1.6) ---
-        # tun2socks buffers each TCP flow up to (sndbuf + rcvbuf); the old
-        # 4m/4m default ballooned to multiple GB under many flows. This picks
-        # the per-flow ceiling. Balanced (1m) is the safe default; takes effect
-        # at the next connect (tun2socks reads it at start).
-        _ru = _i18n.current_locale() == "ru"
-        perf_row = QHBoxLayout()
-        perf_row.setContentsMargins(0, 6, 0, 0)
-        perf_label = QLabel("Производительность" if _ru else "Performance")
-        perf_row.addWidget(perf_label)
-        perf_row.addStretch(1)
-        self.perf_combo = QComboBox()
-        self.perf_combo.addItem("Сбалансированно (1 МБ)" if _ru else "Balanced (1 MB)", "balanced")
-        self.perf_combo.addItem("Экономия памяти (512 КБ)" if _ru else "Low memory (512 KB)", "economy")
-        self.perf_combo.addItem("Макс. скорость (4 МБ)" if _ru else "Max speed (4 MB)", "speed")
-        current_perf = str(manager.settings.get("performance_preset", "balanced"))
-        for i in range(self.perf_combo.count()):
-            if self.perf_combo.itemData(i) == current_perf:
-                self.perf_combo.setCurrentIndex(i)
-                break
-        self.perf_combo.currentIndexChanged.connect(self._on_perf_preset_changed)
-        perf_row.addWidget(self.perf_combo)
-        outer.addLayout(perf_row)
-        perf_hint = QLabel(
-            "Размер TCP-буферов tun2socks. Меньше — меньше памяти, больше — "
-            "выше скорость на быстрых каналах. Применяется при следующем "
-            "подключении."
-            if _ru else
-            "tun2socks TCP buffer size. Lower = less memory; higher = more "
-            "speed on fast links. Applies on the next connect."
-        )
-        perf_hint.setObjectName("dim")
-        perf_hint.setWordWrap(True)
-        perf_hint.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(perf_hint)
-
-        # --- TUN engine (v3.0.0) ---
-        # sing-box owns the TUN device natively (no 127.0.0.1:2081 SOCKS bridge,
-        # no tun2socks) which removes the loopback ephemeral-port exhaustion that
-        # could wedge long classic sessions. The legacy xray+tun2socks engine
-        # stays available as a fallback for the rare configs sing-box can't
-        # faithfully reproduce. Takes effect at the next connect.
-        engine_row = QHBoxLayout()
-        engine_row.setContentsMargins(0, 6, 0, 0)
-        engine_label = QLabel("Движок TUN" if _ru else "TUN engine")
-        engine_row.addWidget(engine_label)
-        engine_row.addStretch(1)
-        self.engine_combo = QComboBox()
-        self.engine_combo.addItem(
-            "Основной: sing-box" if _ru else "Primary: sing-box",
-            _controller.ENGINE_SING_BOX)
-        self.engine_combo.addItem(
-            "Legacy: Xray + tun2socks" if _ru else "Legacy: Xray + tun2socks",
-            _controller.ENGINE_CLASSIC)
-        current_engine = _controller.resolve_engine(manager.settings.get("tun_engine"))
-        for i in range(self.engine_combo.count()):
-            if self.engine_combo.itemData(i) == current_engine:
-                self.engine_combo.setCurrentIndex(i)
-                break
-        self.engine_combo.currentIndexChanged.connect(self._on_tun_engine_changed)
-        engine_row.addWidget(self.engine_combo)
-        outer.addLayout(engine_row)
-        # Both block_ads_check and engine_combo now exist — reflect the
-        # engine-dependent availability of ad-block in the UI from the start.
-        self._sync_block_ads_for_engine()
-        engine_hint = QLabel(
-            "sing-box — основной движок: один процесс владеет TUN, без моста "
-            "tun2socks. Legacy включай, только если конкретный конфиг не "
-            "поддержан в sing-box. Применяется при следующем подключении."
-            if _ru else
-            "sing-box is the primary engine: a single process owns the TUN with "
-            "no tun2socks bridge. Switch to legacy only if a specific config "
-            "isn't supported on sing-box. Applies on the next connect."
-        )
-        engine_hint.setObjectName("dim")
-        engine_hint.setWordWrap(True)
-        engine_hint.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(engine_hint)
 
         # Separator
         sep = QFrame()
@@ -956,7 +691,7 @@ class SettingsPage(QWidget):
 
         # --- Logs viewer link ---
         logs_row, _ = self._make_link_row(
-            "Логи Xray-core",
+            "Логи sing-box",
             "посмотреть последние строки",
             self.logs_clicked.emit,
         )
@@ -969,19 +704,10 @@ class SettingsPage(QWidget):
         sep2.setFrameShape(QFrame.HLine)
         outer.addWidget(sep2)
 
-        engine_version = xray_installer.get_installed_version() or "не установлен"
-        tun_version = tun2socks_installer.get_installed_version() or "не установлен"
         sb_version = sing_box_installer.get_installed_version() or "не установлен"
-        tun_row = (
-            f"<div style='color:#71717a; font-size:9pt'>sing-box: {sb_version}</div>"
-            f"<div style='color:#71717a; font-size:9pt'>tun2socks: {tun_version}</div>"
-        )
-        # Xray's version string is long ("Xray 26.3.27 ... go1.26.1 windows/amd64")
-        # — word-wrap so we don't clip the right edge of the panel.
         about = QLabel(
             f"<div style='color:#fafafa; font-weight:600'>KaproTUN v{__version__}</div>"
-            f"<div style='color:#71717a; font-size:9pt'>Xray-core: {engine_version}</div>"
-            f"{tun_row}"
+            f"<div style='color:#71717a; font-size:9pt'>sing-box: {sb_version}</div>"
             f"<div style='color:#71717a; font-size:9pt'>GPL v3 · "
             f"<a href='https://github.com/fafnirov/KaproTUN' style='color:#f59e0b'>"
             f"github.com/fafnirov/KaproTUN</a></div>"
@@ -1048,14 +774,6 @@ class SettingsPage(QWidget):
         if label is not None:
             label.setText(self._sub_info_text())
 
-    def _on_port_changed(self, value: int) -> None:
-        self._manager.update_settings(listen_port=int(value))
-        self.settings_changed.emit()
-
-    def _on_auto_proxy_changed(self, checked: bool) -> None:
-        self._manager.update_settings(auto_set_system_proxy=checked)
-        self.settings_changed.emit()
-
     def _on_autostart_changed(self, checked: bool) -> None:
         ok = autostart.enable(minimized=True) if checked else autostart.disable()
         if not ok:
@@ -1084,90 +802,17 @@ class SettingsPage(QWidget):
         self._manager.update_settings(dns_leak_protection=checked)
         self.settings_changed.emit()
 
-    def _on_block_ads_changed(self, checked: bool) -> None:
-        self._manager.update_settings(block_ads=checked)
-        self.settings_changed.emit()
-
-    def _block_ads_available(self) -> bool:
-        """Ad-block (geosite:category-ads-all) is an Xray routing feature. It
-        works in HTTP mode and in the legacy TUN engine (both run xray), but NOT
-        in the sing-box native-TUN engine (no geosite DB). Available unless the
-        active dataplane is sing-box TUN."""
-        mode = self._manager.settings.get("mode", MODE_HTTP_PROXY)
-        if mode != MODE_TUN:
-            return True  # HTTP mode always uses xray
-        engine = _controller.resolve_engine(self._manager.settings.get("tun_engine"))
-        return engine != _controller.ENGINE_SING_BOX
-
-    def _sync_block_ads_for_engine(self) -> None:
-        """Enable/disable the ad-block checkbox + its 'legacy only' note to
-        match where ad-block can actually run. NEVER mutates the stored
-        block_ads setting — disabling is purely visual, so switching back to
-        legacy/HTTP restores the user's choice intact."""
-        available = self._block_ads_available()
-        # setEnabled() doesn't emit toggled(), so the stored block_ads value is
-        # untouched — the checkbox keeps its checked state, just greyed out.
-        self.block_ads_check.setEnabled(available)
-        if hasattr(self, "_block_ads_engine_note"):
-            self._block_ads_engine_note.setVisible(not available)
-
     def _on_route_ru_direct_changed(self, checked: bool) -> None:
         self._manager.update_settings(route_ru_direct=checked)
         self.settings_changed.emit()
 
-    def _on_hy_down_changed(self, val: int) -> None:
-        self._manager.update_settings(hysteria_down_mbps=int(val))
-
-    def _on_hy_up_changed(self, val: int) -> None:
-        self._manager.update_settings(hysteria_up_mbps=int(val))
-
-    def _sync_hy_fields(self) -> None:
-        """Auto mode: speed fields are measured (read-only) + show a
-        'Перемерить' button. Manual mode: editable spinboxes."""
-        auto = self.hy_auto_check.isChecked()
-        arrows = QSpinBox.NoButtons if auto else QSpinBox.UpDownArrows
-        for spin in (self.hy_down_spin, self.hy_up_spin):
-            spin.setReadOnly(auto)
-            spin.setButtonSymbols(arrows)
-        self.hy_remeasure_btn.setVisible(auto)
-        self.hy_down_spin.setValue(int(self._manager.settings.get("hysteria_down_mbps", 0) or 0))
-        self.hy_up_spin.setValue(int(self._manager.settings.get("hysteria_up_mbps", 0) or 0))
-
-    def _on_hy_auto_changed(self, checked: bool) -> None:
-        self._manager.update_settings(hysteria_auto_bandwidth=checked)
-        self._sync_hy_fields()
-
-    def _on_hy_remeasure(self) -> None:
-        # Clear the cached measurement → the next connect re-measures the
-        # raw link (we measure before the tunnel routes go up).
-        self._manager.update_settings(hysteria_down_mbps=0, hysteria_up_mbps=0)
-        self.hy_down_spin.setValue(0)
-        self.hy_up_spin.setValue(0)
-        self.hy_remeasure_btn.setText("✓ Замерю при подключении")
-        QTimer.singleShot(2500, lambda: self.hy_remeasure_btn.setText("↻ Перемерить"))
-
     def _on_leak_test_clicked(self) -> None:
-        """Open the leak-test dialog. Uses the SOCKS proxy that xray's
-        socks-in inbound listens on — that's listen_port+1 by convention
-        (see xray_config.py).
-
-        When VPN isn't connected we still let the dialog open — the
-        probes will get the user's REAL IP/DNS as a baseline, which
-        is useful for "what does the world see when I'm NOT on VPN?"
-        comparison. The probes themselves don't require an active
-        connection.
-        """
+        """Open the leak-test dialog. In TUN mode the system route table already
+        tunnels everything through sing-box, so no proxy override is needed — the
+        probes use the ordinary system stack. When not connected they get the
+        real IP/DNS as a baseline."""
         from .leak_test_dialog import LeakTestDialog
-        port = int(self._manager.settings.get("listen_port", 2080))
-        host = str(self._manager.settings.get("listen_host", "127.0.0.1"))
-        socks_proxy: Optional[str] = None
-        if self._manager.is_connected():
-            # SOCKS5 inbound is at port+1 (xray_config.py convention).
-            # socks5h:// = let the proxy do hostname resolution too,
-            # otherwise the system resolver runs FIRST and the probe
-            # reports the system DNS path instead of xray's.
-            socks_proxy = f"socks5h://{host}:{port + 1}"
-        dlg = LeakTestDialog(socks_proxy, manager=self._manager, parent=self.window())
+        dlg = LeakTestDialog(None, manager=self._manager, parent=self.window())
         dlg.exec()
 
     def _on_ip_probe_changed(self, checked: bool) -> None:
@@ -1188,25 +833,6 @@ class SettingsPage(QWidget):
         if self._ublock_helper is not None:
             self._ublock_helper.setVisible(key == "adguard")
         self.settings_changed.emit()
-
-    def _on_perf_preset_changed(self, _index: int) -> None:
-        """Persist the tun2socks buffer preset. Applied at the next connect
-        (tun2socks reads performance_preset when it starts)."""
-        key = self.perf_combo.currentData()
-        if key:
-            self._manager.update_settings(performance_preset=str(key))
-            self.settings_changed.emit()
-
-    def _on_tun_engine_changed(self, _index: int) -> None:
-        """Persist the TUN engine choice (sing-box primary / legacy fallback).
-        Applied at the next connect — the controller reads tun_engine when it
-        dispatches the TUN connect."""
-        key = self.engine_combo.currentData()
-        if key:
-            self._manager.update_settings(tun_engine=str(key))
-            # Ad-block availability depends on the engine — refresh its control.
-            self._sync_block_ads_for_engine()
-            self.settings_changed.emit()
 
     def _on_theme_changed(self, _index: int) -> None:
         """Persist theme + apply it live to the running app.
@@ -1262,27 +888,13 @@ class SettingsPage(QWidget):
         )
         self.update_status_label.setTextFormat(Qt.RichText)
 
-    def _on_mode_changed(self, _checked: bool) -> None:
-        # Both radios fire toggled — only act when the new selection is "checked".
-        mode = MODE_TUN if self.radio_tun.isChecked() else MODE_HTTP_PROXY
-        self._manager.update_settings(mode=mode)
-        self._refresh_admin_row()
-        # Ad-block works in HTTP mode (xray) but not in sing-box TUN — re-sync.
-        self._sync_block_ads_for_engine()
-        self.settings_changed.emit()
-
     def _refresh_admin_row(self) -> None:
-        is_admin = admin.is_admin()
-        mode = self._manager.settings.get("mode", MODE_HTTP_PROXY)
-        if mode == MODE_TUN and not is_admin:
-            self._admin_label.setText("⚠ Запущено без прав администратора — TUN не сработает")
-            self._relaunch_btn.setVisible(True)
-        elif mode == MODE_TUN and is_admin:
+        if admin.is_admin():
             self._admin_label.setText("✓ Запущено с правами администратора")
             self._relaunch_btn.setVisible(False)
         else:
-            self._admin_label.setText("")
-            self._relaunch_btn.setVisible(False)
+            self._admin_label.setText("⚠ Запущено без прав администратора — TUN не сработает")
+            self._relaunch_btn.setVisible(True)
 
     def _on_relaunch_admin(self) -> None:
         import sys
@@ -1488,7 +1100,7 @@ class _DnsWatchdog(QThread):
 
 
 class LogsPage(QWidget):
-    """Read-only viewer for Xray-core logs."""
+    """Read-only viewer for sing-box logs."""
 
     back_clicked = Signal()
 
@@ -1509,7 +1121,7 @@ class LogsPage(QWidget):
         header.addWidget(clear_btn)
         layout.addLayout(header)
 
-        title = QLabel("Логи Xray-core")
+        title = QLabel("Логи sing-box")
         title.setObjectName("h2")
         layout.addWidget(title)
 
@@ -1940,73 +1552,27 @@ class MainWindow(QMainWindow):
         self._tray_pinger.start()
 
     def _diagnose_component_death(self) -> None:
-        """Log (once each) when a helper process that should be alive has
-        exited while we still consider ourselves connected — the "VPN отмер"
-        case where xray is up but no traffic flows. returncode() is None until
-        a process has actually run, so `not is_running() and returncode() is
-        not None` distinguishes "ran then died" from "never started this mode".
-        """
-        m = self.manager
-        tun = m.tun_process
-        if (not self._tun_death_notified
-                and not tun.is_running() and tun.returncode() is not None):
-            self._tun_death_notified = True
-            tail = " | ".join(tun.recent_logs()[-4:])
-            self.logs_page.append(
-                f"[!] tun2socks (TUN-движок) завершился (код {tun.returncode()}) — "
-                f"туннель в TUN-режиме сломан, переподключись."
-                + (f" Лог: {tail}" if tail else "")
-            )
-        hy = m.hysteria_process
-        if (not self._hy_death_notified
-                and not hy.is_running() and hy.returncode() is not None):
-            self._hy_death_notified = True
-            tail = " | ".join(hy.recent_logs()[-4:])
-            msg = (f"[!] hysteria-транспорт завершился (код {hy.returncode()}) — "
-                   f"Hysteria2-туннель сломан, переподключись.")
-            # Saturation suspicion: hy2 + auto-bandwidth + brutal CC active
-            # (a measured up-rate is set) is the classic "Telegram saturates
-            # the uplink -> tunnel dies" shape. Point the user at it.
-            if (bool(m.settings.get("hysteria_auto_bandwidth", True))
-                    and int(m.settings.get("hysteria_up_mbps", 0) or 0) > 0):
-                msg += (" Возможная причина — перегрузка канала (Telegram/торрент) "
-                        "при включённом brutal CC; попробуй снизить нагрузку или "
-                        "снять галку «Авто-замер скорости».")
-            self.logs_page.append(msg + (f" Лог: {tail}" if tail else ""))
+        """No-op since v3.1.0: sing-box is the single dataplane process, so there
+        are no separate helper processes (tun2socks / hysteria) whose silent death
+        needs detecting — a sing-box exit is handled by the crash watchdog in
+        _refresh_home via _primary_process()."""
+        return
 
     def _engine_tag(self) -> str:
-        """Short status-line label for the active dataplane: 'HTTP' for proxy
-        mode, 'TUN · sing-box' / 'TUN · legacy' for the two TUN engines. Reads
-        the controller's *active* engine when connected so the label reflects
-        reality (e.g. an UnsupportedBySingBox fallback), and the configured
-        engine otherwise."""
-        if self.manager.current_mode() != MODE_TUN:
-            return "HTTP"
-        engine = self.manager.current_engine()
-        if engine == _controller.ENGINE_CLASSIC:
-            return "TUN · legacy"
+        """Short status-line label for the active dataplane."""
         return "TUN · sing-box"
 
     def _engine_is_sing_box(self) -> bool:
-        """True when the ACTIVE session is the sing-box native-TUN engine —
-        i.e. TUN mode with the sing-box engine. In that mode xray/tun2socks are
-        never started; the single sing-box process IS the dataplane."""
-        return (self.manager.current_mode() == MODE_TUN
-                and self.manager.current_engine() == _controller.ENGINE_SING_BOX)
+        """Always True since v3.1.0 — sing-box is the only engine."""
+        return True
 
     def _primary_process(self):
-        """The dataplane 'core' process whose death means the tunnel core
-        crashed, for the ACTIVE engine. sing-box TUN → the single sing-box
-        process (xray is never started in that mode); classic TUN / HTTP →
-        xray. Checking the wrong process makes the crash-watchdog mis-read a
-        healthy sing-box session as an Xray crash and reconnect-loop (v3.0.2)."""
-        if self._engine_is_sing_box():
-            return self.manager.sing_box_process
-        return self.manager.process
+        """The single dataplane process whose death means the tunnel crashed."""
+        return self.manager.sing_box_process
 
     def _primary_process_name(self) -> str:
-        """Human label for the active engine's core process, for crash logs."""
-        return "sing-box" if self._engine_is_sing_box() else "Xray-core"
+        """Human label for the core process, for crash logs."""
+        return "sing-box"
 
     def _crash_diagnostics(self, proc, core_name: str) -> str:
         """Build a redacted, single-line process_crash diagnostic: old pid,
@@ -2080,14 +1646,13 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            if kill_switch and mode_is_tun and self.manager.tun_process.is_running():
-                # Kill-switch holds: leave TUN up so foreign traffic gets
-                # dropped instead of leaking out via the real interface.
-                # The user manually reconnects when ready. (Classic only —
-                # sing-box has no separate tun2socks process to keep the TUN
-                # alive, so a sing-box death falls through to the reconnect
-                # path below, where the firewall rules still block leaks until
-                # the reconnect re-arms them.)
+            # v3.1.0: sing-box is a single process — when it dies the TUN is
+            # gone too, so there's no separate helper to keep the tunnel up. A
+            # sing-box death always falls through to the reconnect path below;
+            # the kill-switch firewall rules keep blocking leaks until the
+            # reconnect re-arms them. (`if False` keeps the old kill-switch-holds
+            # branch out without restructuring the indentation.)
+            if kill_switch and mode_is_tun and False:
                 if not self._crash_notified:
                     self.logs_page.append(
                         f"[!] {core_name} упал (код {rc}). "
@@ -2217,23 +1782,10 @@ class MainWindow(QMainWindow):
     def _poll_traffic(self) -> None:
         """Pull the latest cumulative byte counters and feed rates to HomePage.
 
-        v1.15.4: source switched per mode. TUN mode → read kernel byte
-        counters from the named TUN interface via psutil (rock-solid,
-        zero subprocess overhead). HTTP-proxy mode → fall back to the
-        old `xray api stats` subprocess (the only way to get per-outbound
-        traffic when packets aren't isolated on a dedicated interface).
-
-        The `xray api stats` route had been silently returning None
-        in some user setups (v1.15.2/.3 user report) leaving the Stats
-        page rates stuck on "0 Б/с" forever — psutil makes that case
-        impossible because the TUN device counters always exist as
-        soon as tun2socks brings the interface up.
-        """
-        if self.manager.current_mode() == MODE_TUN:
-            from ..core.tun2socks_process import TUN_DEVICE_NAME
-            sample = xray_stats.query_tun_iface_stats(TUN_DEVICE_NAME)
-        else:
-            sample = xray_stats.query_stats()
+        Reads kernel byte counters from the sing-box TUN interface via psutil
+        (rock-solid, zero subprocess overhead) — the counters exist as soon as
+        sing-box brings the "KaproTun" interface up."""
+        sample = xray_stats.query_tun_iface_stats(sing_box_config.TUN_DEVICE_NAME)
         if sample is None:
             return
         if self._prev_traffic is None:
@@ -2313,20 +1865,12 @@ class MainWindow(QMainWindow):
         self._do_connect()
 
     def _do_connect(self) -> None:
-        if not ensure_xray_installed(self):
+        # sing-box TUN: ensure the engine binary (+ WinTUN driver) is present.
+        if not ensure_sing_box_installed(self):
             return
-        # In TUN mode we additionally need the engine's binary + geoip:ru list.
-        if self.manager.current_mode() == MODE_TUN:
-            engine = _controller.resolve_engine(self.manager.settings.get("tun_engine"))
-            if engine == _controller.ENGINE_SING_BOX:
-                if not ensure_sing_box_installed(self):
-                    return
-            else:
-                if not ensure_tun2socks_installed(self):
-                    return
-            # Soft-required — TUN works without it but RU split-routing is
-            # less comprehensive. Don't gate connection on it.
-            ensure_geoip_ru_cached(self)
+        # Soft-required — TUN works without it but RU split-routing is less
+        # comprehensive. Don't gate connection on it.
+        ensure_geoip_ru_cached(self)
 
         # Kick off the worker BEFORE flipping UI state — that way the
         # set_state call starts its burst + pulse animation on a Qt event
@@ -2353,14 +1897,11 @@ class MainWindow(QMainWindow):
         self._reconnect_attempts = 0
         self.manager.update_settings(last_config_name=self._active_config.name)
         self._connected_at = time.time()
-        mode = self.manager.current_mode()
         self.logs_page.append(
             f"[*] Подключено к «{self._active_config.name}» ({self._engine_tag()})"
         )
-        # On-disk lifecycle line — mode + engine, no server name/secret.
-        engine = self.manager.current_engine() if mode == MODE_TUN else "http_proxy"
-        app_log.log(f"[connect] mode={'TUN' if mode == MODE_TUN else 'HTTP'} "
-                    f"engine={engine}")
+        # On-disk lifecycle line — no server name/secret.
+        app_log.log(f"[connect] mode=TUN engine={self.manager.current_engine()}")
         show_toast(self, f"Подключено к «{self._active_config.name}»", kind="success")
         self._refresh_home()
         # v1.14.3: show country + map immediately based on the config
@@ -2418,20 +1959,10 @@ class MainWindow(QMainWindow):
                     and session_token != self._connected_at)):
             return
         session_token = self._connected_at
-        socks_proxy = None
-        if self.manager.current_mode() == MODE_HTTP_PROXY:
-            host = str(self.manager.settings.get("listen_host", "127.0.0.1"))
-            port = int(self.manager.settings.get("listen_port", 2080))
-            socks_proxy = f"{host}:{port + 1}"  # SOCKS5 inbound is port+1
-        elif self.manager.current_engine() == _controller.ENGINE_SING_BOX:
-            socks_proxy = (
-                f"{sing_box_config.HEALTH_PROXY_HOST}:"
-                f"{sing_box_config.HEALTH_PROXY_PORT}"
-            )
-        else:
-            host = str(self.manager.settings.get("listen_host", "127.0.0.1"))
-            port = int(self.manager.settings.get("listen_port", 2080))
-            socks_proxy = f"{host}:{port + 1}"
+        # Probe via the sing-box loopback health proxy (forced to outbound=proxy),
+        # so the shown IP is the VPN egress, not the local IP.
+        socks_proxy = (f"{sing_box_config.HEALTH_PROXY_HOST}:"
+                       f"{sing_box_config.HEALTH_PROXY_PORT}")
         from ..core.i18n import current_locale
         self._ip_probe = _IpProbeWorker(socks_proxy, current_locale(), parent=self)
         self._ip_probe.resolved.connect(
@@ -2633,13 +2164,10 @@ class MainWindow(QMainWindow):
         self._reconnect_timer.start(delay * 1000)
 
     def _scan_log_line(self, line: str) -> None:
-        """Watch helper log lines for socket-exhaustion — a root cause distinct
-        from memory. Cheap substring pre-filter before the regex."""
-        if "127.0.0.1" not in line or "[tun2socks]" not in line:
-            return
-        info = tun2socks_process.detect_socket_exhaustion(line)
-        if info:
-            self._on_socket_exhaustion(info.get("dest"))
+        """No-op since v3.1.0 — the tun2socks loopback SOCKS bridge (whose
+        127.0.0.1 ephemeral-port exhaustion this watched) is gone with the legacy
+        engine. sing-box dials the proxy directly, no local bridge to exhaust."""
+        return
 
     def _on_socket_exhaustion(self, dest) -> None:
         """Local tun2socks->xray ephemeral-port exhaustion ('Only one usage of
@@ -3214,17 +2742,10 @@ class MainWindow(QMainWindow):
             return False
 
     def _killswitch_holding(self) -> bool:
-        """True when xray has died but the kill-switch is deliberately holding
-        the TUN up to block any leak — the state where the user is NOT
-        connected yet all foreign traffic is blocked. Surfaced as its own home
-        state so it never looks like a plain disconnect."""
-        return (
-            self._active_config is not None
-            and bool(self.manager.settings.get("kill_switch", False))
-            and self.manager.current_mode() == MODE_TUN
-            and not self.manager.process.is_running()
-            and self.manager.tun_process.is_running()
-        )
+        """Always False since v3.1.0: sing-box is a single process — when it dies
+        the TUN is gone too, so there's no 'helper died but TUN still up' state the
+        old classic xray+tun2socks engine had."""
+        return False
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         """Persist size to settings + reposition the 8 edge resize-handles.

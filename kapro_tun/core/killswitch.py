@@ -77,24 +77,17 @@ def is_supported() -> bool:
     return sys.platform == "win32"
 
 
-def install(xray_exe_path: Path,
-            hysteria_exe_path: Optional[Path] = None,
-            sing_box_exe_path: Optional[Path] = None) -> bool:
+def install(allow_exe_path: Path) -> bool:
     """Install the kill-switch firewall rules. Returns True on success.
 
-    `hysteria_exe_path` — pass the hysteria client binary ONLY for a
-    Hysteria2 session, so its outbound to the VPN server is allowed too.
-    For non-hy2 sessions leave it None: we don't widen the allow-list with
-    a program that isn't going to make any outbound this session.
-
-    Idempotent: if rules already exist (e.g. from a crashed prior run),
-    we remove-then-add to make sure parameters are current.
+    Blocks ALL outbound except LAN + the sing-box binary (the single process
+    that reaches the VPN server). Idempotent: removes any leftover rules first
+    (incl. legacy xray/hysteria allow-rules from a pre-v3.1.0 session).
     """
     if not is_supported():
         return False
 
-    # Tear down any leftover rules first so we don't end up with
-    # duplicate entries (netsh adds, doesn't update).
+    # Tear down any leftover rules first (incl. old-brand / legacy-engine ones).
     remove()
 
     # 1. Block all outbound. profile=any covers Domain/Private/Public.
@@ -115,41 +108,17 @@ def install(xray_exe_path: Path,
         remove()
         return False
 
-    # 3. Allow xray.exe outbound — this is the ONLY process whose
-    # traffic should reach the public internet. Everything else
-    # (browser, Telegram, etc.) goes THROUGH xray via local SOCKS/HTTP,
-    # so the firewall sees their outbound as "xray.exe → 1.2.3.4" and
-    # passes it through.
-    if not _add_rule(_RULE_ALLOW_XRAY, [
+    # 3. Allow sing-box.exe outbound — the ONLY process that reaches the public
+    # internet (it owns the TUN and wraps everything in VLESS/Trojan/etc to the
+    # VPN server). Everything else hits the block-all and is dropped if the
+    # tunnel is down — no leak to the real ISP.
+    if not _add_rule(_RULE_ALLOW_SINGBOX, [
         "dir=out", "action=allow", "enable=yes",
         "profile=any",
-        f"program={xray_exe_path}",
+        f"program={allow_exe_path}",
     ]):
         remove()
         return False
-
-    # 4. Hysteria2 only — allow hysteria.exe outbound, because in a hy2
-    # session it (not xray) is what reaches the VPN server over the public
-    # internet. Skipped entirely for non-hy2 sessions.
-    if hysteria_exe_path is not None:
-        if not _add_rule(_RULE_ALLOW_HYSTERIA, [
-            "dir=out", "action=allow", "enable=yes",
-            "profile=any",
-            f"program={hysteria_exe_path}",
-        ]):
-            remove()
-            return False
-
-    # 5. sing-box engine — the single process that reaches the VPN server in
-    # sing-box TUN mode. Added only for a sing-box session.
-    if sing_box_exe_path is not None:
-        if not _add_rule(_RULE_ALLOW_SINGBOX, [
-            "dir=out", "action=allow", "enable=yes",
-            "profile=any",
-            f"program={sing_box_exe_path}",
-        ]):
-            remove()
-            return False
 
     return True
 
