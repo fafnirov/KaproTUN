@@ -107,6 +107,59 @@ _TUNNEL_PROBE_URLS = (
     "http://connectivitycheck.gstatic.com/generate_204",
 )
 
+_SYSTEM_TUN_PROBE_URLS = (
+    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://www.gstatic.com/generate_204",
+)
+_EGRESS_TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
+
+
+def singbox_outbound_probe(proxy_url: str, timeout: float = 2.5) -> bool:
+    """Prove that sing-box's selected proxy outbound carries real traffic.
+
+    The request enters a loopback-only mixed inbound whose route is pinned to
+    outbound=proxy. It cannot accidentally pass through direct-domain or geoip
+    routing and therefore cannot mark a dead VPN transport as connected.
+    """
+    return http_probe(proxy_url, timeout=timeout, urls=_SYSTEM_TUN_PROBE_URLS)
+
+
+def _trace_egress_ip(proxy_url: str | None, timeout: float = 2.5) -> str:
+    """Return IPv4 from Cloudflare trace through an explicit or system path."""
+    try:
+        proxies = ({"http": proxy_url, "https": proxy_url}
+                   if proxy_url else {})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+        req = urllib.request.Request(
+            _EGRESS_TRACE_URL,
+            headers={"User-Agent": "KaproTUN-egress-health"},
+        )
+        with opener.open(req, timeout=max(0.3, timeout)) as resp:
+            body = resp.read(4096).decode("utf-8", errors="replace")
+        for line in body.splitlines():
+            if line.startswith("ip="):
+                ip = line[3:].strip()
+                if ip and ":" not in ip and ip.count(".") == 3:
+                    return ip
+    except Exception:
+        pass
+    return ""
+
+
+def singbox_system_tun_healthy(proxy_url: str, timeout: float = 2.5) -> bool:
+    """Verify both the VPN outbound and Windows' ordinary TUN data path.
+
+    The loopback health inbound proves the selected outbound. The no-proxy
+    request proves the normal system stack is captured by TUN. Requiring the
+    same public IPv4 prevents a live local proxy from masking broken auto_route,
+    WFP, DNS, MTU, or split-routing.
+    """
+    proxy_ip = _trace_egress_ip(proxy_url, timeout)
+    if not proxy_ip:
+        return False
+    system_ip = _trace_egress_ip(None, timeout)
+    return bool(system_ip and system_ip == proxy_ip)
+
 
 def http_probe(proxy_url: str, timeout: float = 3.0,
                urls: tuple[str, ...] | None = None) -> bool:

@@ -34,16 +34,18 @@ TUN_INET4 = "10.255.0.2/30"
 # in-tunnel we instead REJECT global-unicast v6 with a clean TCP RST (see the
 # route rules), so Happy-Eyeballs falls back to IPv4 instantly and v6 never leaks.
 TUN_INET6 = "fdfe:dcba:9876::1/126"
-# v3.0.9: 9000 (sing-box's documented cross-platform default), was 1500. A larger
-# TUN MTU lets the OS/wintun hand sing-box big receive buffers; sing-box segments
-# to the real path MTU on egress, so per-packet syscall/copy overhead drops sharply
-# and single-stream throughput rises. On-wire egress MTU is unchanged.
-TUN_MTU = 9000
+# Conservative internet-safe MTU. A jumbo 9000-byte TUN MTU made tiny probes
+# succeed while larger TLS/WebSocket/video flows stalled on paths where PMTUD or
+# fragmentation was filtered. 1400 leaves room for VLESS/REALITY and other
+# encapsulation overhead without depending on ICMP fragmentation feedback.
+TUN_MTU = 1400
 # v3.0.9: "mixed" = kernel/system TCP stack (fast — web/video/downloads) + gVisor
 # only for UDP. This is sing-box's OWN default on Windows; the prior "gvisor"
 # (whole L3→L4 in userspace) was the documented worst case for Windows throughput
 # and CPU and was the main cause of the slow tunnel.
 TUN_STACK = "mixed"
+HEALTH_PROXY_HOST = "127.0.0.1"
+HEALTH_PROXY_PORT = 2082
 
 # Private / LAN / Docker / link-local / loopback + multicast/broadcast that must
 # always stay OFF the tunnel (routed to `direct`, which exits the physical NIC).
@@ -78,6 +80,10 @@ _SYSTEM_DNS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
 # sub-resource like files.oaiusercontent.com is forced through proxy regardless
 # of its IP), so this rule must sit BEFORE any direct/bypass rule.
 _ALWAYS_PROXY_SUFFIXES = [
+    # Deterministic system-TUN health endpoint. The same Cloudflare trace is
+    # requested through the loopback health proxy and through Windows' normal
+    # network stack; both must report the same VPN egress IP.
+    "www.cloudflare.com",
     # OpenAI / ChatGPT
     "openai.com",
     "chatgpt.com",
@@ -192,39 +198,25 @@ def _dns_block(dns_option: str, dns_leak_protection: bool,
     # sing-box 1.12+ DNS server format: typed servers. Legacy {"address": ...}
     # is FATAL in 1.13.
     if dns_leak_protection:
-        # SMART-SPLIT DNS (v3.0.12) — the DNS path follows the ROUTING path, so a
-        # flaky proxy can't black out resolution for traffic that doesn't even use
-        # the proxy. Two servers:
+        # v3.0.13: encrypted DNS must not depend on the selected VPN transport.
+        # A dead/invalid Hysteria2 or a flaky VLESS connection previously took
+        # the shared DoH connection down with it, blacking out the whole machine
+        # even though DNS leak protection was supposed to improve reliability.
         #
-        #  * dns-remote (DoH, type=https, :443, detour=proxy) — for proxy-bound
-        #    traffic (everything not in the direct list). Leak-protected (the ISP
-        #    sees only VLESS bytes) and poison-proof (a Russian ISP resolver can't
-        #    tamper with blocked/foreign sites). DoH is TCP (relayed as reliably as
-        #    browsing), unlike UDP which most VLESS servers relay poorly (the v3.0.7
-        #    ~7 s hang). connect_timeout BOUNDS a flaky-proxy DNS stall to ~5 s
-        #    instead of the ~24 s "dns: exchange failed … EOF" blackout users hit
-        #    when an unstable server drops the single shared DoH connection.
-        #
-        #  * dns-direct (plain UDP, NO detour → resolves over the physical NIC) —
-        #    ONLY for the user's direct-list domains (RU banks/services reached on
-        #    their REAL IP). Reliable and fast, NEVER touches the flaky proxy, and
-        #    it is NOT a new leak: those sites are already reached directly, so the
-        #    ISP sees the connections regardless. This is exactly the leak-OFF
-        #    dns-direct mechanism, scoped to direct domains via a dns rule.
-        servers: list[dict[str, Any]] = [
-            {"type": "https", "tag": "dns-remote", "server": upstream,
-             "detour": "proxy", "connect_timeout": "5s"},
-        ]
-        block: dict[str, Any] = {
-            "servers": servers,
-            "final": "dns-remote",
+        # Direct DoH still protects query contents: the ISP sees an HTTPS
+        # connection to the configured public resolver, not plaintext UDP/53 or
+        # the requested domain. The resolver endpoint is routed DIRECT by an
+        # explicit route rule below, while resolved application traffic still
+        # follows forced-proxy/direct/geoip rules normally.
+        _ = direct_domains
+        return {
+            "servers": [
+                {"type": "https", "tag": "dns-secure-direct",
+                 "server": upstream, "connect_timeout": "4s"},
+            ],
+            "final": "dns-secure-direct",
             "strategy": "ipv4_only",
         }
-        clean = sorted({d.strip().lower() for d in (direct_domains or []) if d.strip()})
-        if clean:
-            servers.append({"type": "udp", "tag": "dns-direct", "server": upstream})
-            block["rules"] = [{"domain_suffix": clean, "server": "dns-direct"}]
-        return block
     # Opt-out: DNS goes direct (ISP-visible) — matches the classic leak-off UX.
     # NO detour here: sing-box 1.13 rejects `"detour": "direct"` because the
     # `direct` outbound is empty ("detour to an empty direct outbound makes no
@@ -277,23 +269,21 @@ def build_config(
     rules: list[dict[str, Any]] = [
         # Sniff first so domain_suffix rules below can match TLS SNI / HTTP Host.
         {"action": "sniff"},
+        {"inbound": ["health-probe"], "action": "route", "outbound": "proxy"},
     ]
-    # LEAK-OFF DNS fast-path: send the upstream resolver's :53 traffic straight
-    # out the physical NIC (direct), BEFORE the DNS hijack. Without this the
-    # dns-direct server (no detour) gets routed by `final: proxy` and the lookup
-    # crawls through the proxy's UDP relay → 10-12 s system-DNS stalls (the
-    # files.oaiusercontent.com / Yandex-images hang). Placed before hijack-dns so
-    # the dns module's own upstream query can't be re-hijacked into a loop.
-    # LEAK-ON deliberately has NO such rule — DNS rides the proxy for privacy.
-    if not dns_leak_protection:
-        resolver_ips = _dns_resolver_ips(dns_option)
-        if resolver_ips:
-            rules.append({
-                "ip_cidr": [f"{ip}/32" for ip in resolver_ips],
-                "port": [53],
-                "action": "route",
-                "outbound": "direct",
-            })
+    # Resolver egress must never fall through to final=proxy:
+    #   leak ON  -> encrypted DoH direct on TCP/443
+    #   leak OFF -> plaintext DNS direct on UDP/TCP 53
+    # This rule is before hijack-dns so sing-box's own upstream exchange cannot
+    # be re-hijacked into a loop.
+    resolver_ips = _dns_resolver_ips(dns_option)
+    if resolver_ips:
+        rules.append({
+            "ip_cidr": [f"{ip}/32" for ip in resolver_ips],
+            "port": [443] if dns_leak_protection else [53],
+            "action": "route",
+            "outbound": "direct",
+        })
     # Hijack all OTHER DNS to the dns module (replaces the old dns-out outbound).
     rules.append({"protocol": "dns", "action": "hijack-dns"})
     # Private / LAN / Docker / multicast — never tunnel.
@@ -346,6 +336,13 @@ def build_config(
             # (YouTube/Google video) and WebRTC reuse one mapping instead of
             # spawning per-destination sessions → less churn, better UDP throughput.
             "endpoint_independent_nat": True,
+        }, {
+            # Health checks only. User traffic still enters through native TUN;
+            # this does not recreate the old tun2socks/SOCKS bridge.
+            "type": "mixed",
+            "tag": "health-probe",
+            "listen": HEALTH_PROXY_HOST,
+            "listen_port": HEALTH_PROXY_PORT,
         }],
         "outbounds": [
             outbound,

@@ -223,17 +223,21 @@ def _handle_ifconfig_co(r) -> tuple[str, str, Optional[str]]:
     return ip, code, city
 
 
+def _handle_cloudflare_trace(r) -> tuple[str, str, Optional[str]]:
+    """Parse Cloudflare's tiny text trace response (`ip=...`, `loc=...`)."""
+    values: dict[str, str] = {}
+    for line in r.text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            values[key.strip().lower()] = value.strip()
+    ip = values.get("ip", "")
+    if not ip:
+        raise ValueError("no ip field")
+    return ip, values.get("loc", "").upper(), None
+
+
 _PROBE_ENDPOINTS: list[tuple[str, callable]] = [
-    # NEW (v1.10.4): not-typically-blocked endpoints first. Both give IP;
-    # api.myip.com adds country code in one shot.
-    ("https://api.myip.com",                  _handle_api_myip),
-    ("https://httpbin.org/ip",                _handle_httpbin),
-    # Old fallbacks. AdGuard typically blocks all three of these but
-    # they work fine for users on System/Cloudflare/Quad9 DNS where
-    # there's no domain-level adblock layer.
-    ("https://ipinfo.io/json",                _handle_ipinfo),
-    ("https://api.ipify.org?format=json",     _handle_ipify),
-    ("https://ifconfig.co/json",              _handle_ifconfig_co),
+    ("https://www.cloudflare.com/cdn-cgi/trace", _handle_cloudflare_trace),
 ]
 
 
@@ -252,8 +256,8 @@ def fetch_public_ip(
     timeout: float = 5.0,
     locale: str = "ru",
     debug: Optional[Callable[[str], None]] = None,
-    retries: int = 2,
-    retry_delay: float = 1.5,
+    retries: int = 0,
+    retry_delay: float = 0.0,
 ) -> Optional[PublicIp]:
     """Return the public IP + country as seen by ipinfo.io, or None on
     any failure (timeout, network error, malformed response, etc.).
@@ -301,7 +305,7 @@ def fetch_public_ip(
     # Try each endpoint in order until one succeeds. Per-endpoint
     # timeout is shorter than the total budget so a single dead
     # endpoint doesn't eat the whole probe window.
-    per_endpoint_timeout = max(3.0, timeout / len(_PROBE_ENDPOINTS))
+    per_endpoint_timeout = max(0.5, timeout)
 
     # In TUN mode the probe can fire a beat before the tunnel's DNS path
     # (xray's hijack → DoH upstream over the VPN) is answering — every

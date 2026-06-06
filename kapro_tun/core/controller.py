@@ -503,6 +503,32 @@ class ConnectionManager:
             return True
         return bool(self.settings.get("dns_leak_protection", True))
 
+    def tun_runtime_healthy(self) -> bool:
+        """Check the runtime path owned by the active TUN session.
+
+        A direct secure resolver can remain healthy while a sing-box outbound
+        is dead. For sing-box, require both DNS and a real HTTP request through
+        the TUN data plane. Classic mode keeps its historical DNS-only check.
+        """
+        if not self.tun_dns_guarded():
+            return True
+        try:
+            dns_ok = dns_health.probe(timeout=2.5, attempts=2)
+            if not dns_ok:
+                return False
+            if self.current_engine() == ENGINE_SING_BOX:
+                return dns_health.singbox_system_tun_healthy(
+                    self._singbox_health_proxy_url(), timeout=2.5)
+            return True
+        except Exception as exc:
+            self._log(f"[watchdog] health probe failed: {type(exc).__name__}: {exc}")
+            return False
+
+    @staticmethod
+    def _singbox_health_proxy_url() -> str:
+        return (f"http://{sing_box_config.HEALTH_PROXY_HOST}:"
+                f"{sing_box_config.HEALTH_PROXY_PORT}")
+
     # --- runtime memory watchdog (v2.1.6) ---------------------------------
 
     def sample_runtime_stats(self) -> dict:
@@ -1063,23 +1089,32 @@ class ConnectionManager:
             waited += interval
         return self.sing_box_process.is_running()
 
-    def _wait_for_tunnel_dns(self, deadline: float = 15.0,
-                             interval: float = 0.75) -> bool:
-        """Poll DNS-through-the-tunnel until a well-known name resolves OR
-        `deadline`s elapse. A cold DoH-through-proxy resolver routinely needs
-        several seconds to warm up after the handshake, so we give the tunnel
-        time instead of declaring it dead on one tight probe. Returns True on the
-        first success; False only if NOTHING resolved in the whole window (a
-        genuinely dead tunnel). Bails early if the process dies mid-warm-up."""
+    def _wait_for_singbox_ready(self, deadline: float = 15.0,
+                                interval: float = 0.75) -> bool:
+        """Require both working DNS and real application traffic through TUN.
+
+        DNS is independent direct DoH in v3.0.13, so it cannot prove that the
+        selected VLESS/Trojan/Hysteria2 transport works. The second probe enters
+        a loopback-only sing-box inbound that is explicitly routed to proxy.
+        """
         waited = 0.0
         while waited < deadline:
-            if dns_health.probe(timeout=2.0, attempts=1):
+            dns_ok = dns_health.probe(timeout=1.5, attempts=1)
+            transport_ok = (dns_health.singbox_system_tun_healthy(
+                                self._singbox_health_proxy_url(), timeout=2.0)
+                            if dns_ok else False)
+            if dns_ok and transport_ok:
                 return True
             if not self.sing_box_process.is_running():
                 return False
+            recent = "\n".join(self.sing_box_process.recent_logs()[-30:]).lower()
+            if recent.count("crypto_error") >= 3:
+                return False
             time.sleep(interval)
             waited += interval
-        return dns_health.probe(timeout=2.0, attempts=1)
+        return (dns_health.probe(timeout=1.5, attempts=1)
+                and dns_health.singbox_system_tun_healthy(
+                    self._singbox_health_proxy_url(), timeout=2.0))
 
     def _connect_tun_sing_box(self, config: ProxyConfig, direct_domains: list[str]) -> None:
         """sing-box native-TUN connect (v3.0.0 primary). sing-box owns the TUN
@@ -1174,34 +1209,27 @@ class ConnectionManager:
                     raise ConnectionError(
                         "sing-box завершился сразу после старта"
                         + (f":\n{tail}" if tail else "."))
-            # The process is up. ONE honest liveness gate: does ANY well-known
-            # (non-RU) name resolve through the tunnel? POLL until it does or a
-            # generous deadline elapses — a freshly-raised DoH-through-proxy
-            # resolver routinely needs several seconds to warm up, so a single
-            # short probe clips healthy tunnels (that was the v3.0.7 "errors
-            # everything" regression). We deliberately DO NOT probe specific
-            # YouTube/CDN/OpenAI hosts here: those are force-routed through the
-            # proxy and are the slowest to warm, and the generic probe already
-            # proves the tunnel resolves. If CDN DNS is genuinely degraded, the
-            # runtime DNS watchdog heals it post-connect — it's not a reason to
-            # refuse a working connection.
+            # The process being alive and DNS resolving are not enough: encrypted
+            # DNS is intentionally independent of the VPN transport. Require a
+            # real HTTP request whose route falls through final=proxy.
             self._log("[*] Проверяю, что туннель sing-box живой…")
-            if not self._wait_for_tunnel_dns(15.0):
+            if not self._wait_for_singbox_ready(15.0):
                 # Surface the startup-relevant sing-box lines (missing default
                 # interface / no route / config) as a connect diagnostic.
                 diag = [l for l in self.sing_box_process.recent_logs()
                         if not is_benign_noise(l, live=False)]
                 tail = "\n".join(diag[-6:])
                 raise ConnectionError(
-                    "sing-box поднялся, но за 15 секунд ни одно имя не "
-                    "зарезолвилось через туннель — похоже, сервер недоступен. "
-                    "Откатываю. Попробуй другой сервер или переключи движок "
+                    "sing-box поднялся, но VPN-сервер не пропускает реальный "
+                    "трафик. DNS проверяется отдельно и может работать даже при "
+                    "мёртвом транспорте. Подключение отменено. Попробуй другой "
+                    "сервер или переключи движок "
                     "на legacy (Xray + tun2socks)."
                     + (f"\n\nДиагностика sing-box:\n{tail}" if tail else ""))
             # Confirmed live → switch the log filter to steady-state, so
             # ambiguous network errors become transient noise instead of alarms.
             self.sing_box_process.mark_live()
-            self._log("[*] sing-box TUN активен — трафик и DNS проходят.")
+            self._log("[*] sing-box TUN активен — DNS и реальный трафик через VPN проходят.")
         except Exception:
             self.sing_box_process.stop()
             try:

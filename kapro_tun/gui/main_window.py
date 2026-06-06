@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__
 from ..core import (
-    admin, app_log, autostart, dns_options, sing_box_installer, storage,
+    admin, app_log, autostart, dns_options, sing_box_config, sing_box_installer, storage,
     tun2socks_installer, tun2socks_process, updater, xray_installer, xray_stats,
 )
 from ..core import controller as _controller
@@ -1385,9 +1385,9 @@ class _IpProbeWorker(QThread):
             info = ip_probe.fetch_public_ip(
                 socks_proxy=self._socks_proxy,
                 locale=self._locale,
-                debug=self.diag.emit,
-                retries=4,
-                retry_delay=2.5,
+                debug=None,
+                timeout=2.0,
+                retries=0,
             )
         except Exception as e:
             # Defence in depth — ip_probe already catches everything,
@@ -1405,7 +1405,7 @@ class _IpProbeWorker(QThread):
 
 
 class _DnsWatchdog(QThread):
-    """Runtime DNS health monitor for TUN mode (v2.1.4).
+    """Runtime DNS and data-plane health monitor for TUN mode.
 
     The failure this guards against: the tunnel stays "up" (xray + tun2socks
     alive) but its DNS path dies mid-session — server-side resolver outage,
@@ -1414,11 +1414,10 @@ class _DnsWatchdog(QThread):
     *anything* while still showing "connected", and nothing in the existing
     process-death watcher notices (the processes are fine).
 
-    This thread periodically asks dns_health whether names still resolve and,
-    on a SUSTAINED outage (four consecutive failed probes ≈ 80 s), emits
-    `unhealthy`. The window turns that into a bounded self-heal. The threshold is
-    deliberately high so a transient DNS blip on an otherwise-fine tunnel never
-    triggers a disruptive disconnect+reconnect (v3.0.8).
+    The injected health probe also verifies real traffic through sing-box, so a
+    dead outbound cannot hide behind the independent direct DoH resolver. On
+    three consecutive failures (about one minute), the window starts a bounded
+    self-heal. A single transient network error never triggers a reconnect.
 
     It self-gates on ConnectionManager.tun_dns_guarded(): when we're not in a
     DNS-clearing TUN session it doesn't probe at all, so it's cheap to leave
@@ -1428,18 +1427,16 @@ class _DnsWatchdog(QThread):
 
     unhealthy = Signal()
 
-    def __init__(self, is_guarded, parent=None):
+    def __init__(self, is_guarded, probe_health=None, parent=None):
         super().__init__(parent)
         self._is_guarded = is_guarded   # callable -> bool (manager.tun_dns_guarded)
+        self._probe_health = probe_health
         self._stop = False
         self._fail_streak = 0
         self._interval_s = 20           # gap between probes while connected
-        # v3.0.8: require ~80s of SUSTAINED failure (4 consecutive misses), not
-        # ~40s (2). A DNS blip of a minute (server-side resolver hiccup, transient
-        # :53 throttle) recovers on its own faster than a reconnect completes —
-        # tearing down a tunnel whose data plane is fine is exactly the
-        # "Подключение…" churn on a working VPN the user complained about.
-        self._fail_threshold = 4        # consecutive fails before we heal
+        # Require about one minute of sustained failure. This is responsive to
+        # a dead transport without reconnecting on one transient network error.
+        self._fail_threshold = 3        # sustained failure, not a transient blip
 
     def run(self) -> None:
         from ..core import dns_health
@@ -1455,9 +1452,7 @@ class _DnsWatchdog(QThread):
             if not self._guarded():
                 self._fail_streak = 0
                 continue
-            # Generous per-probe budget so a slow-but-alive resolver isn't
-            # mistaken for a dead one (3 hosts x 2 attempts, returns on first hit).
-            ok = dns_health.probe(timeout=2.5, attempts=2)
+            ok = self._healthy(dns_health)
             if self._stop:
                 return
             # A disconnect may have landed while we were resolving — never heal
@@ -1476,6 +1471,14 @@ class _DnsWatchdog(QThread):
     def _guarded(self) -> bool:
         try:
             return bool(self._is_guarded())
+        except Exception:
+            return False
+
+    def _healthy(self, dns_health) -> bool:
+        try:
+            if self._probe_health is not None:
+                return bool(self._probe_health())
+            return bool(dns_health.probe(timeout=2.5, attempts=2))
         except Exception:
             return False
 
@@ -1664,7 +1667,11 @@ class MainWindow(QMainWindow):
         # user has leak protection off. A sustained outage drives the same
         # bounded reconnect machinery as a crash. Started once, lives for the
         # app's lifetime; stopped on quit.
-        self._dns_watchdog = _DnsWatchdog(self.manager.tun_dns_guarded, parent=self)
+        self._dns_watchdog = _DnsWatchdog(
+            self.manager.tun_dns_guarded,
+            self.manager.tun_runtime_healthy,
+            parent=self,
+        )
         self._dns_watchdog.unhealthy.connect(self._on_dns_unhealthy)
         self._dns_watchdog.start()
 
@@ -2370,7 +2377,11 @@ class MainWindow(QMainWindow):
         # inbounds fully up; if too early the probe times out and the
         # user sees no IP, which is worse than waiting a beat.
         if self.manager.settings.get("public_ip_probe", True):
-            QTimer.singleShot(2000, self._kick_ip_probe)
+            session_token = self._connected_at
+            QTimer.singleShot(
+                2000,
+                lambda token=session_token: self._kick_ip_probe(token),
+            )
 
     def _prefill_country_from_config(self) -> None:
         """Show country + map immediately on connect (v1.14.3).
@@ -2393,7 +2404,7 @@ class MainWindow(QMainWindow):
         # probe failed (in _on_ip_probe_resolved fallback path).
         self.home_page.set_public_ip("…", country_name, "", cc)
 
-    def _kick_ip_probe(self) -> None:
+    def _kick_ip_probe(self, session_token: Optional[float] = None) -> None:
         """Start the async public-IP fetch. Routes through SOCKS5 in
         HTTP-proxy mode (otherwise the probe would see the local IP);
         in TUN mode the system route table already tunnels everything,
@@ -2402,19 +2413,41 @@ class MainWindow(QMainWindow):
         # If the user disconnected in the 2s between connect-success
         # and this firing, bail — showing the IP for a now-dead session
         # would be misleading.
-        if not self.manager.is_connected():
+        if (not self.manager.is_connected()
+                or (session_token is not None
+                    and session_token != self._connected_at)):
             return
+        session_token = self._connected_at
         socks_proxy = None
         if self.manager.current_mode() == MODE_HTTP_PROXY:
             host = str(self.manager.settings.get("listen_host", "127.0.0.1"))
             port = int(self.manager.settings.get("listen_port", 2080))
             socks_proxy = f"{host}:{port + 1}"  # SOCKS5 inbound is port+1
+        elif self.manager.current_engine() == _controller.ENGINE_SING_BOX:
+            socks_proxy = (
+                f"{sing_box_config.HEALTH_PROXY_HOST}:"
+                f"{sing_box_config.HEALTH_PROXY_PORT}"
+            )
+        else:
+            host = str(self.manager.settings.get("listen_host", "127.0.0.1"))
+            port = int(self.manager.settings.get("listen_port", 2080))
+            socks_proxy = f"{host}:{port + 1}"
         from ..core.i18n import current_locale
         self._ip_probe = _IpProbeWorker(socks_proxy, current_locale(), parent=self)
-        self._ip_probe.resolved.connect(self._on_ip_probe_resolved)
+        self._ip_probe.resolved.connect(
+            lambda ip, country, city, code, token=session_token:
+                self._on_ip_probe_resolved(ip, country, city, code)
+                if (token == self._connected_at and self.manager.is_connected())
+                else None
+        )
         # Pipe probe diagnostics into the Logs page so a silent failure
         # (no IP shown, no obvious reason) becomes a one-glance debug.
-        self._ip_probe.diag.connect(self.logs_page.append)
+        self._ip_probe.diag.connect(
+            lambda line, token=session_token:
+                self.logs_page.append(line)
+                if (token == self._connected_at and self.manager.is_connected())
+                else None
+        )
         self._ip_probe.start()
 
     def _on_ip_probe_resolved(
