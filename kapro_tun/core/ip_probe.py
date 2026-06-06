@@ -301,7 +301,7 @@ def fetch_public_ip(
     # Try each endpoint in order until one succeeds. Per-endpoint
     # timeout is shorter than the total budget so a single dead
     # endpoint doesn't eat the whole probe window.
-    per_endpoint_timeout = max(2.0, timeout / len(_PROBE_ENDPOINTS))
+    per_endpoint_timeout = max(3.0, timeout / len(_PROBE_ENDPOINTS))
 
     # In TUN mode the probe can fire a beat before the tunnel's DNS path
     # (xray's hijack → DoH upstream over the VPN) is answering — every
@@ -333,31 +333,48 @@ def _probe_with_fallback(
     """
     last_error = "no endpoints tried"
 
+    # CRITICAL (v3.0.11): bypass any system / environment HTTP proxy. The probe
+    # must reach the endpoints by the SAME route real traffic uses — in TUN mode
+    # the kernel-tunnelled default route (NO proxy), in HTTP mode the explicit
+    # SOCKS proxy passed in `proxies`. requests honours the Windows system proxy
+    # (and HTTP_PROXY/HTTPS_PROXY) via trust_env; an ELEVATED process can resolve
+    # a stale/foreign system proxy (e.g. a dead 127.0.0.1:<port> left by another
+    # app) that a normal process doesn't — and then EVERY probe request CONNECTs
+    # to that dead proxy and times out (surfaced as ConnectTimeout ⊂ Timeout, i.e.
+    # "timeout after 2.0s" on every endpoint) even though the tunnel is perfectly
+    # healthy. That was the "Ваш IP: —" on a working VPN bug. trust_env=False makes
+    # the probe immune; the explicit `proxies` arg below still drives HTTP mode.
+    session = requests.Session()
+    session.trust_env = False
+
     # Force IPv4 for the entire probe — see _force_ipv4 docstring.
     # Without this, on IPv6-enabled hosts the probe leaks the user's
     # real IPv6 (TUN tunnels IPv4 only). v1.10.2 user saw their real
     # Beeline-Moscow v6 instead of the VPN's v4 — that's the bug
     # this context manager fixes.
-    with _force_ipv4():
+    with _force_ipv4(), session:
         for url, handler in _PROBE_ENDPOINTS:
             host = url.split("//", 1)[-1].split("/", 1)[0]
             try:
-                r = requests.get(
+                r = session.get(
                     url,
                     timeout=per_endpoint_timeout,
                     proxies=proxies,
                     headers={"User-Agent": "KaproTUN/ip-probe"},
                 )
-            except requests.exceptions.Timeout:
-                last_error = f"{host}: timeout after {per_endpoint_timeout:.1f}s"
-                _say(f"[ip-probe] {host}: timeout, trying next endpoint")
+            except requests.exceptions.Timeout as e:
+                # Full repr so the log distinguishes a Connect- vs Read-timeout
+                # (and any lingering proxy hijack) instead of a bare "timeout".
+                last_error = f"{host}: timeout {per_endpoint_timeout:.1f}s: {e!r}"
+                _say(f"[ip-probe] {host}: timeout ({type(e).__name__}), trying next")
                 continue
             except requests.exceptions.ConnectionError as e:
                 # AdGuard DNS NXDOMAIN'ing the endpoint shows up here as
-                # NameResolutionError → ConnectionError. PySocks-missing
-                # on bundled .exe also lands here.
-                last_error = f"{host}: connection failed: {e}"
-                _say(f"[ip-probe] {host}: connection failed (likely blocked/no-DNS), trying next")
+                # NameResolutionError → ConnectionError. A dead system proxy lands
+                # here as ProxyError on some urllib3 versions. PySocks-missing on a
+                # bundled .exe also lands here.
+                last_error = f"{host}: connection failed: {e!r}"
+                _say(f"[ip-probe] {host}: connection failed ({type(e).__name__}), trying next")
                 continue
             except Exception as e:
                 last_error = f"{host}: {type(e).__name__}: {e}"

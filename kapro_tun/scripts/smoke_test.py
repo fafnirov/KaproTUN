@@ -5458,6 +5458,25 @@ def _v3_ip_probe_cold_start_tolerant() -> None:
         raise AssertionError("ip-probe must pass retries>=4 for cold-start tolerance")
 
 
+def _v3_ip_probe_bypasses_system_proxy() -> None:
+    # v3.0.11: the IP-probe must NEVER route through a system/environment HTTP
+    # proxy. An ELEVATED process can resolve a stale/foreign dead 127.0.0.1:<port>
+    # proxy (left by another app) that a normal process doesn't — and then EVERY
+    # probe request CONNECTs to that dead proxy and times out (ConnectTimeout ⊂
+    # Timeout = "timeout after 2.0s" on every endpoint), showing "Ваш IP: —" on a
+    # perfectly working VPN. The probe builds a Session with trust_env=False so it
+    # ignores HTTP_PROXY/HTTPS_PROXY and the Windows system proxy; the explicit
+    # `proxies` arg still drives HTTP-proxy mode.
+    import inspect as _ins
+    from kapro_tun.core import ip_probe as _ip
+    src = _ins.getsource(_ip._probe_with_fallback)
+    norm = src.replace(" ", "")
+    if "trust_env=False" not in norm:
+        raise AssertionError("ip-probe must set trust_env=False (bypass system/env proxy)")
+    if "session.get(" not in norm and "session.get(" not in src:
+        raise AssertionError("ip-probe must issue the request through the trust_env=False Session")
+
+
 def _v3_singbox_dns_watchdog_guarded() -> None:
     # 19) The runtime DNS watchdog must guard sing-box in BOTH leak modes (the
     #     bug: tun_dns_guarded() was gated on dns_leak_protection, so sing-box
@@ -5775,6 +5794,8 @@ check("firewall_sweep: matches KaproTUN-/KaproVPN- prefixes; win_job safe no-op 
       _v3_firewall_sweep_prefix)
 check("ip-probe: cold-start tolerant retries>=4 (no false 'Ваш IP: —') (v3.0.10)",
       _v3_ip_probe_cold_start_tolerant)
+check("ip-probe: trust_env=False — never hijacked by a system/env proxy (v3.0.11)",
+      _v3_ip_probe_bypasses_system_proxy)
 check("connect: forgiving — no CDN rollback, poll-based liveness warm-up (v3.0.8)",
       _v3_connect_is_forgiving)
 check("connect: classic alive on transport OR dns, not dns-only (v3.0.8)",
