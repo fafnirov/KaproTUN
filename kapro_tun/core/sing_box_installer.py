@@ -43,6 +43,12 @@ SINGBOX_PINNED_VERSION = "v1.13.12"
 
 KAPROTUN_MIRROR_BASE = "https://kaprovpn.pro/files"
 
+# Windows-only WinTUN driver (sing-box uses it for the native TUN device). Was
+# previously fetched via tun2socks_installer; inlined here in v3.1.0 when the
+# classic tun2socks engine was removed so sing-box owns its only dependency.
+WINTUN_URL = "https://www.wintun.net/builds/wintun-0.14.1.zip"
+WINTUN_FILENAME = "wintun-0.14.1.zip"  # used for the mirror URL
+
 # Bypass system proxy on our own downloads (a stale 127.0.0.1:2080 registry
 # entry from a crashed HTTP-mode session otherwise kills every fetch).
 _NO_PROXY = {"http": "", "https": ""}
@@ -150,6 +156,39 @@ def _download_with_fallback(filename: str, upstream_url: str,
     return _download(upstream_url, progress, attempts=2)
 
 
+def _download_wintun(url: str, progress: ProgressCb, attempts: int = 2) -> bytes:
+    last_err: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            return net_download.download_to_memory(
+                url, net_download.MAX_WINTUN_ZIP, progress)
+        except net_download.DownloadTooLarge:
+            raise
+        except (requests.exceptions.RequestException, OSError) as e:
+            last_err = e
+            if attempt < attempts - 1:
+                continue
+    raise RuntimeError(f"Не удалось скачать WinTUN: {last_err}")
+
+
+def _install_wintun(progress: ProgressCb) -> None:
+    """Windows-only: fetch + extract the WinTUN driver DLL (mirror → upstream)."""
+    try:
+        data = _download_wintun(f"{KAPROTUN_MIRROR_BASE}/{WINTUN_FILENAME}", progress)
+    except RuntimeError:
+        data = _download_wintun(WINTUN_URL, progress)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        dll_member = next(
+            (n for n in zf.namelist()
+             if n.endswith("wintun.dll") and "amd64" in n),
+            None,
+        )
+        if not dll_member:
+            raise RuntimeError("wintun.dll (amd64) not found in the archive")
+        with zf.open(dll_member) as src:
+            paths.wintun_dll().write_bytes(src.read())
+
+
 def _extract_binary(data: bytes, target) -> None:
     """Pull the sing-box[.exe] out of the release archive (zip or tar.gz)."""
     want = "sing-box.exe" if sys.platform == "win32" else "sing-box"
@@ -184,15 +223,13 @@ def _extract_binary(data: bytes, target) -> None:
 
 
 def download_and_install(progress: ProgressCb = None) -> None:
-    """Install sing-box (and the WinTUN driver on Windows, reusing the
-    tun2socks installer so the two engines share one driver)."""
+    """Install sing-box (and the WinTUN driver on Windows)."""
     if not paths.sing_box_exe().is_file():
         release = _fetch_release()
         data = _download_with_fallback(release.filename, release.url, progress)
         _extract_binary(data, paths.sing_box_exe())
     if sys.platform == "win32" and not paths.wintun_dll().is_file():
-        from . import tun2socks_installer
-        tun2socks_installer._install_wintun(progress)
+        _install_wintun(progress)
 
 
 def ensure_installed(progress: ProgressCb = None) -> None:

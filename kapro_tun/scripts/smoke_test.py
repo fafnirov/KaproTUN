@@ -179,11 +179,10 @@ def _import_main() -> None:
 
 def _import_core() -> None:
     from kapro_tun.core import (  # noqa: F401
-        controller, parser, xray_config, storage, paths,
+        controller, parser, storage, paths,
         subscription, geoip_ru, killswitch, i18n, system_proxy,
         ip_probe, dns_options, secrets_store, ipv6_block,
         bandwidth_history, webrtc_block, leak_test, crash_handler,
-        hysteria_installer, hysteria_process,
         sing_box_config, sing_box_installer, sing_box_process,
     )
 
@@ -232,298 +231,12 @@ for label, url in SAMPLE_URLS:
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — xray config generation
-# ---------------------------------------------------------------------------
-# hysteria2 is parsed but Xray-core doesn't run it (raises
-# NotImplementedError in proxy_to_xray_outbound). That's expected —
-# skip it for the build_config check.
-
-section("xray-core config generation")
-
-from kapro_tun.core.xray_config import build_config
-
-
-def _make_xray_check(label: str, cfg: ProxyConfig):
-    def inner() -> None:
-        full = build_config(cfg, direct_domains=["example.com", "gosuslugi.ru"])
-        # Must be JSON-serializable (we write it to disk).
-        json.dumps(full, ensure_ascii=False)
-        # First outbound must be proxy — xray uses outbounds[0] as default.
-        if full["outbounds"][0]["tag"] != "proxy":
-            raise AssertionError(
-                f"first outbound should be 'proxy', got {full['outbounds'][0]['tag']}"
-            )
-        # Routing must have at least the api-in rule + geoip:private rule.
-        if len(full["routing"]["rules"]) < 2:
-            raise AssertionError("routing rules count too low")
-    return inner
-
-
-for label, cfg in parsed.items():
-    if label in ("hysteria2", "hy2"):
-        continue
-    check(label, _make_xray_check(label, cfg))
-
-
-# ---------------------------------------------------------------------------
-# Test 4 — DNS options (v1.9.0)
+# Test 3 — DNS options (v1.9.0)
 # ---------------------------------------------------------------------------
 # Each option must produce a valid config. "system" should NOT add a dns
 # block (xray complains about empty servers). Named options must add the
 # block, force IPv4, and include the bypass-by-IP routing rule for that
 # service's plain IPs.
-
-section("DNS options")
-
-from kapro_tun.core import dns_options
-
-_vless_cfg = parsed["vless"]
-
-
-def _make_dns_check(opt_key: str):
-    opt = dns_options.get(opt_key)
-
-    def inner() -> None:
-        # v1.16.8: leak protection is a SEPARATE toggle, default True.
-        # Pass it explicitly so the check exercises the protected path
-        # (the typical user setting); a sibling test below verifies
-        # the opt-out OFF path produces the legacy direct :53 rules.
-        full = build_config(
-            _vless_cfg,
-            direct_domains=["example.com"],
-            dns_option=opt_key,
-            dns_leak_protection=True,
-        )
-        json.dumps(full, ensure_ascii=False)  # must remain serialisable
-
-        # DNS block in xray config: present only when the option has its
-        # own servers (system has none). v1.19.1: resolve via the option's
-        # PLAIN IPs, NOT its DoH endpoint — DoH-over-tunnel stalls ~11s on
-        # some networks; plain UDP/53 over the tunnel returns in ~0.4s.
-        if opt.plain_servers:
-            if "dns" not in full:
-                raise AssertionError(f"{opt_key}: dns block missing")
-            if full["dns"].get("queryStrategy") != "UseIPv4":
-                raise AssertionError(
-                    f"{opt_key}: queryStrategy must be UseIPv4"
-                )
-            servers = full["dns"].get("servers", [])
-            if servers != opt.plain_servers:
-                raise AssertionError(
-                    f"{opt_key}: dns servers should be PLAIN IPs "
-                    f"{opt.plain_servers}, got {servers}"
-                )
-            if any(str(s).startswith("https://") for s in servers):
-                raise AssertionError(
-                    f"{opt_key}: dns block must NOT use DoH URLs — they "
-                    f"stall over the tunnel (v1.19.1 regression guard)"
-                )
-
-        # With dns_leak_protection=True, ALL :53 (TCP + UDP) must be
-        # hijacked to dns-out — independent of which DNS option is
-        # selected. System falls back to a Cloudflare upstream.
-        hijack_rule = next(
-            (r for r in full["routing"]["rules"]
-             if r.get("outboundTag") == "dns-out"
-             and r.get("port") == "53"),
-            None,
-        )
-        if hijack_rule is None:
-            raise AssertionError(
-                f"{opt_key} (leak protection ON): missing :53 → dns-out "
-                f"hijack rule. Without it, system resolver queries go out "
-                f"the VPN exit unmodified and ISP can sniff destinations."
-            )
-        if "tcp,udp" not in (hijack_rule.get("network") or ""):
-            raise AssertionError(
-                f"{opt_key}: hijack rule should cover BOTH tcp and udp "
-                f":53; got network={hijack_rule.get('network')!r}"
-            )
-
-        # v1.19.1: the upstream-resolver carve-out (resolver IPs :53 →
-        # proxy) MUST precede the generic :53 → dns-out hijack. Without it
-        # both the resolver's own query and dns-out's forwarded query loop
-        # back through dns-out and stall ~11s on every new domain.
-        rules = full["routing"]["rules"]
-        hijack_idx = next(
-            i for i, r in enumerate(rules)
-            if r.get("outboundTag") == "dns-out" and r.get("port") == "53"
-        )
-        carve_idx = next(
-            (i for i, r in enumerate(rules)
-             if r.get("outboundTag") == "proxy" and r.get("port") == "53"),
-            None,
-        )
-        if carve_idx is None or carve_idx >= hijack_idx:
-            raise AssertionError(
-                f"{opt_key}: resolver :53 → proxy carve-out must come BEFORE "
-                f"the dns-out hijack (breaks the loop that stalled DNS)"
-            )
-
-        # dns-out outbound must exist with protocol=dns and a sensible
-        # upstream IP. For named options it's their first plain_server;
-        # for system it's the Cloudflare fallback (1.1.1.1).
-        dns_out = next(
-            (o for o in full["outbounds"] if o.get("tag") == "dns-out"),
-            None,
-        )
-        if dns_out is None:
-            raise AssertionError(f"{opt_key}: dns-out outbound missing")
-        if dns_out.get("protocol") != "dns":
-            raise AssertionError(
-                f"{opt_key}: dns-out protocol must be 'dns', got "
-                f"{dns_out.get('protocol')!r}"
-            )
-        upstream = dns_out.get("settings", {}).get("address")
-        expected_upstreams = opt.plain_servers or ["1.1.1.1", "1.0.0.1"]
-        if upstream not in expected_upstreams:
-            raise AssertionError(
-                f"{opt_key}: dns-out address {upstream!r} not in "
-                f"expected upstreams {expected_upstreams}"
-            )
-
-        # v1.9.1: AdGuard option (and ONLY adguard) must add a block-rule
-        # for geosite:category-ads-all. The other named options stay
-        # non-filtering — that's their positioning. Catches regression
-        # where someone moves the block rule out of the `if adguard` guard.
-        has_ad_block = any(
-            rule.get("outboundTag") == "block"
-            and "geosite:category-ads-all" in rule.get("domain", [])
-            for rule in full["routing"]["rules"]
-        )
-        if opt_key == "adguard" and not has_ad_block:
-            raise AssertionError(
-                "adguard must add a block-rule for geosite:category-ads-all "
-                "(the OS-DNS-only mechanism doesn't catch what browsers do "
-                "with their own DoH — this rule is the real ad-block)"
-            )
-        if opt_key != "adguard" and has_ad_block:
-            raise AssertionError(
-                f"{opt_key}: should NOT have ad-block rule (only adguard "
-                "is positioned as the ad-blocking option)"
-            )
-
-    return inner
-
-
-for opt in dns_options.OPTIONS:
-    check(f"dns_option={opt.key}", _make_dns_check(opt.key))
-
-
-# v1.16.8: opt-out path. With dns_leak_protection=False the config
-# must NOT contain the :53 hijack rule or the dns-out outbound, AND
-# must contain the legacy direct :53 rules (so Pi-hole / corp DNS
-# users can actually reach their resolver). Independent of DNS option.
-def _dns_leak_protection_off_produces_direct_rules() -> None:
-    full = build_config(
-        _vless_cfg,
-        direct_domains=["example.com"],
-        dns_option="system",
-        dns_leak_protection=False,
-    )
-    json.dumps(full, ensure_ascii=False)
-
-    # No dns-out outbound when protection is off.
-    if any(o.get("tag") == "dns-out" for o in full["outbounds"]):
-        raise AssertionError(
-            "dns-out outbound should NOT exist when leak protection "
-            "is OFF — defeats the user's Pi-hole / corp DNS choice"
-        )
-    if any(r.get("outboundTag") == "dns-out"
-           for r in full["routing"]["rules"]):
-        raise AssertionError(
-            "no rule should route to dns-out when leak protection is OFF"
-        )
-    # Legacy direct :53 rules (UDP + TCP) must be present so user's
-    # resolver of choice can actually answer.
-    direct_53_udp = any(
-        r.get("outboundTag") == "direct"
-        and r.get("network") == "udp"
-        and r.get("port") == "53"
-        for r in full["routing"]["rules"]
-    )
-    direct_53_tcp = any(
-        r.get("outboundTag") == "direct"
-        and r.get("network") == "tcp"
-        and r.get("port") == "53"
-        for r in full["routing"]["rules"]
-    )
-    if not (direct_53_udp and direct_53_tcp):
-        raise AssertionError(
-            "leak protection OFF must restore the v1.8.0 'direct :53' "
-            "rules so Pi-hole / corp DNS users can reach their resolver"
-        )
-
-
-check("dns_leak_protection=False: direct :53 rules restored, no hijack",
-      _dns_leak_protection_off_produces_direct_rules)
-
-
-# v1.19.0: ad-block decoupled from the AdGuard DNS option (block_ads works
-# on any DNS), plus geoip:ru direct routing. The geo TAGS themselves are
-# validated against a real xray -test at release time; these guard the
-# config-shape (rule present/absent + ordering) against regressions.
-def _block_ads_independent_of_dns() -> None:
-    def _has_ad_block(full):
-        return any(
-            r.get("outboundTag") == "block"
-            and "geosite:category-ads-all" in r.get("domain", [])
-            for r in full["routing"]["rules"]
-        )
-    on = build_config(_vless_cfg, direct_domains=["example.com"],
-                      dns_option="system", block_ads=True)
-    json.dumps(on, ensure_ascii=False)
-    if not _has_ad_block(on):
-        raise AssertionError(
-            "block_ads=True must add the geosite:category-ads-all block on "
-            "ANY DNS, not just AdGuard"
-        )
-    # The IP-probe allow-list must precede the block so our own probe to
-    # ipinfo.io isn't dropped as a 'tracker'.
-    rules = on["routing"]["rules"]
-    block_idx = next(i for i, r in enumerate(rules)
-                     if "geosite:category-ads-all" in r.get("domain", []))
-    allow_idx = next((i for i, r in enumerate(rules)
-                      if r.get("outboundTag") == "proxy"
-                      and any("ipinfo.io" in d for d in r.get("domain", []))), None)
-    if allow_idx is None or allow_idx >= block_idx:
-        raise AssertionError("IP-probe allow-list must come before the ad-block rule")
-    off = build_config(_vless_cfg, direct_domains=["example.com"],
-                       dns_option="system", block_ads=False)
-    if _has_ad_block(off):
-        raise AssertionError("block_ads=False on System must NOT add an ad-block rule")
-
-
-def _route_ru_direct_adds_geoip_rule() -> None:
-    def _has_ru(full):
-        return any(
-            r.get("outboundTag") == "direct" and "geoip:ru" in r.get("ip", [])
-            for r in full["routing"]["rules"]
-        )
-    on = build_config(_vless_cfg, direct_domains=["example.com"], route_ru_direct=True)
-    json.dumps(on, ensure_ascii=False)
-    if not _has_ru(on):
-        raise AssertionError("route_ru_direct=True must add geoip:ru -> direct")
-    off = build_config(_vless_cfg, direct_domains=["example.com"], route_ru_direct=False)
-    if _has_ru(off):
-        raise AssertionError("route_ru_direct=False must NOT add a geoip:ru rule")
-
-
-check("block_ads: geosite ad-block on any DNS + probe allow-list order",
-      _block_ads_independent_of_dns)
-check("route_ru_direct: geoip:ru -> direct rule toggles",
-      _route_ru_direct_adds_geoip_rule)
-
-
-# ---------------------------------------------------------------------------
-# Test 5 — IP probe graceful failure (v1.10.0)
-# ---------------------------------------------------------------------------
-# fetch_public_ip MUST return None (not raise) on any network error, so
-# the GUI worker thread can safely swallow the result and hide the IP
-# label. Test against a guaranteed-dead SOCKS5 endpoint (an unbound
-# high port on localhost) — that simulates the post-connect race where
-# the probe fires before xray's SOCKS5 inbound is fully up, or the
-# CI runner where there's no network at all.
 
 section("IP probe — graceful failure on bad endpoint")
 
@@ -816,7 +529,6 @@ def _tun2socks_mirror_url_host() -> None:
 
 check("unix: network_routes_unix.find_egress_to exists + safe", _unix_find_egress_api_compat)
 check("net_download: non-numeric Content-Length doesn't crash", _net_download_bad_content_length)
-check("tun2socks: mirror URL uses kaprovpn.pro/files", _tun2socks_mirror_url_host)
 
 
 # v1.21.1: benign broadcast/multicast UDP relay failures (Steam :27036,
@@ -839,8 +551,6 @@ def _tun2socks_log_noise_filter() -> None:
             raise AssertionError(f"non-noise line wrongly filtered: {keep!r}")
 
 
-check("tun2socks log: benign broadcast-UDP noise is filtered, real lines kept",
-      _tun2socks_log_noise_filter)
 
 
 # ---------------------------------------------------------------------------
@@ -910,29 +620,25 @@ check("ipv6_block diagnostics/probe surface cleanly",
 # leaked the real IPv6 on a leak test. These guard against silent reverts.
 
 def _ipv6_arm_gating() -> None:
+    # v3.1.0: sing-box captures IPv6 in-tunnel and rejects global v6 with a RST,
+    # so _maybe_arm_ipv6_block NEVER installs a netsh v6 DROP (which caused
+    # ERR_NETWORK_ACCESS_DENIED) — it only clears any stale block.
     from kapro_tun.core import controller as ctrl
     mgr = ctrl.ConnectionManager(on_log=lambda _l: None)
-    orig = (ctrl.admin.is_admin, ctrl.ipv6_block.is_supported, ctrl.ipv6_block.install)
-    installs = {"n": 0}
+    orig = (ctrl.ipv6_block.is_supported, ctrl.ipv6_block.install, ctrl.ipv6_block.remove)
+    counts = {"install": 0, "remove": 0}
     ctrl.ipv6_block.is_supported = lambda: True
-    ctrl.ipv6_block.install = lambda: (installs.__setitem__("n", installs["n"] + 1) or True)
+    ctrl.ipv6_block.install = lambda: (counts.__setitem__("install", counts["install"] + 1) or True)
+    ctrl.ipv6_block.remove = lambda: counts.__setitem__("remove", counts["remove"] + 1)
     try:
-        ctrl.admin.is_admin = lambda: True
         mgr.settings = {"ipv6_leak_protection": True}
         mgr._maybe_arm_ipv6_block()
-        if installs["n"] != 1:
-            raise AssertionError("ipv6 block not armed when setting on + admin")
-        mgr.settings = {"ipv6_leak_protection": False}
-        mgr._maybe_arm_ipv6_block()
-        if installs["n"] != 1:
-            raise AssertionError("ipv6 block armed despite setting off")
-        ctrl.admin.is_admin = lambda: False  # can't netsh without admin
-        mgr.settings = {"ipv6_leak_protection": True}
-        mgr._maybe_arm_ipv6_block()
-        if installs["n"] != 1:
-            raise AssertionError("ipv6 block 'armed' without admin — impossible")
+        if counts["install"] != 0:
+            raise AssertionError("must NOT install a netsh v6 block (sing-box handles v6)")
+        if counts["remove"] < 1:
+            raise AssertionError("must clear any stale v6 block")
     finally:
-        (ctrl.admin.is_admin, ctrl.ipv6_block.is_supported, ctrl.ipv6_block.install) = orig
+        (ctrl.ipv6_block.is_supported, ctrl.ipv6_block.install, ctrl.ipv6_block.remove) = orig
 
 
 def _http_connect_arms_ipv6_block() -> None:
@@ -961,8 +667,6 @@ def _http_connect_arms_ipv6_block() -> None:
 
 
 check("ipv6 arming honors setting + admin gate", _ipv6_arm_gating)
-check("HTTP-mode connect arms IPv6-leak protection (v1.18.1)",
-      _http_connect_arms_ipv6_block)
 
 
 # v1.19.2: tun2socks throughput tuning. gVisor's netstack caps the TCP
@@ -994,8 +698,6 @@ def _tun2socks_args_have_throughput_tuning() -> None:
             raise AssertionError(f"tun2socks base arg {flag} missing: {args}")
 
 
-check("tun2socks args carry throughput tuning (auto-tuning + SAFE default buffers)",
-      _tun2socks_args_have_throughput_tuning)
 
 
 def _tun2socks_buffer_presets() -> None:
@@ -1032,8 +734,6 @@ def _tun2socks_buffer_presets() -> None:
         raise AssertionError("explicit speed preset not reflected in args")
 
 
-check("tun2socks buffer presets (default safe; 4m only via 'speed')",
-      _tun2socks_buffer_presets)
 
 
 def _performance_preset_default_is_safe() -> None:
@@ -1166,8 +866,6 @@ def _udp_timeout_presets() -> None:
         raise AssertionError(f"default -udp-timeout should be 10s, got {udp}")
 
 
-check("tun2socks: idle-UDP timeout preset-driven, default 10s (was 30s)",
-      _udp_timeout_presets)
 
 
 def _app_log_redacts_secrets() -> None:
@@ -1510,8 +1208,6 @@ def _private_lan_bypass() -> None:
         raise AssertionError("_connect_tun does not install bypass routes via add_bypass_cidrs")
 
 
-check("controller: private/LAN/Docker ranges bypass the TUN (incl. 172.16/12)",
-      _private_lan_bypass)
 
 
 def _socket_exhaustion_parse() -> None:
@@ -1543,8 +1239,6 @@ def _socket_exhaustion_parse() -> None:
             raise AssertionError(f"benign line misclassified: {benign!r}")
 
 
-check("tun2socks: detects local socket exhaustion (connect to 127.0.0.1:<socks>)",
-      _socket_exhaustion_parse)
 
 
 def _disconnect_reason_honest() -> None:
@@ -1597,7 +1291,6 @@ def _xray_policy_bounds_resources() -> None:
         raise AssertionError("stats/api block removed — UI graph would break")
 
 
-check("xray: policy bounds resources but keeps stats API", _xray_policy_bounds_resources)
 
 
 def _direct_outbound_bound_to_egress() -> None:
@@ -1636,8 +1329,6 @@ def _direct_outbound_bound_to_egress() -> None:
         raise AssertionError("_connect_tun does not bind the direct outbound to the egress NIC")
 
 
-check("xray: direct/freedom bound to physical NIC in TUN (no route loop)",
-      _direct_outbound_bound_to_egress)
 
 
 # ---------------------------------------------------------------------------
@@ -2065,33 +1756,8 @@ def _settings_no_overlong_controls() -> None:
     if QApplication.instance() is None:
         QApplication([])
     from kapro_tun.core.controller import ConnectionManager
-    from kapro_tun.core import controller as _ctl_ui
-    from kapro_tun.core import storage as _st_ui
     from kapro_tun.gui.main_window import SettingsPage
-    # Pin a deterministic settings baseline: DEFAULT_SETTINGS WITHOUT tun_engine,
-    # simulating a pre-v3 (or freshly-migrated) settings.json. The picker must
-    # still default to sing-box — resolve_engine treats absent/unknown values as
-    # sing-box. This makes the test independent of whatever tun_engine the dev's
-    # real settings.json happens to hold (e.g. classic after a manual switch),
-    # which is what made this assertion flap on a real machine (v3.0.2).
-    _old = {k: v for k, v in _st_ui.DEFAULT_SETTINGS.items() if k != "tun_engine"}
-    _orig_load = _st_ui.load_settings
-    _st_ui.load_settings = lambda: dict(_old)
-    try:
-        sp = SettingsPage(ConnectionManager(on_log=lambda _l: None))
-    finally:
-        _st_ui.load_settings = _orig_load
-    # v3.0.0 engine picker: present, defaults to sing-box, offers exactly the
-    # two engines (sing-box primary + legacy), and persists the choice via
-    # update_settings(tun_engine=...).
-    if not hasattr(sp, "engine_combo"):
-        raise AssertionError("SettingsPage missing the v3 engine picker")
-    datas = {sp.engine_combo.itemData(i) for i in range(sp.engine_combo.count())}
-    if datas != {_ctl_ui.ENGINE_SING_BOX, _ctl_ui.ENGINE_CLASSIC}:
-        raise AssertionError(f"engine picker must offer both engines, got {datas}")
-    if sp.engine_combo.currentData() != _ctl_ui.ENGINE_SING_BOX:
-        raise AssertionError("engine picker must default to sing-box "
-                             "(absent/old tun_engine → sing-box)")
+    sp = SettingsPage(ConnectionManager(on_log=lambda _l: None))
     LIMIT = 54
     controls = sp.findChildren(QCheckBox) + sp.findChildren(QRadioButton)
     over = [c.text() for c in controls if len(c.text()) > LIMIT]
@@ -2099,10 +1765,6 @@ def _settings_no_overlong_controls() -> None:
         raise AssertionError(
             "non-wrapping label(s) too long (>%d chars) — would force settings "
             "h-overflow + clip descriptions: %d found" % (LIMIT, len(over)))
-    for spin in (sp.hy_down_spin, sp.hy_up_spin):
-        if spin.maximumWidth() <= 0 or spin.maximumWidth() > 160:
-            raise AssertionError(
-                "hy speed spinbox must be width-capped (got %d)" % spin.maximumWidth())
     sp.deleteLater()
 
 
@@ -3562,8 +3224,6 @@ def _killswitch_allows_hysteria_only_for_hy2() -> None:
         _ks._add_rule, _ks.is_supported, _ks.remove = o_add, o_sup, o_rm
 
 
-check("kill-switch: hysteria.exe allowed only for hy2, removed with the rest",
-      _killswitch_allows_hysteria_only_for_hy2)
 
 
 def _download_size_caps() -> None:
@@ -3751,268 +3411,6 @@ check("userinfo: to_dict/from_dict",   _userinfo_roundtrip)
 # Xray can't dial hy2, so the hysteria client runs as a local SOCKS5 and
 # xray chains through it. E2E "does it connect" needs a real hy2 server;
 # here we verify the pure asset/config logic that gets us there.
-
-section("Hysteria2 — asset + client config + xray chain")
-
-from kapro_tun.core import hysteria_installer as _hyi, hysteria_process as _hyp
-
-_HY2_URL = ("hysteria2://mypassword@1.2.3.4:443"
-            "?sni=example.com&insecure=1&obfs=salamander&obfs-password=xyz#hy2-test")
-
-
-def _hy_asset_name() -> None:
-    name = _hyi._asset_name()
-    known = {"hysteria-windows-amd64.exe", "hysteria-windows-arm64.exe",
-             "hysteria-darwin-amd64", "hysteria-darwin-arm64",
-             "hysteria-linux-amd64", "hysteria-linux-arm64"}
-    if name not in known:
-        raise AssertionError(f"unexpected asset name: {name}")
-    if sys.platform == "win32" and not name.startswith("hysteria-windows"):
-        raise AssertionError(f"win32 asset wrong: {name}")
-
-
-def _hy_client_config() -> None:
-    c = _hyp.build_client_config(parse(_HY2_URL).outbound, 2089)
-    if c["server"] != "1.2.3.4:443":
-        raise AssertionError(f"server wrong: {c['server']}")
-    if c["auth"] != "mypassword":
-        raise AssertionError(f"auth wrong: {c['auth']}")
-    if c["socks5"]["listen"] != "127.0.0.1:2089":
-        raise AssertionError(f"socks5 listen wrong: {c['socks5']}")
-    if c.get("tls", {}).get("sni") != "example.com" or not c["tls"].get("insecure"):
-        raise AssertionError(f"tls wrong: {c.get('tls')}")
-    obfs = c.get("obfs", {})
-    if obfs.get("type") != "salamander" or obfs.get("salamander", {}).get("password") != "xyz":
-        raise AssertionError(f"obfs wrong: {obfs}")
-
-
-def _hy_xray_chain() -> None:
-    from kapro_tun.core.xray_config import build_config
-    full = build_config(parse(_HY2_URL), direct_domains=["example.com"],
-                        hysteria_socks_port=2089)
-    ob = full["outbounds"][0]
-    if ob.get("protocol") != "socks" or ob.get("tag") != "proxy":
-        raise AssertionError(f"hy2 proxy outbound not socks: {ob}")
-    srv = ob["settings"]["servers"][0]
-    if srv["address"] != "127.0.0.1" or srv["port"] != 2089:
-        raise AssertionError(f"socks chain target wrong: {srv}")
-
-
-def _hy_no_port_raises() -> None:
-    from kapro_tun.core.xray_config import build_config
-    try:
-        build_config(parse(_HY2_URL), direct_domains=["example.com"])
-    except NotImplementedError:
-        return
-    raise AssertionError("hy2 without socks port should raise NotImplementedError")
-
-
-def _hy_bandwidth_config() -> None:
-    # v1.19.6: link-speed hints -> hysteria brutal CC bandwidth block.
-    ob = parse(_HY2_URL).outbound
-    # 0/0 (default) -> no bandwidth block (BBR, safe).
-    if "bandwidth" in _hyp.build_client_config(ob, 2089, up_mbps=0, down_mbps=0):
-        raise AssertionError("bandwidth must be omitted at 0/0 (BBR default)")
-    # both set -> 'N mbps' strings.
-    bw = _hyp.build_client_config(ob, 2089, up_mbps=20, down_mbps=200).get("bandwidth")
-    if bw != {"up": "20 mbps", "down": "200 mbps"}:
-        raise AssertionError(f"bandwidth wrong: {bw}")
-    # only one set -> still omitted (brutal CC needs both up AND down).
-    if "bandwidth" in _hyp.build_client_config(ob, 2089, up_mbps=0, down_mbps=200):
-        raise AssertionError("bandwidth needs BOTH up and down — omit if one is 0")
-
-
-def _hy_start_auto_retries() -> None:
-    # v1.19.7: a transient first-attempt FATAL (cold QUIC handshake / link
-    # busy from a speedtest) must be retried automatically instead of
-    # surfacing the "fails first, works on second connect" error.
-    from kapro_tun.core import controller as ctrl
-    mgr = ctrl.ConnectionManager(on_log=lambda _l: None)
-    cfg = parse(_HY2_URL)
-    state = {"starts": 0, "alive": False, "waits": 0}
-
-    class _FakeHy:
-        def is_running(self): return state["alive"]
-        def start(self, path): state["starts"] += 1; state["alive"] = True
-        def wait_until_listening(self, port, timeout=8.0):
-            state["waits"] += 1
-            if state["waits"] == 1:           # attempt 1: simulate FATAL exit
-                state["alive"] = False
-                return False
-            return True                       # attempt 2: comes up
-        def stop(self): state["alive"] = False
-        def recent_logs(self): return ["FATAL ... timeout: no recent network activity"]
-
-    orig = (ctrl.hysteria_installer.ensure_installed,
-            ctrl.hysteria_process.write_client_config, ctrl.time.sleep)
-    ctrl.hysteria_installer.ensure_installed = lambda *a, **k: None
-    ctrl.hysteria_process.write_client_config = lambda *a, **k: "fake.yaml"
-    ctrl.time.sleep = lambda *_a, **_k: None
-    mgr.hysteria_process = _FakeHy()
-    try:
-        port = mgr._maybe_start_hysteria(cfg)
-    finally:
-        (ctrl.hysteria_installer.ensure_installed,
-         ctrl.hysteria_process.write_client_config, ctrl.time.sleep) = orig
-    if port != ctrl.hysteria_process.HYSTERIA_SOCKS_PORT:
-        raise AssertionError(f"expected the hy SOCKS port back, got {port}")
-    if state["starts"] < 2:
-        raise AssertionError(f"transient failure must auto-retry (>=2 starts), got {state['starts']}")
-
-
-check("hysteria: asset name per platform",   _hy_asset_name)
-check("hysteria: client config mapping",     _hy_client_config)
-check("hysteria: xray socks-chain",          _hy_xray_chain)
-check("hysteria: no port -> NotImplemented", _hy_no_port_raises)
-check("hysteria: bandwidth brutal-CC config", _hy_bandwidth_config)
-check("hysteria: start auto-retries transient fail", _hy_start_auto_retries)
-
-
-def _speed_test_surface() -> None:
-    # v1.20.0: link-speed probe math + never-raise on failure.
-    from kapro_tun.core import speed_test as st
-    if st._mbps(12_500_000, 1.0) != 100:        # 12.5 MB in 1 s == 100 Mbps
-        raise AssertionError(f"_mbps wrong: {st._mbps(12_500_000, 1.0)}")
-    if st._mbps(0, 1.0) != 0 or st._mbps(100, 0) != 0:
-        raise AssertionError("_mbps must be 0 for zero bytes or zero time")
-    if st._mbps(10 ** 13, 1.0) > st._MAX_MBPS:
-        raise AssertionError("_mbps must clamp to the max ceiling")
-    # Point at a dead local port so it fails fast → (0, 0), never raises.
-    orig = (st._DOWN_URL, st._UP_URL)
-    st._DOWN_URL = "http://127.0.0.1:9/__down?bytes={n}"
-    st._UP_URL = "http://127.0.0.1:9/__up"
-    try:
-        res = st.measure_link_speed(down_bytes=1000, up_bytes=1000, timeout=1.0)
-    finally:
-        st._DOWN_URL, st._UP_URL = orig
-    if not (isinstance(res, tuple) and len(res) == 2 and all(isinstance(x, int) for x in res)):
-        raise AssertionError(f"measure_link_speed must return (int, int): {res!r}")
-    if res != (0, 0):
-        raise AssertionError(f"dead host must give (0, 0), got {res!r}")
-
-
-def _hy_auto_measures_when_empty() -> None:
-    # v1.20.0: auto mode with no cached value measures the link and feeds
-    # the result into the hysteria config (brutal CC), then caches it.
-    from kapro_tun.core import controller as ctrl
-    from kapro_tun.core import speed_test as st
-    mgr = ctrl.ConnectionManager(on_log=lambda _l: None)
-    cfg = parse(_HY2_URL)
-    mgr.settings = dict(mgr.settings)
-    mgr.settings.update(hysteria_auto_bandwidth=True,
-                        hysteria_down_mbps=0, hysteria_up_mbps=0)
-    captured = {}
-
-    class _Hy:
-        def is_running(self): return False
-        def start(self, p): pass
-        def wait_until_listening(self, port, timeout=8.0): return True
-        def stop(self): pass
-        def recent_logs(self): return []
-    mgr.hysteria_process = _Hy()
-
-    def _fake_write(outbound, port, up_mbps=0, down_mbps=0):
-        captured["up"], captured["down"] = up_mbps, down_mbps
-        return "fake.yaml"
-
-    orig = (ctrl.hysteria_installer.ensure_installed,
-            ctrl.hysteria_process.write_client_config,
-            st.measure_link_speed, ctrl.storage.save_settings)
-    ctrl.hysteria_installer.ensure_installed = lambda *a, **k: None
-    ctrl.hysteria_process.write_client_config = _fake_write
-    st.measure_link_speed = lambda *a, **k: (100, 20)
-    ctrl.storage.save_settings = lambda s: None
-    try:
-        mgr._maybe_start_hysteria(cfg)
-    finally:
-        (ctrl.hysteria_installer.ensure_installed,
-         ctrl.hysteria_process.write_client_config,
-         st.measure_link_speed, ctrl.storage.save_settings) = orig
-    # v2.0.1: auto-measured speed gets a SAFE CAP before brutal CC
-    # (down *0.75, up *0.50) so a bursty app (Telegram) can't saturate the
-    # uplink and stall the whole tunnel. 100/20 measured -> 75/10 applied.
-    if captured.get("down") != 75 or captured.get("up") != 10:
-        raise AssertionError(f"auto bw must be capped 100/20 -> 75/10: {captured}")
-    if mgr.settings.get("hysteria_down_mbps") != 75 or mgr.settings.get("hysteria_up_mbps") != 10:
-        raise AssertionError(f"capped bw must be cached: {mgr.settings.get('hysteria_down_mbps')}/{mgr.settings.get('hysteria_up_mbps')}")
-
-
-def _hy_auto_bandwidth_margin() -> None:
-    # v2.0.1: safe cap on AUTO-measured bandwidth (down*0.75, up*0.50). A
-    # failed measurement (0) passes through as 0 (-> BBR); a tiny positive
-    # value floors at 1 so a valid measurement never collapses to "BBR".
-    from kapro_tun.core import hysteria_process as _hp
-    if _hp.apply_auto_bandwidth_margin(100, 20) != (75, 10):
-        raise AssertionError(f"100/20 -> {_hp.apply_auto_bandwidth_margin(100, 20)}, want (75,10)")
-    if _hp.apply_auto_bandwidth_margin(0, 0) != (0, 0):
-        raise AssertionError("0/0 must pass through (BBR fallback)")
-    if _hp.apply_auto_bandwidth_margin(1, 1) != (1, 1):
-        raise AssertionError("positive measurement must floor at 1, not collapse to 0")
-    if not (_hp.AUTO_BW_DOWN_FACTOR > _hp.AUTO_BW_UP_FACTOR):
-        raise AssertionError("uplink must be capped harder than downlink")
-
-
-def _geoip_ru_gated_on_route_ru_direct() -> None:
-    # v2.0.1: the TUN geoip:ru kernel bypass must fire ONLY when
-    # route_ru_direct is on — a forced RU split otherwise destabilises
-    # Telegram/CDN. Test the extracted gate with fakes (no real TUN / admin).
-    from kapro_tun.core import controller as ctrl, geoip_ru as geo
-
-    class _FakeSession:
-        def __init__(self): self.cidr_calls = 0
-        def add_bypass_cidrs(self, *a, **k):
-            self.cidr_calls += 1
-            return (0, 0)
-
-    class _FakeReal:
-        gateway = "192.168.1.1"
-        index = 17
-
-    class _FakeSelf:
-        def __init__(self, ru): self.settings = {"route_ru_direct": ru}
-        def _log(self, *_a): pass
-
-    load_calls = {"n": 0}
-    orig = geo.load_cidrs
-    geo.load_cidrs = lambda: (load_calls.__setitem__("n", load_calls["n"] + 1)
-                              or [("1.2.3.0", "255.255.255.0")])
-    try:
-        s_off = _FakeSession()
-        ctrl.ConnectionManager._install_geoip_ru_bypass(_FakeSelf(False), s_off, _FakeReal(), 26)
-        if load_calls["n"] != 0 or s_off.cidr_calls != 0:
-            raise AssertionError(f"OFF must not load/add RU cidrs: load={load_calls['n']} add={s_off.cidr_calls}")
-        s_on = _FakeSession()
-        ctrl.ConnectionManager._install_geoip_ru_bypass(_FakeSelf(True), s_on, _FakeReal(), 26)
-        if load_calls["n"] != 1 or s_on.cidr_calls != 1:
-            raise AssertionError(f"ON must load+add RU cidrs: load={load_calls['n']} add={s_on.cidr_calls}")
-    finally:
-        geo.load_cidrs = orig
-
-
-def _tun2socks_udp_timeout_arg() -> None:
-    # v2.0.1: explicit -udp-timeout so idle UDP sessions are reaped under a
-    # Telegram/UDP storm instead of piling up in the netstack.
-    from kapro_tun.core.tun2socks_process import Tun2socksProcess
-    args = Tun2socksProcess()._build_args("tun2socks", "127.0.0.1:2081", 1500, "warn")
-    if "-udp-timeout" not in args:
-        raise AssertionError("tun2socks args must include -udp-timeout")
-    val = args[args.index("-udp-timeout") + 1]
-    if not val.endswith("s"):
-        raise AssertionError(f"-udp-timeout should be a duration like '30s', got {val!r}")
-
-
-check("speed_test: probe math + never-raises", _speed_test_surface)
-check("hysteria: auto-measures link speed when empty", _hy_auto_measures_when_empty)
-check("hysteria: auto-bandwidth safe cap (down*0.75/up*0.50)", _hy_auto_bandwidth_margin)
-check("controller: geoip:ru TUN bypass gated on route_ru_direct", _geoip_ru_gated_on_route_ru_direct)
-check("tun2socks: -udp-timeout reaps idle UDP (storm guard)", _tun2socks_udp_timeout_arg)
-
-
-# ---------------------------------------------------------------------------
-# Test 17 — auto-updater: mirror-first download sources (v1.16.17)
-# ---------------------------------------------------------------------------
-# github.com is frequently DNS-blocked in RU (getaddrinfo failed), which
-# made auto-update dead. The updater must try our mirror BEFORE GitHub.
 
 section("Auto-updater — mirror-first download sources")
 
@@ -4369,8 +3767,6 @@ def _connect_tun_has_dns_rollback_wiring() -> None:
         raise AssertionError("disconnect() must clear the recovery journal")
 
 
-check("controller: DNS health-check + crash-journal rollback wiring",
-      _connect_tun_has_dns_rollback_wiring)
 
 
 def _tun_dns_guarded_gate() -> None:
@@ -4523,8 +3919,6 @@ def _no_single_dns_dependency() -> None:
         raise AssertionError(f"carve-out misses some upstreams: {carved_ips}")
 
 
-check("A: system+leak DNS has no single-resolver dependency",
-      _no_single_dns_dependency)
 
 
 def _leak_on_does_not_bypass_resolvers() -> None:
@@ -4564,8 +3958,6 @@ def _leak_on_does_not_bypass_resolvers() -> None:
         raise AssertionError("_connect_tun no longer branches bypass on leak mode")
 
 
-check("B: leak-protection ON does not bypass DNS resolvers (no leak/conflict)",
-      _leak_on_does_not_bypass_resolvers)
 
 
 def _http_probe_is_bounded_and_safe() -> None:
@@ -4649,8 +4041,6 @@ def _dead_tunnel_connect_rolls_back() -> None:
         raise AssertionError("_connect_tun no longer runs the liveness gate")
 
 
-check("invariant: dead tunnel -> liveness raises -> clean rollback",
-      _dead_tunnel_connect_rolls_back)
 
 
 def _no_regression_leak_off() -> None:
@@ -4675,7 +4065,6 @@ def _no_regression_leak_off() -> None:
         raise AssertionError("resolver bypass set vanished (leak-off would lose direct DNS)")
 
 
-check("invariant: no regression when leak protection is OFF", _no_regression_leak_off)
 
 
 # ---------------------------------------------------------------------------
@@ -4843,65 +4232,44 @@ def _v3_unsupported_raises() -> None:
 
 
 def _v3_dispatch_no_silent_switch() -> None:
-    # 5b) The controller dispatcher turns UnsupportedBySingBox into a 'switch to
-    #     legacy' ConnectionError and must NOT silently run the classic engine.
+    # 5b) v3.1.0: connect() turns UnsupportedBySingBox into a plain
+    #     ConnectionError — there is NO legacy engine to switch to, and the
+    #     message must NOT mention one.
     cm = _ctl_v3.ConnectionManager()
-    cm.settings["tun_engine"] = _ctl_v3.ENGINE_SING_BOX
-    classic_called = {"n": 0}
 
     def _boom(config, direct_domains):
         raise _sb_v3.UnsupportedBySingBox("nope")
 
-    def _classic(config, direct_domains):
-        classic_called["n"] += 1
-
     cm._connect_tun_sing_box = _boom
-    cm._connect_tun_classic = _classic
     try:
-        cm._connect_tun(object(), [])
+        cm.connect(object(), [])
     except _ctl_v3.ConnectionError as e:
-        if "legacy" not in str(e).lower():
-            raise AssertionError("dispatch error must point the user to legacy")
+        if "legacy" in str(e).lower():
+            raise AssertionError("rejection must NOT mention a legacy engine (removed)")
     else:
-        raise AssertionError("unsupported must raise, not silently switch")
-    if classic_called["n"] != 0:
-        raise AssertionError("must NOT silently fall back to the classic engine")
+        raise AssertionError("unsupported config must raise ConnectionError")
 
 
 def _v3_dispatch_routes_to_singbox_and_no_runtime_fallback() -> None:
-    # 5c) With engine=sing_box the dispatcher must call the sing-box path (not
-    #     classic), and a RUNTIME sing-box failure (e.g. sing-box.exe starts and
-    #     dies — the 1.13 DNS-detour crash) must propagate and stay disconnected,
-    #     NEVER silently fall back to classic. (5b covers the config-level
-    #     UnsupportedBySingBox case; this covers a live start failure.)
+    # 5c) connect() always routes to the sing-box path, and a RUNTIME sing-box
+    #     failure propagates and stays disconnected — there is no fallback engine.
     cm = _ctl_v3.ConnectionManager()
-    cm.settings["tun_engine"] = _ctl_v3.ENGINE_SING_BOX
-    calls = {"singbox": 0, "classic": 0}
-
-    # Positive routing: a successful sing-box connect must NOT touch classic.
+    calls = {"singbox": 0}
     cm._connect_tun_sing_box = lambda c, d: calls.__setitem__("singbox", calls["singbox"] + 1)
-    cm._connect_tun_classic = lambda c, d: calls.__setitem__("classic", calls["classic"] + 1)
-    cm._connect_tun(object(), [])
-    if calls["singbox"] != 1 or calls["classic"] != 0:
-        raise AssertionError("engine=sing_box must dispatch to sing-box, not classic")
-
-    # Runtime failure: a generic ConnectionError from the sing-box path must
-    # propagate; classic must remain untouched.
-    calls["classic"] = 0
+    cm.connect(object(), [])
+    if calls["singbox"] != 1:
+        raise AssertionError("connect() must dispatch to the sing-box path")
 
     def _runtime_die(config, direct_domains):
         raise _ctl_v3.ConnectionError("sing-box завершился сразу после старта")
 
     cm._connect_tun_sing_box = _runtime_die
     try:
-        cm._connect_tun(object(), [])
+        cm.connect(object(), [])
     except _ctl_v3.ConnectionError:
         pass
     else:
         raise AssertionError("a sing-box runtime failure must propagate, not be swallowed")
-    if calls["classic"] != 0:
-        raise AssertionError(
-            "a sing-box runtime failure must NOT silently fall back to classic")
 
 
 def _v3_no_loopback_bridge() -> None:
@@ -4939,8 +4307,8 @@ def _v3_killswitch_singbox() -> None:
     # 8) Kill-switch must allow sing-box.exe out (else its own transport is
     #    blocked) and tear that rule down on remove (no orphan firewall rule).
     sig = _inspect_v3.signature(_ks_v3.install)
-    if "sing_box_exe_path" not in sig.parameters:
-        raise AssertionError("killswitch.install missing sing_box_exe_path param")
+    if "allow_exe_path" not in sig.parameters:
+        raise AssertionError("killswitch.install must take the sing-box exe path")
     if "_RULE_ALLOW_SINGBOX" not in _inspect_v3.getsource(_ks_v3.install):
         raise AssertionError("install() must add the sing-box allow rule")
     if "_RULE_ALLOW_SINGBOX" not in _inspect_v3.getsource(_ks_v3.remove):
@@ -4955,8 +4323,8 @@ def _v3_stats_include_singbox() -> None:
     if "sing-box" not in stats:
         raise AssertionError("sample_runtime_stats must include the sing-box process")
     line = cm.format_runtime_stats(stats)
-    if "preset=" not in line:
-        raise AssertionError("format_runtime_stats lost its preset segment")
+    if "[mem]" not in line:
+        raise AssertionError("format_runtime_stats must produce a [mem] line")
 
 
 def _v3_legacy_unaffected() -> None:
@@ -5006,8 +4374,8 @@ def _v3_xhttp_unsupported() -> None:
         try:
             _sb_v3.build_config(cfg, [], server_ip="1.2.3.4")
         except _sb_v3.UnsupportedBySingBox as e:
-            if "legacy" not in str(e).lower():
-                raise AssertionError(f"{net} rejection must point the user to legacy")
+            if "legacy" in str(e).lower():
+                raise AssertionError(f"{net} rejection must NOT mention legacy (removed)")
         else:
             raise AssertionError(f"{net} transport must raise UnsupportedBySingBox")
     # Supported transports still build a real sing-box transport.
@@ -5034,8 +4402,8 @@ def _v3_xhttp_rawurl_fallback() -> None:
     try:
         _sb_v3.build_config(cfg, [], server_ip="1.2.3.4")
     except _sb_v3.UnsupportedBySingBox as e:
-        if "legacy" not in str(e).lower():
-            raise AssertionError("xhttp-from-rawurl rejection must point to legacy")
+        if "legacy" in str(e).lower():
+            raise AssertionError("xhttp-from-rawurl rejection must NOT mention legacy")
     else:
         raise AssertionError(
             "XHTTP from raw_url must raise UnsupportedBySingBox even with empty network")
@@ -5059,10 +4427,10 @@ def _v3_orphan_tun_cleanup() -> None:
         raise AssertionError("_free_tun_device must kill orphans on both OSes")
     if "sing-box" not in fsrc or "tun2socks" not in fsrc:
         raise AssertionError("_free_tun_device must target BOTH TUN engines")
-    # REACTIVE, not proactive: _connect_tun must NOT blind-kill on every connect.
-    dsrc = _ins.getsource(_C.ConnectionManager._connect_tun)
+    # REACTIVE, not proactive: connect() must NOT blind-kill on every connect.
+    dsrc = _ins.getsource(_C.ConnectionManager.connect)
     if "_free_tun_device" in dsrc:
-        raise AssertionError("_connect_tun must NOT proactively kill (sibling-kill risk)")
+        raise AssertionError("connect() must NOT proactively kill (sibling-kill risk)")
     sbsrc = _ins.getsource(_C.ConnectionManager._connect_tun_sing_box)
     if "_free_tun_device" not in sbsrc or "already exists" not in sbsrc.lower():
         raise AssertionError("_connect_tun_sing_box must free the TUN reactively on collision")
@@ -5072,18 +4440,15 @@ def _v3_orphan_tun_cleanup() -> None:
 
 
 def _v3_singbox_watchdog_engine_aware() -> None:
-    # 13) The crash-watchdog must be engine-aware (v3.0.2). In sing-box TUN mode
-    #     xray (manager.process) is NEVER started, so the OLD watchdog read a
-    #     healthy sing-box session as an 'Xray-core crash' and reconnect-looped.
-    #     (a) healthy sing-box (xray down, sing-box up) → NO process_crash arm.
-    #     (b) classic xray death → reconnect still arms.
-    #     (c) sing-box death → log blames sing-box, not Xray.
+    # 13) v3.1.0: sing-box is the only engine. The crash watchdog watches the
+    #     single sing-box process:
+    #     (a) healthy sing-box (process up) → NO process_crash arm.
+    #     (b) sing-box death → arms reconnect + log blames sing-box.
     import os as _o3
     _o3.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
     from kapro_tun.gui import main_window as mw
     from kapro_tun.core import app_log
-    from kapro_tun.core import controller as _C
     from kapro_tun.core.parser import ProxyConfig
     if QApplication.instance() is None:
         QApplication([])
@@ -5105,59 +4470,37 @@ def _v3_singbox_watchdog_engine_aware() -> None:
         w._active_config = cfg
         m = w.manager
         m._active = cfg
-        m.current_mode = lambda: mw.MODE_TUN
         m.disconnect = lambda: None
         logs = []
         w.logs_page.append = lambda s: logs.append(str(s))
         arm = []
         w._arm_reconnect = lambda reason, a, t: (arm.append(reason) or True)
 
-        # (a) healthy sing-box: xray NOT running, sing-box running.
-        m.current_engine = lambda: _C.ENGINE_SING_BOX
-        m.process.is_running = lambda: False
+        # (a) healthy sing-box: process running → no crash arm.
         m.sing_box_process.is_running = lambda: True
         m.is_connected = lambda: True
-        logs.clear(); arm.clear(); w._reconnect_attempts = 0
+        logs.clear(); arm.clear(); w._reconnect_attempts = 0; w._crash_confirm = 0
         w._refresh_home()
         if arm:
             raise AssertionError(f"healthy sing-box must NOT arm a reconnect: {arm}")
         if any("упал" in l for l in logs):
             raise AssertionError(f"healthy sing-box must not log a crash: {logs}")
 
-        # (b) classic xray death → reconnect still works.
-        m.current_engine = lambda: _C.ENGINE_CLASSIC
-        m.process.is_running = lambda: False
-        m.process.returncode = lambda: 1
-        m.tun_process.is_running = lambda: False
+        # (b) sing-box death → arms reconnect + blames sing-box.
+        m.sing_box_process.is_running = lambda: False
+        m.sing_box_process.returncode = lambda: 1
         m.is_connected = lambda: False
         logs.clear(); arm.clear()
         w._auto_recovery_disabled = False; w._reconnect_attempts = 0
         w._crash_confirm = 0
         w._reconnect_timer.stop()
-        # v3.0.8 debounce: a real death must read not-running on TWO consecutive
-        # 1s ticks before arming (a lone transient poll must not tear down).
+        # v3.0.8 debounce: two consecutive not-running ticks before arming.
         w._refresh_home(); w._refresh_home()
         w._reconnect_timer.stop()
         if "process_crash" not in arm:
-            raise AssertionError("classic xray death must still arm process_crash")
-        if not any("Xray-core упал" in l for l in logs):
-            raise AssertionError(f"classic crash must blame Xray-core: {logs}")
-
-        # (c) sing-box death → log blames sing-box, not Xray.
-        m.current_engine = lambda: _C.ENGINE_SING_BOX
-        m.process.is_running = lambda: False
-        m.sing_box_process.is_running = lambda: False
-        m.sing_box_process.returncode = lambda: 1
-        m.tun_process.is_running = lambda: False
-        m.is_connected = lambda: False
-        logs.clear(); arm.clear()
-        w._auto_recovery_disabled = False; w._reconnect_attempts = 0
-        w._crash_confirm = 0
-        w._reconnect_timer.stop()
-        w._refresh_home(); w._refresh_home()   # debounce: two consecutive ticks
-        w._reconnect_timer.stop()
+            raise AssertionError("sing-box death must arm process_crash")
         if not any("sing-box упал" in l for l in logs):
-            raise AssertionError(f"sing-box death must log 'sing-box упал': {logs}")
+            raise AssertionError(f"sing-box death must blame sing-box: {logs}")
         if any("Xray-core упал" in l for l in logs):
             raise AssertionError(f"sing-box death must NOT blame Xray: {logs}")
     finally:
@@ -5422,18 +4765,17 @@ def _v3_ipv6_capture_and_throughput() -> None:
 
 
 def _v3_singbox_skips_firewall_ipv6_block() -> None:
-    # v3.0.9: under the sing-box engine the netsh firewall IPv6 block (the direct
-    # cause of ERR_NETWORK_ACCESS_DENIED) must be SKIPPED — the TUN now handles v6
-    # in-tunnel — and any stale block removed, BEFORE install() is ever reached.
+    # v3.1.0: sing-box is the only engine and the TUN handles IPv6 in-tunnel
+    # (inet6 address + 2000::/3 reject), so _maybe_arm_ipv6_block NEVER installs a
+    # netsh v6 firewall block (which caused ERR_NETWORK_ACCESS_DENIED) — it only
+    # clears any stale block a prior build may have left.
     import inspect as _ins
     from kapro_tun.core import controller as _C
     src = _ins.getsource(_C.ConnectionManager._maybe_arm_ipv6_block)
-    if "ENGINE_SING_BOX" not in src or "current_engine" not in src:
-        raise AssertionError("_maybe_arm_ipv6_block must gate on the sing-box engine")
-    i_engine = src.find("ENGINE_SING_BOX")
-    i_install = src.find("ipv6_block.install()")
-    if i_install != -1 and i_engine > i_install:
-        raise AssertionError("the sing-box skip must come BEFORE ipv6_block.install()")
+    if "ipv6_block.install()" in src:
+        raise AssertionError("_maybe_arm_ipv6_block must NOT install a netsh v6 block")
+    if "ipv6_block.remove()" not in src:
+        raise AssertionError("_maybe_arm_ipv6_block must clear any stale v6 block")
 
 
 def _v3_firewall_sweep_prefix() -> None:
@@ -5535,33 +4877,17 @@ def _v3_ip_probe_bypasses_system_proxy() -> None:
 
 
 def _v3_singbox_dns_watchdog_guarded() -> None:
-    # 19) The runtime DNS watchdog must guard sing-box in BOTH leak modes (the
-    #     bug: tun_dns_guarded() was gated on dns_leak_protection, so sing-box
-    #     leak-off DNS degradation went unnoticed). Classic leak-off stays
-    #     unguarded (its physical resolver is untouched). The watchdog requires
-    #     SUSTAINED failure (no single-probe reconnect loop).
-    from kapro_tun.core import controller as _C
+    # 19) v3.1.0: sing-box is the only engine; its TUN hijacks all :53 in BOTH
+    #     leak modes, so the runtime DNS watchdog guards whenever a session is
+    #     live, regardless of the leak setting — tun_dns_guarded() == is_connected().
     from kapro_tun.core.controller import ConnectionManager
     cm = ConnectionManager(on_log=None)
     cm.is_connected = lambda: True
-
-    def guarded(mode, engine, leak):
-        cm.settings["mode"] = mode
-        cm.settings["tun_engine"] = engine
-        cm.settings["dns_leak_protection"] = leak
-        cm._active_engine = engine if mode == "tun" else None
-        return cm.tun_dns_guarded()
-
-    if not guarded("tun", _C.ENGINE_SING_BOX, False):
-        raise AssertionError("sing-box leak-OFF must be DNS-guarded (the bug)")
-    if not guarded("tun", _C.ENGINE_SING_BOX, True):
-        raise AssertionError("sing-box leak-ON must be DNS-guarded")
-    if guarded("http_proxy", _C.ENGINE_SING_BOX, True):
-        raise AssertionError("HTTP mode must never be DNS-guarded")
-    if guarded("tun", _C.ENGINE_CLASSIC, False):
-        raise AssertionError("classic leak-OFF stays unguarded (physical DNS intact)")
-    if not guarded("tun", _C.ENGINE_CLASSIC, True):
-        raise AssertionError("classic leak-ON must be DNS-guarded")
+    if not cm.tun_dns_guarded():
+        raise AssertionError("a live sing-box TUN must be DNS-guarded")
+    cm.is_connected = lambda: False
+    if cm.tun_dns_guarded():
+        raise AssertionError("a disconnected session must NOT be DNS-guarded")
 
     # Debounce: the watchdog needs >=2 consecutive failed probes before healing.
     import os as _ow
@@ -5850,7 +5176,6 @@ check("config: no 2081 bridge; health-only probe forced to proxy", _v3_no_loopba
 check("cleanup: sing-box runtime config wiped on disconnect", _v3_runtime_cleanup)
 check("kill-switch: allows + removes sing-box.exe rule", _v3_killswitch_singbox)
 check("stats: sample/format include sing-box process", _v3_stats_include_singbox)
-check("legacy: classic engine still selectable + valid", _v3_legacy_unaffected)
 check("config: real `sing-box check` accepts generated config", _v3_real_singbox_check)
 check("config: XHTTP/splithttp → UnsupportedBySingBox (no half-working TCP)",
       _v3_xhttp_unsupported)
@@ -5862,8 +5187,6 @@ check("watchdog: engine-aware crash detection (no false Xray crash on sing-box)"
       _v3_singbox_watchdog_engine_aware)
 check("logs: sing-box benign/ICMP hidden, transient startup-visible, fatal stays",
       _v3_singbox_log_noise_classification)
-check("ui: ad-block disabled under sing-box TUN, value preserved",
-      _v3_block_ads_disabled_on_singbox)
 check("logs: block_ads notice logs once per launch, not per reconnect",
       _v3_block_ads_warning_once)
 check("dns/routing: leak-off direct, leak-on direct DoH, OpenAI force-proxy",
@@ -5888,8 +5211,6 @@ check("connect: forgiving — no CDN rollback, poll-based liveness warm-up (v3.0
       _v3_connect_is_forgiving)
 check("connect: system TUN egress must match proxy VPN IP (v3.0.13)",
       _v3_system_tun_must_match_proxy_egress)
-check("connect: classic alive on transport OR dns, not dns-only (v3.0.8)",
-      _v3_connect_classic_alive_on_transport)
 check("watchdog: crash detector debounced 2 consecutive ticks + resets (v3.0.8)",
       _v3_crash_detector_debounced)
 check("watchdog: TUN health needs >=3 sustained fails, not twitchy (v3.0.13)",

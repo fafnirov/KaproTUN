@@ -4,7 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
-from ..core import geoip_ru, sing_box_installer, tun2socks_installer, xray_installer
+from ..core import geoip_ru, sing_box_installer
 
 
 class _DownloadThread(QThread):
@@ -63,31 +63,6 @@ def _run_download(parent, label: str, installer_fn, on_fail_msg: str) -> bool:
                              f"{error_holder[0]}\n\n{on_fail_msg}")
         return False
     return True
-
-
-def ensure_xray_installed(parent) -> bool:
-    """Download Xray-core if missing. Returns True on success (or already present)."""
-    if xray_installer.is_installed():
-        return True
-    return _run_download(
-        parent, "Xray-core", xray_installer.download_and_install,
-        f"Проверь интернет, или скачай Xray-core вручную с\n"
-        f"https://github.com/XTLS/Xray-core/releases\n"
-        f"и распакуй в:\n{xray_installer.paths.xray_dir()}",
-    ) and xray_installer.is_installed()
-
-
-def ensure_tun2socks_installed(parent) -> bool:
-    """Download tun2socks + wintun.dll if missing. For TUN mode."""
-    if tun2socks_installer.is_installed():
-        return True
-    return _run_download(
-        parent, "tun2socks + WinTUN", tun2socks_installer.download_and_install,
-        f"Скачай вручную:\n"
-        f"- https://github.com/xjasonlyu/tun2socks/releases\n"
-        f"- https://www.wintun.net/\n"
-        f"и положи tun2socks.exe и wintun.dll в:\n{tun2socks_installer.paths.tun_dir()}",
-    ) and tun2socks_installer.is_installed()
 
 
 def ensure_sing_box_installed(parent) -> bool:

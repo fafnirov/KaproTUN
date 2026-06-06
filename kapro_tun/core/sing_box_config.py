@@ -153,8 +153,8 @@ def ensure_supported(outbound: dict[str, Any]) -> None:
     # the xray-shaped parser output — refuse rather than mis-handshake.
     if otype == "shadowsocks" and outbound.get("plugin"):
         raise UnsupportedBySingBox(
-            "Shadowsocks-плагины (obfs/v2ray-plugin) пока поддержаны только в "
-            "legacy-движке.")
+            "Shadowsocks-плагины (obfs/v2ray-plugin) не поддерживаются. "
+            "Используй сервер без плагина.")
 
 
 # Transports sing-box implements as a v2ray-transport. Anything outside this
@@ -182,13 +182,13 @@ def ensure_transport_supported(proxy) -> None:
     if ("xhttp" in network or "splithttp" in network
             or "type=xhttp" in raw or "type=splithttp" in raw):
         raise UnsupportedBySingBox(
-            "Транспорт XHTTP/splithttp поддержан только в Xray. Переключи движок "
-            "на «Legacy (Xray + tun2socks)» в Настройках и подключись снова.")
+            "Транспорт XHTTP/splithttp не поддерживается этим клиентом. "
+            "Возьми сервер на обычном TCP / WS / gRPC.")
     if network in _TCP_LIKE_NETWORKS or network in _SING_BOX_TRANSPORTS:
         return
     raise UnsupportedBySingBox(
-        f"Транспорт «{network}» поддержан только в Xray. Переключи движок на "
-        f"«Legacy (Xray + tun2socks)» в Настройках и подключись снова.")
+        f"Транспорт «{network}» не поддерживается этим клиентом. "
+        f"Возьми сервер на обычном TCP / WS / gRPC.")
 
 
 def _dns_block(dns_option: str, dns_leak_protection: bool,
