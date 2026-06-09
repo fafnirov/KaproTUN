@@ -264,8 +264,28 @@ def load_subscription_secrets() -> dict[str, Any]:
 def save_subscription_secrets(secrets: dict[str, Any]) -> None:
     """Persist subscription secrets to the encrypted blob (only the known
     secret keys). Raises SecretsError if encryption is supported but failed —
-    the secret is then NOT written anywhere in plaintext."""
-    payload = {k: secrets.get(k) for k in _SUBSCRIPTION_SECRET_KEYS}
+    the secret is then NOT written anywhere in plaintext.
+
+    Merge-protect: NEVER overwrite a non-empty stored secret with an empty
+    value. The subscription URL lives ONLY in this blob, but it is saved
+    through several paths — including ConnectionManager.update_settings(),
+    which persists a long-lived in-memory settings dict loaded once at startup.
+    If a subscription is added AFTER that load (the subscription dialog writes
+    the blob directly), update_settings' stale dict still carries
+    subscription_url="" — and a plain overwrite would WIPE the freshly-saved
+    URL on the next unrelated setting change (theme, kill-switch, …). That is
+    exactly how saved subscriptions silently vanished (the server list stayed,
+    but "Обновить" reported "нет подписок"). So when the incoming value is
+    empty but a non-empty one is already stored, keep the stored one. There is
+    no "clear subscription" UI, so this never blocks a legitimate removal."""
+    existing = load_subscription_secrets()
+    payload: dict[str, Any] = {}
+    for k in _SUBSCRIPTION_SECRET_KEYS:
+        incoming = secrets.get(k)
+        if incoming in (None, "", []) and existing.get(k) not in (None, "", []):
+            payload[k] = existing[k]
+        else:
+            payload[k] = incoming
     data = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
     _write_encrypted(paths.secrets_file(), data)
 
