@@ -1,2 +1,2 @@
 """KaproTUN — proxy client with split routing via a customizable direct-list."""
-__version__ = "3.1.6"
+__version__ = "3.1.7"

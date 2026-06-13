@@ -17,7 +17,7 @@ Windows). Android-клиент живёт в отдельном репозито
 
 # Desktop (Windows + Python)
 
-## v3.1.6 — Linux: подключение на свежих ядрах (обход сломанного auto_route)
+## v3.1.7 — Linux: подключение на свежих ядрах (обход сломанного auto_route)
 
 - **Баг:** на свежих ядрах Linux (проверено: Linux 7.0 / Ubuntu 26.04)
   подключение падало с `add route 0: invalid argument`. Причина — netlink-вызовы

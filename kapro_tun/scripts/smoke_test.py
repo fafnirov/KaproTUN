@@ -4125,7 +4125,12 @@ def _v3_config_structure() -> None:
     inb = full["inbounds"]
     if not inb or inb[0].get("type") != "tun":
         raise AssertionError("missing native tun inbound")
-    if not inb[0].get("auto_route"):
+    if _sb_v3._IS_LINUX:
+        # v3.1.6: Linux runs auto_route OFF (kernel-7.0 netlink incompat) and
+        # lays routes via iproute2 (core/linux_tun_route.py).
+        if inb[0].get("auto_route"):
+            raise AssertionError("on Linux tun inbound must NOT auto_route")
+    elif not inb[0].get("auto_route"):
         raise AssertionError("tun inbound must auto_route")
     if inb[0].get("interface_name") != _sb_v3.TUN_DEVICE_NAME:
         raise AssertionError("tun interface_name mismatch")
@@ -4183,7 +4188,12 @@ def _v3_dns_hijack_and_leak() -> None:
                for r in c["route"]["rules"]):
         raise AssertionError("missing DNS hijack rule (protocol:dns → hijack-dns)")
     servers = c["dns"]["servers"]
-    if servers != [{"type": "local", "tag": "local"}]:
+    if _sb_v3._IS_LINUX:
+        # v3.1.6: Linux resolves via an explicit udp upstream (type:local would
+        # loop through systemd-resolved + hijack-dns).
+        if not (len(servers) == 1 and servers[0].get("type") == "udp"):
+            raise AssertionError(f"Linux DNS must be a single udp upstream, got {servers}")
+    elif servers != [{"type": "local", "tag": "local"}]:
         raise AssertionError(f"DNS must be a single system (type:local) server, got {servers}")
     if c["dns"].get("strategy") != "ipv4_only":
         raise AssertionError("DNS strategy must be ipv4_only (matches 2000::/3 reject)")
@@ -4635,7 +4645,11 @@ def _v3_dns_and_split_routing() -> None:
 
     # --- DNS is system in every mode, the leak kwarg is ignored ---
     c_dns, rules_dns = build(True, True)
-    if c_dns["dns"]["servers"] != [{"type": "local", "tag": "local"}]:
+    _dns_servers = c_dns["dns"]["servers"]
+    if sys.platform.startswith("linux"):
+        if not (len(_dns_servers) == 1 and _dns_servers[0].get("type") == "udp"):
+            raise AssertionError("Linux DNS must be a single udp upstream")
+    elif _dns_servers != [{"type": "local", "tag": "local"}]:
         raise AssertionError("DNS must be a single system (type:local) server")
     if not any(r.get("action") == "hijack-dns" for r in rules_dns):
         raise AssertionError("app :53 must still be hijacked into the system resolver")
@@ -4694,8 +4708,13 @@ def _v3_ipv6_capture_and_throughput() -> None:
                         dns_leak_protection=True, route_ru_direct=True)
     inb = c["inbounds"][0]
     # (a) the TUN carries an inet6 address so auto_route captures ::/0.
+    #     v3.1.6: on Linux the TUN is IPv4-only (manual-routing path) — IPv6 leak
+    #     handling there is a follow-up, so skip the inet6 requirement.
     addrs = inb.get("address") or []
-    if not any(":" in a for a in addrs):
+    if sb._IS_LINUX:
+        if any(":" in a for a in addrs):
+            raise AssertionError("Linux TUN must be IPv4-only for now")
+    elif not any(":" in a for a in addrs):
         raise AssertionError("TUN must carry an inet6 address (capture IPv6 in-tunnel)")
     # (b) stack: gvisor (v3.1.3). The kernel-TCP "mixed"/"system" paths carry no
     # traffic at all on some real Windows machines (driver/AV/network-filter
