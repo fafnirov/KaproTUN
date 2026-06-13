@@ -11,7 +11,7 @@ import time
 from typing import Callable, Optional
 
 from . import (
-    admin, app_log, dns_health, ipv6_block, killswitch,
+    admin, app_log, dns_health, ipv6_block, killswitch, linux_tun_route,
     paths, proc_stats, storage, tun_recovery, webrtc_block,
 )
 from .parser import ProxyConfig
@@ -252,6 +252,9 @@ class ConnectionManager:
         tun_recovery.clear()
         if self.sing_box_process.is_running():
             self.sing_box_process.stop()
+        # Linux: undo the manual routes + resolvectl DNS we laid in place of
+        # auto_route. Idempotent no-op on other platforms / if never set up.
+        linux_tun_route.teardown()
         leftover = paths.remove_runtime_configs()
         if leftover:
             self._log("[!] Не удалось удалить runtime-конфиги: "
@@ -589,6 +592,11 @@ class ConnectionManager:
                     raise ConnectionError(
                         "sing-box завершился сразу после старта"
                         + (f":\n{tail}" if tail else "."))
+            # Linux (kernel 7.0+): sing-box ran with auto_route OFF because its
+            # netlink route-add is rejected by the kernel. Now that the TUN
+            # device exists, lay the routing + DNS ourselves via iproute2/
+            # resolvectl. No-op on Windows/macOS, where auto_route already did it.
+            linux_tun_route.setup()
             # The process being alive and DNS resolving are not enough: encrypted
             # DNS is intentionally independent of the VPN transport. Require a
             # real HTTP request whose route falls through final=proxy.
@@ -611,6 +619,7 @@ class ConnectionManager:
             self._log("[*] sing-box TUN активен — DNS и реальный трафик через VPN проходят.")
         except Exception:
             self.sing_box_process.stop()
+            linux_tun_route.teardown()
             try:
                 killswitch.remove()
             except Exception:

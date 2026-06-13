@@ -10,7 +10,8 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
 from .core import (autostart, firewall_sweep, i18n, ipv6_block, killswitch,
-                   storage, system_proxy, tun_recovery, webrtc_block)
+                   linux_tun_route, storage, system_proxy, tun_recovery,
+                   webrtc_block)
 from .gui import icons
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
@@ -179,6 +180,15 @@ def _run_app() -> int:
     # instance guard already proved we're the only KaproTUN, so any
     # leftover helper process is by definition orphaned. Kill them.
     _kill_orphan_helpers()
+
+    # Linux: if a previous run was force-killed while connected, our manual TUN
+    # routes + resolvectl DNS (the auto_route replacement) can survive and
+    # black-hole the machine. Tear them down on launch — idempotent no-op on
+    # other platforms or when nothing was left behind.
+    try:
+        linux_tun_route.teardown()
+    except Exception:
+        pass
 
     # Third defensive sweep: if the previous run crashed while
     # kill-switch was active, the firewall rules are still in place

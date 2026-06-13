@@ -18,11 +18,18 @@ can offer the legacy engine — never a silent wrong behaviour.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import struct
+import subprocess
+import sys
 from typing import Any, Optional
 
 from . import geoip_ru, paths
+
+# Linux runs sing-box with auto_route OFF (the kernel-7.0 netlink incompat breaks
+# it) and replicates routing via iproute2 — see core/linux_tun_route.py.
+_IS_LINUX = sys.platform.startswith("linux")
 
 # TUN device + addressing — mirrors the classic engine so nothing else changes.
 TUN_DEVICE_NAME = "KaproTun"
@@ -202,11 +209,43 @@ def _dns_block() -> dict[str, Any]:
     (auto_detect_interface). On Windows that means the stub at 127.0.0.1:53 and
     any upstream it forwards to leave via the real NIC, NOT back through the TUN,
     so the hijacked-:53 → local-resolve path can't re-capture itself."""
+    if _IS_LINUX:
+        # On Linux the OS resolver is systemd-resolved (127.0.0.53). A `type:
+        # local` server would ask IT, but systemd-resolved forwards back through
+        # the TUN where hijack-dns re-captures the query → an infinite loop that
+        # black-holes DNS (the classic systemd-resolved + hijack-dns regression).
+        # So resolve through an explicit UDP upstream — the system's real
+        # upstream when we can read it, else a public fallback. sing-box dials it
+        # with route.default_mark set, so the query leaves via the physical NIC,
+        # not back into the tunnel.
+        return {
+            "servers": [{"type": "udp", "server": _linux_upstream_dns(),
+                         "tag": "local"}],
+            "final": "local",
+            "strategy": "ipv4_only",
+        }
     return {
         "servers": [{"type": "local", "tag": "local"}],
         "final": "local",
         "strategy": "ipv4_only",
     }
+
+
+def _linux_upstream_dns() -> str:
+    """The system's real upstream DNS on Linux (for the udp resolver above).
+
+    Reads `resolvectl dns`, drops the 127.x stub (systemd-resolved itself), and
+    returns the first real server. Falls back to a public resolver if that can't
+    be read. Called once per connect at config-generation time."""
+    try:
+        out = subprocess.run(["resolvectl", "dns"], capture_output=True,
+                             text=True, timeout=5).stdout
+        for ip in re.findall(r"\b\d+\.\d+\.\d+\.\d+\b", out):
+            if not ip.startswith("127."):
+                return ip
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "8.8.8.8"
 
 
 def build_config(
@@ -290,25 +329,47 @@ def build_config(
     _ = (block_ads, on_log, dns_option, dns_leak_protection)
 
     dns_block = _dns_block()
+    # Platform-split TUN inbound. Windows/macOS: native auto_route owns routing
+    # and captures both v4+v6. Linux (kernel 7.0+): auto_route's netlink calls
+    # fail with "add route 0: invalid argument", so we run it OFF and lay routes
+    # by hand (core/linux_tun_route.py); we also stay IPv4-only there to keep the
+    # manual route table simple (IPv6 leak handling on Linux is a follow-up).
+    tun_inbound: dict[str, Any] = {
+        "type": "tun",
+        "tag": "tun-in",
+        "interface_name": TUN_DEVICE_NAME,
+        "address": [TUN_INET4] if _IS_LINUX else [TUN_INET4, TUN_INET6],
+        "mtu": TUN_MTU,
+        "auto_route": not _IS_LINUX,
+        "strict_route": False,
+        "stack": TUN_STACK,
+        # Full-cone NAT for the gVisor UDP path: QUIC/HTTP3 (YouTube/Google video)
+        # and WebRTC reuse one mapping instead of per-destination sessions. On
+        # Linux this is also REQUIRED for plain UDP (incl. DNS) to traverse the
+        # manually-routed TUN at all.
+        "endpoint_independent_nat": True,
+    }
+    route_block: dict[str, Any] = {
+        "rules": rules,
+        "final": "proxy",
+        # Resolve domains (for `direct` traffic, route rules) via the same
+        # tunnelled resolver — required by sing-box 1.12+ when any outbound
+        # may see a domain target.
+        "default_domain_resolver": {"server": dns_block["final"]},
+        # Send `direct` traffic out the real NIC automatically → direct
+        # traffic can't loop back into the TUN.
+        "auto_detect_interface": True,
+    }
+    if _IS_LINUX:
+        # fwmark on every sing-box-originated connection so the manual ip-rule
+        # can send sing-box's OWN egress (proxy + direct) out the physical NIC
+        # instead of looping it back into the TUN. This is what auto_route would
+        # set automatically; with auto_route off we set it ourselves.
+        route_block["default_mark"] = 1
     return {
         "log": {"level": log_level, "timestamp": True},
         "dns": dns_block,
-        "inbounds": [{
-            "type": "tun",
-            "tag": "tun-in",
-            "interface_name": TUN_DEVICE_NAME,
-            # Both families → auto_route captures 0.0.0.0/0 AND ::/0 into the TUN,
-            # so native IPv6 can't bypass the tunnel on the physical NIC.
-            "address": [TUN_INET4, TUN_INET6],
-            "mtu": TUN_MTU,
-            "auto_route": True,
-            "strict_route": False,
-            "stack": TUN_STACK,
-            # Full-cone NAT for the gVisor UDP half of "mixed": QUIC/HTTP3
-            # (YouTube/Google video) and WebRTC reuse one mapping instead of
-            # spawning per-destination sessions → less churn, better UDP throughput.
-            "endpoint_independent_nat": True,
-        }, {
+        "inbounds": [tun_inbound, {
             # Health checks only. User traffic still enters through native TUN;
             # this does not recreate the old tun2socks/SOCKS bridge.
             "type": "mixed",
@@ -320,17 +381,7 @@ def build_config(
             outbound,
             {"type": "direct", "tag": "direct"},
         ],
-        "route": {
-            "rules": rules,
-            "final": "proxy",
-            # Resolve domains (for `direct` traffic, route rules) via the same
-            # tunnelled resolver — required by sing-box 1.12+ when any outbound
-            # may see a domain target.
-            "default_domain_resolver": {"server": dns_block["final"]},
-            # Send `direct` traffic out the real NIC automatically → direct
-            # traffic can't loop back into the TUN.
-            "auto_detect_interface": True,
-        },
+        "route": route_block,
     }
 
 
