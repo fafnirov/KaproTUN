@@ -1,106 +1,101 @@
 #!/usr/bin/env python3
-"""KaproTUN — подбор рабочего TUN-конфига на Linux. Запусти ОТ ROOT:
+"""KaproTUN — Linux TUN-диагностика v2. ОТ ROOT:  sudo python3 /tmp/kt.py
 
-    sudo python3 diag_linux_tun.py
-
-Изолирует ошибку «add route 0: invalid argument»: перебирает варианты TUN
-(с IPv6 / без, gvisor/system, strict_route) с ПУСТЫМ direct-outbound (реальный
-сервер НЕ нужен — ошибка возникает на старте TUN, до трафика) и показывает,
-какой вариант поднимается без FATAL. Чистый python3 stdlib + бинарь sing-box.
+Все варианты auto_route падают с «add route: invalid argument» → проблема не в
+IPv6/stack, а в самом auto_route на этой системе. Этот скрипт: (1) печатает
+сетевой контекст; (2) проверяет, поднимается ли TUN БЕЗ auto_route; (3) пробует
+обходные варианты (split route_address, auto_redirect); (4) даёт ПОЛНЫЙ
+trace-лог проблемного конфига, чтобы увидеть точную причину netlink-EINVAL.
 """
-import json, os, subprocess, tempfile, time, signal
+import json, os, subprocess, tempfile, time, signal, re
 
-# найти бинарь sing-box (стандартные места установки на Linux)
-CANDS = [
-    os.path.expanduser("~/.local/share/KaproTUN/sing-box/sing-box"),
-    os.path.expanduser("~/.local/share/KaproVPN/sing-box/sing-box"),
-    "/usr/local/bin/sing-box", "/usr/bin/sing-box",
-]
+CANDS = [os.path.expanduser("~/.local/share/KaproTUN/sing-box/sing-box"),
+         "/root/.local/share/KaproTUN/sing-box/sing-box",
+         "/usr/local/bin/sing-box", "/usr/bin/sing-box"]
 SB = next((p for p in CANDS if os.path.isfile(p)), None)
 if not SB:
-    print("sing-box не найден. Укажи путь:", CANDS); raise SystemExit(1)
+    print("sing-box не найден:", CANDS); raise SystemExit(1)
 print("sing-box:", SB)
-try:
-    v = subprocess.run([SB, "version"], capture_output=True, text=True, timeout=8).stdout.splitlines()
-    print("версия:", v[0] if v else "?")
-except Exception as e:
-    print("версия: ?", e)
+
+
+def sh(cmd):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True,
+                              text=True, timeout=8).stdout.strip()
+    except Exception as e:
+        return f"<err {e}>"
+
+
+print("\n===== СЕТЕВОЙ КОНТЕКСТ =====")
+print("-- ip route (v4) --\n" + sh("ip route show"))
+print("-- ip -6 route --\n" + (sh("ip -6 route show") or "(пусто — IPv6 нет)"))
+print("-- ip rule --\n" + sh("ip rule show"))
+print("-- интерфейсы --\n" + sh("ip -br link show"))
+print("-- ip_forward --", sh("cat /proc/sys/net/ipv4/ip_forward"))
 
 V4 = "10.255.0.2/30"
 V6 = "fdfe:dcba:9876::1/126"
 
-VARIANTS = [
-    ("A. v4+v6  gvisor strict=False  (текущий конфиг)", [V4, V6], "gvisor", False),
-    ("B. v4only gvisor strict=False", [V4], "gvisor", False),
-    ("C. v4only system strict=False", [V4], "system", False),
-    ("D. v4only gvisor strict=True ", [V4], "gvisor", True),
-    ("E. v4+v6  system strict=False", [V4, V6], "system", False),
-    ("F. v4only system strict=True ", [V4], "system", True),
-]
 
-def build(address, stack, strict):
-    tun = {
-        "type": "tun", "tag": "tun-in", "interface_name": "KaproTun",
-        "address": address, "mtu": 1400, "auto_route": True,
-        "strict_route": strict, "stack": stack, "endpoint_independent_nat": True,
-    }
-    return {
-        "log": {"level": "error", "timestamp": True},
-        "inbounds": [tun],
-        "outbounds": [{"type": "direct", "tag": "direct"}],
-        "route": {"rules": [{"action": "sniff"}], "final": "direct",
-                  "auto_detect_interface": True},
-    }
-
-results = []
-for name, addr, stack, strict in VARIANTS:
-    cfg = build(addr, stack, strict)
-    fd, path = tempfile.mkstemp(suffix=".json"); os.close(fd)
-    with open(path, "w") as f:
-        json.dump(cfg, f)
-    # check сначала (грамматика)
-    chk = subprocess.run([SB, "check", "-c", path], capture_output=True, text=True)
+def run_cfg(tun, level="error", wait=2.5):
+    cfg = {"log": {"level": level, "timestamp": True},
+           "inbounds": [dict(tun, type="tun", tag="tun-in",
+                             interface_name="KaproTun")],
+           "outbounds": [{"type": "direct", "tag": "direct"}],
+           "route": {"rules": [{"action": "sniff"}], "final": "direct",
+                     "auto_detect_interface": True}}
+    fd, p = tempfile.mkstemp(suffix=".json"); os.close(fd)
+    open(p, "w").write(json.dumps(cfg))
+    chk = subprocess.run([SB, "check", "-c", p], capture_output=True, text=True)
     if chk.returncode != 0:
-        print(f"{name}: CHECK FAIL: {chk.stderr.strip()[:80]}")
-        results.append((name, "check-fail")); os.unlink(path); continue
-    # запустить и посмотреть, поднимается ли TUN без FATAL
-    proc = subprocess.Popen([SB, "run", "-c", path],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    time.sleep(2.5)
-    out = ""
-    alive = proc.poll() is None
-    if not alive:
-        out = proc.stdout.read()
+        os.unlink(p); return False, "CHECK FAIL: " + chk.stderr.strip()[:140]
+    pr = subprocess.Popen([SB, "run", "-c", p], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True)
+    time.sleep(wait)
+    alive = pr.poll() is None
+    out = "" if alive else pr.stdout.read()
     try:
-        proc.send_signal(signal.SIGINT); proc.wait(timeout=4)
+        pr.send_signal(signal.SIGINT); pr.wait(timeout=4)
     except Exception:
-        try: proc.kill()
+        try: pr.kill()
         except Exception: pass
-    # подчистить осиротевшие маршруты/интерфейс
-    subprocess.run("ip link del KaproTun 2>/dev/null; ip -6 rule del table 2022 2>/dev/null; "
-                   "ip rule del table 2022 2>/dev/null", shell=True)
-    os.unlink(path)
-    low = out.lower()
-    if alive:
-        verdict = "✓ TUN ПОДНЯЛСЯ"
-    elif "add route" in low and "invalid argument" in low:
-        verdict = "✗ add route: invalid argument (та самая ошибка)"
-    elif "operation not permitted" in low or "not permitted" in low:
-        verdict = "✗ нет прав (запусти под sudo)"
-    elif "fatal" in low or "error" in low:
-        line = next((l for l in out.splitlines() if "FATAL" in l or "ERROR" in l), out[:120])
-        import re; verdict = "✗ " + re.sub(r"\x1b\[[0-9;]*m", "", line)[-90:]
-    else:
-        verdict = "✗ упал без явной причины"
-    print(f"{name}: {verdict}")
-    results.append((name, verdict))
-    time.sleep(1)
+    sh("ip link del KaproTun 2>/dev/null; ip rule del table 2022 2>/dev/null; "
+       "ip -6 rule del table 2022 2>/dev/null")
+    os.unlink(p)
+    return alive, re.sub(r"\x1b\[[0-9;]*m", "", out)
 
-print("\n" + "="*70)
-ok = [n for n, v in results if v.startswith("✓")]
-if ok:
-    print("РАБОЧИЕ варианты TUN:")
-    for n in ok: print("  ", n)
-    print("\n→ берём первый рабочий и применяем его параметры в sing_box_config.py")
-else:
-    print("Ни один не поднялся — пришли вывод, разберём по тексту ошибок.")
+
+def short(out):
+    return " | ".join(l for l in out.splitlines() if l.strip())[:320]
+
+
+print("\n===== ТЕСТЫ =====")
+
+alive, out = run_cfg({"address": [V4], "mtu": 1400, "auto_route": False,
+                      "stack": "gvisor"})
+print(f"\n[1] TUN БЕЗ auto_route (gvisor): {'OK ПОДНЯЛСЯ' if alive else 'FAIL'}")
+if not alive:
+    print("    " + short(out))
+
+alive, out = run_cfg({"address": [V4], "mtu": 1400, "auto_route": True,
+                      "route_address": ["0.0.0.0/1", "128.0.0.0/1"],
+                      "stack": "gvisor"})
+print(f"\n[2] auto_route + split route_address: {'OK ПОДНЯЛСЯ' if alive else 'FAIL'}")
+if not alive:
+    print("    " + short(out))
+
+alive, out = run_cfg({"address": [V4], "mtu": 1400, "auto_route": True,
+                      "auto_redirect": True, "stack": "system"})
+print(f"\n[3] auto_route + auto_redirect (system): {'OK ПОДНЯЛСЯ' if alive else 'FAIL'}")
+if not alive:
+    print("    " + short(out))
+
+print("\n[4] ПОЛНЫЙ trace-лог текущего конфига (v4+v6 gvisor auto_route):")
+alive, out = run_cfg({"address": [V4, V6], "mtu": 1400, "auto_route": True,
+                      "strict_route": False, "stack": "gvisor",
+                      "endpoint_independent_nat": True}, level="trace", wait=3)
+for l in out.splitlines():
+    if l.strip():
+        print("    " + l[:200])
+
+print("\n===== КОНЕЦ =====")
