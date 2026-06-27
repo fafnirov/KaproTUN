@@ -50,17 +50,16 @@ class _RefreshWorker(QThread):
     succeeded = Signal(object)  # SubscriptionResult
     failed = Signal(str)
 
-    def __init__(self, url: str, listen_port: int,
+    def __init__(self, url: str,
                  parent: Optional[QObject] = None):
         super().__init__(parent)
         self._url = url
-        self._listen_port = listen_port
 
     def run(self) -> None:
         try:
-            result = import_with_dpi_fallback(
-                self._url, local_proxy_port=self._listen_port,
-            )
+            # DPI-blocked direct fetch falls back through the sing-box
+            # health-proxy (tunnels via the active VPN). v3.1.2.
+            result = import_with_dpi_fallback(self._url)
             self.succeeded.emit(result)
         except Exception as e:
             self.failed.emit(f"{type(e).__name__}: {e}")
@@ -134,8 +133,7 @@ class SubscriptionAutoRefresh(QObject):
         # (slow network), skip this tick instead of doubling up.
         if self._worker is not None and self._worker.isRunning():
             return
-        listen_port = int(settings.get("listen_port", 2080))
-        self._worker = _RefreshWorker(url, listen_port, parent=self)
+        self._worker = _RefreshWorker(url, parent=self)
         self._worker.succeeded.connect(self._on_fetched)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()

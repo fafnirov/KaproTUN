@@ -3104,6 +3104,49 @@ check("subscription: https import reaches fetcher (no NameError regression)",
       _https_subscription_fetch_no_nameerror)
 
 
+def _subs_dpi_fallback_uses_health_proxy() -> None:
+    """v3.1.2 regression: the subscription DPI-fallback must route through the
+    sing-box health-proxy (HEALTH_PROXY_PORT, tunnels via the active VPN), NOT
+    the xray HTTP proxy on :2080 that was removed with the engine in v3.1.0. The
+    dead fallback port made every DPI-blocked «Обновить подписку» / import
+    silently fail — no servers updated, no new ones added."""
+    import inspect
+    import requests as _rq
+    from kapro_tun.core import subscription as _sub
+    from kapro_tun.core.sing_box_config import HEALTH_PROXY_PORT
+    # 1) the default fallback port is the live health-proxy, not the dead 2080.
+    default = inspect.signature(
+        _sub.import_with_dpi_fallback).parameters["local_proxy_port"].default
+    if default != HEALTH_PROXY_PORT:
+        raise AssertionError(
+            f"DPI-fallback default must be HEALTH_PROXY_PORT ({HEALTH_PROXY_PORT}), got {default}")
+    if default == 2080:
+        raise AssertionError("fallback still points at the removed xray proxy (:2080)")
+    # 2) on a DPI-looking failure, the fallback actually probes that port.
+    probed: dict = {}
+    o_probe, o_import = _sub._probe_local_proxy, _sub.import_subscription
+    _sub._probe_local_proxy = lambda host, port, timeout=0.5: (
+        probed.update(port=port) or False)
+
+    def _boom(url, timeout=(10, 20), proxy_url=None):
+        raise _rq.exceptions.SSLError("unexpected_eof_while_reading")
+    _sub.import_subscription = _boom
+    try:
+        try:
+            _sub.import_with_dpi_fallback("https://provider.example/sub")
+        except _rq.exceptions.SSLError:
+            pass  # VPN down → re-raising the DPI error is the correct behaviour
+    finally:
+        _sub._probe_local_proxy, _sub.import_subscription = o_probe, o_import
+    if probed.get("port") != HEALTH_PROXY_PORT:
+        raise AssertionError(
+            f"DPI fallback must probe the health-proxy ({HEALTH_PROXY_PORT}), got {probed.get('port')}")
+
+
+check("subscription: DPI-fallback routes via sing-box health-proxy, not dead :2080 (v3.1.2)",
+      _subs_dpi_fallback_uses_health_proxy)
+
+
 def _secret_migration_deferred_not_lost_on_encrypt_failure() -> None:
     """P2 regression (v2.0.2): if encryption fails during a save, a legacy
     plaintext subscription_url ALREADY on disk must NOT be deleted from

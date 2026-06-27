@@ -16,11 +16,14 @@ DPI fallback:
   blocked by Russian ISPs at the TLS layer — the TCP handshake completes
   but ClientHello gets RST'd before ServerHello. requests sees this as
   SSLEOFError / ConnectionResetError.
-- When xray is already running locally, we can fetch the subscription
-  *through* the active tunnel: route the HTTP request to xray's mixed
-  inbound at 127.0.0.1:listen_port. Same trick the browser uses when
-  the system proxy is set — DPI sees only the encrypted outbound xray
-  stream and can't pattern-match the inner request.
+- When the VPN is connected, we can fetch the subscription *through* the
+  active tunnel: route the HTTP request to sing-box's loopback health-proxy
+  (127.0.0.1:HEALTH_PROXY_PORT), a mixed inbound pinned to outbound=proxy.
+  Same trick the browser uses when the system proxy is set — DPI sees only
+  the encrypted outbound VPN stream and can't pattern-match the inner request.
+  (Before v3.1.2 this fell back to the xray HTTP proxy on :2080, which was
+  removed with the engine in v3.1.0 — so the fallback hit a dead port and
+  every DPI-blocked refresh/import failed.)
 """
 from __future__ import annotations
 
@@ -35,6 +38,7 @@ import requests
 
 from .. import __version__
 from .parser import ParseError, ProxyConfig, parse
+from .sing_box_config import HEALTH_PROXY_PORT
 
 # Wire User-Agent for subscription fetches. This is a COMPATIBILITY TOKEN,
 # not branding — DO NOT rename it to match the app.
@@ -410,7 +414,7 @@ def import_subscription(
 
     `url` should be the provider-supplied subscription URL.
     `proxy_url`, if set, routes the fetch through it (e.g.
-    "http://127.0.0.1:2080" to go via the active xray tunnel).
+    "http://127.0.0.1:2082" to go via the active sing-box VPN tunnel).
     Raises requests.RequestException on network failure.
     """
     body, userinfo = _fetch(url, timeout, proxy_url=proxy_url)
@@ -422,20 +426,25 @@ def import_subscription(
 def import_with_dpi_fallback(
     url: str,
     local_proxy_host: str = "127.0.0.1",
-    local_proxy_port: int = 2080,
+    local_proxy_port: int = HEALTH_PROXY_PORT,
     timeout: tuple[float, float] = (10, 20),
 ) -> SubscriptionResult:
-    """Fetch a subscription, automatically retrying via the local tunnel
+    """Fetch a subscription, automatically retrying via the active VPN tunnel
     if the direct attempt looks DPI-blocked.
 
     Flow:
       1. Try a normal direct fetch first — fast and avoids loading the
-         tunnel for no reason.
-      2. On TLS-handshake-EOF / connection-reset (the Russian DPI
-         signature), probe 127.0.0.1:listen_port. If xray is up, retry
-         through it. The result's `via_proxy` flag tells the caller a
-         fallback happened so they can surface it in the UI.
-      3. Otherwise re-raise the original error untouched.
+         tunnel for no reason. (When the VPN is connected, this already rides
+         the TUN via auto_route for tunnel-routed hosts.)
+      2. On TLS-handshake-EOF / connection-reset (the Russian DPI signature),
+         probe 127.0.0.1:HEALTH_PROXY_PORT — sing-box's loopback health-proxy,
+         pinned to outbound=proxy. If the VPN is up, retry through it so the
+         fetch egresses the tunnel and bypasses the block (this also covers a
+         subscription host that's routed DIRECT, e.g. geoip:ru). The result's
+         `via_proxy` flag tells the caller a fallback happened.
+      3. Otherwise (VPN down → nothing to tunnel through) re-raise the original
+         error untouched, so the caller's "подключись и попробуй снова" hint
+         makes sense.
     """
     try:
         return import_subscription(url, timeout=timeout)

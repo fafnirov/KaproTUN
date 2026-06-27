@@ -46,19 +46,16 @@ class _SubscriptionFetcher(QThread):
     succeeded = Signal(object)  # SubscriptionResult
     failed = Signal(object)  # FetchError (classified cause)
 
-    def __init__(self, url: str, listen_port: int, parent=None):
+    def __init__(self, url: str, parent=None):
         super().__init__(parent)
         self._url = url
-        self._listen_port = listen_port
 
     def run(self) -> None:
         try:
-            # Direct first, automatic fallback through the local xray
-            # tunnel (127.0.0.1:listen_port) if it looks DPI-blocked
-            # AND xray happens to be running.
-            result = import_with_dpi_fallback(
-                self._url, local_proxy_port=self._listen_port,
-            )
+            # Direct first, automatic fallback through the sing-box health-proxy
+            # (127.0.0.1:HEALTH_PROXY_PORT, tunnels via the active VPN) if the
+            # direct fetch looks DPI-blocked AND the VPN is connected. v3.1.2.
+            result = import_with_dpi_fallback(self._url)
             self.succeeded.emit(result)
         except Exception as e:
             # Classify the failure so the dialog shows the real cause
@@ -216,8 +213,7 @@ class SubscriptionDialog(QDialog):
         self.fetch_btn.setEnabled(False)
         self.save_btn.setEnabled(False)
         self.status_label.setText("Загрузка…")
-        listen_port = int(storage.load_settings().get("listen_port", 2080))
-        self._fetcher = _SubscriptionFetcher(url, listen_port, parent=self)
+        self._fetcher = _SubscriptionFetcher(url, parent=self)
         self._fetcher.succeeded.connect(self._on_fetched)
         self._fetcher.failed.connect(self._on_fetch_failed)
         self._fetcher.start()

@@ -89,10 +89,9 @@ class _SubsRefreshThread(QThread):
     """
     done = Signal(object)  # dict: configs / userinfo / ok / errors / total
 
-    def __init__(self, urls: list[str], listen_port: int, parent=None):
+    def __init__(self, urls: list[str], parent=None):
         super().__init__(parent)
         self._urls = urls
-        self._listen_port = listen_port
 
     def run(self) -> None:
         from ..core.subscription import (
@@ -105,7 +104,9 @@ class _SubsRefreshThread(QThread):
         errors: list[tuple] = []  # (url, FetchError)
         for url in self._urls:
             try:
-                res = import_with_dpi_fallback(url, local_proxy_port=self._listen_port)
+                # DPI-blocked direct fetch auto-falls-back through the sing-box
+                # health-proxy (tunnels via the active VPN). v3.1.2.
+                res = import_with_dpi_fallback(url)
                 configs.extend(res.configs)
                 # Keep the most recent informative traffic/expiry summary.
                 if res.userinfo is not None and res.userinfo.summary():
@@ -556,8 +557,7 @@ class ConfigsPickerDialog(QDialog):
             return
         self.refresh_subs_btn.setEnabled(False)
         self.refresh_subs_btn.setText("⏳ Обновляю…")
-        listen_port = int(storage.load_settings().get("listen_port", 2080))
-        self._subs_refresher = _SubsRefreshThread(urls, listen_port, parent=self)
+        self._subs_refresher = _SubsRefreshThread(urls, parent=self)
         self._subs_refresher.done.connect(self._on_subs_refreshed)
         self._subs_refresher.start()
 
