@@ -302,6 +302,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "subscription_url": "",  # last imported subscription, for one-click re-sync
     "subscription_urls": [],  # every distinct subscription URL imported — "Обновить" re-fetches them all
     "subscription_userinfo": None,  # last seen Subscription-Userinfo (traffic/expiry) as dict, or None
+    "subscription_last_refresh": 0,  # Unix epoch of the last successful subscription fetch (for "обновлено N назад")
     "kill_switch": False,    # leave TUN up if xray dies (no leak via real ISP)
     "language": "auto",      # "ru" / "en" / "auto" (detect from QLocale.system())
     "subscription_auto_refresh": True,  # background re-fetch every 12h

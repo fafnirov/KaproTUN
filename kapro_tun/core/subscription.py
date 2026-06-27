@@ -71,6 +71,27 @@ def _human_bytes(n: int) -> str:
     return f"{n} Б"
 
 
+def humanize_ago(epoch: int, now: Optional[int] = None) -> str:
+    """Compact Russian 'N ago' for a Unix timestamp, e.g. 'только что',
+    '5 мин назад', '3 ч назад', '2 дня назад'. '' when epoch is unset (<=0)."""
+    if not epoch or int(epoch) <= 0:
+        return ""
+    now = int(time.time()) if now is None else int(now)
+    sec = max(0, now - int(epoch))
+    if sec < 60:
+        return "только что"
+    mins = sec // 60
+    if mins < 60:
+        return f"{mins} мин назад"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours} ч назад"
+    days = hours // 24
+    tail = "день" if days % 10 == 1 and days % 100 != 11 else (
+        "дня" if 2 <= days % 10 <= 4 and not 12 <= days % 100 <= 14 else "дней")
+    return f"{days} {tail} назад"
+
+
 @dataclass
 class SubscriptionInfo:
     """Parsed `Subscription-Userinfo` header (de-facto Clash/v2ray standard):
@@ -102,6 +123,44 @@ class SubscriptionInfo:
 
     def is_expired(self) -> bool:
         return 0 < self.expire < int(time.time())
+
+    def days_left(self) -> Optional[int]:
+        """Whole days until expiry (0 if already expired), or None if the
+        provider sent no expiry."""
+        if self.expire <= 0:
+            return None
+        return max(0, (self.expire - int(time.time())) // 86400)
+
+    def is_low(self) -> bool:
+        """True when the subscription needs attention soon — used to decide
+        whether to surface a prominent banner. Triggers on: already expired,
+        <= 3 days left, or <= 10% of the traffic quota remaining."""
+        if self.is_expired():
+            return True
+        dl = self.days_left()
+        if dl is not None and dl <= 3:
+            return True
+        if self.total > 0 and self.remaining is not None:
+            return self.remaining <= self.total // 10
+        return False
+
+    def banner_text(self) -> str:
+        """Short, punchy status for the home-screen banner (not the verbose
+        summary()). '' when the header carried nothing useful."""
+        if self.is_expired():
+            return "Подписка истекла — продли у провайдера"
+        parts: list[str] = []
+        dl = self.days_left()
+        if dl is not None:
+            if dl == 0:
+                parts.append("истекает сегодня")
+            else:
+                tail = "день" if dl % 10 == 1 and dl % 100 != 11 else (
+                    "дня" if 2 <= dl % 10 <= 4 and not 12 <= dl % 100 <= 14 else "дней")
+                parts.append(f"осталось {dl} {tail}")
+        if self.total > 0:
+            parts.append(f"{_human_bytes(self.remaining or 0)} трафика")
+        return " · ".join(parts)
 
     def summary(self) -> str:
         """One-line human status, or '' if the header carried nothing useful."""

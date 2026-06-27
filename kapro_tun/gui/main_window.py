@@ -71,6 +71,7 @@ class HomePage(QWidget):
 
     connect_clicked = Signal()
     card_clicked = Signal()
+    banner_clicked = Signal()  # expiry banner → open subscription import
 
     def __init__(self, parent: Optional[QWidget] = None, compact: bool = False):
         super().__init__(parent)
@@ -91,6 +92,20 @@ class HomePage(QWidget):
         title.setObjectName("title")
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
+
+        # Subscription expiry/quota banner — only shown when the provider's
+        # Subscription-Userinfo says the sub is low/expired (<=3 days or <=10%
+        # traffic). Clickable → opens the subscription import to renew.
+        self.sub_banner = QLabel()
+        self.sub_banner.setTextFormat(Qt.RichText)
+        self.sub_banner.setWordWrap(True)
+        self.sub_banner.setAlignment(Qt.AlignCenter)
+        self.sub_banner.setOpenExternalLinks(False)
+        self.sub_banner.linkActivated.connect(lambda _l: self.banner_clicked.emit())
+        self.sub_banner.setVisible(False)
+        layout.addSpacing(6)
+        layout.addWidget(self.sub_banner)
+        self.refresh_sub_banner()
 
         layout.addStretch(1)
 
@@ -254,6 +269,43 @@ class HomePage(QWidget):
             f"<span style='color:#fafafa'>{sites_count}</span> "
             f"<span style='color:#a1a1aa'>доменов идут напрямую</span>"
         )
+
+    def refresh_sub_banner(self) -> None:
+        """Show a prominent banner only when the subscription is low/expired,
+        per the cached Subscription-Userinfo. Hidden otherwise so a healthy
+        sub adds no clutter. Reads storage at call time so MainWindow can
+        refresh it after every fetch."""
+        banner = getattr(self, "sub_banner", None)
+        if banner is None:
+            return
+        data = storage.load_settings().get("subscription_userinfo")
+        info = None
+        if data:
+            try:
+                from ..core.subscription import SubscriptionInfo
+                info = SubscriptionInfo.from_dict(data)
+            except Exception:
+                info = None
+        if info is None or not info.is_low():
+            banner.setVisible(False)
+            return
+        expired = info.is_expired()
+        text = info.banner_text() or ("Подписка истекла" if expired else "Подписка скоро истечёт")
+        icon = "⛔" if expired else "⏳"
+        # Red for expired, amber for "running low". Inline style so it works
+        # regardless of the active QSS theme.
+        bg = "#7f1d1d" if expired else "#78350f"
+        fg = "#fecaca" if expired else "#fde68a"
+        link = "обновить" if expired else "продлить"
+        banner.setStyleSheet(
+            f"QLabel {{ background:{bg}; color:{fg}; border-radius:8px;"
+            f" padding:8px 12px; font-weight:600; }}"
+        )
+        banner.setText(
+            f"{icon} {text} · "
+            f"<a href='#renew' style='color:#fef3c7'>{link}</a>"
+        )
+        banner.setVisible(True)
 
 
 class SettingsPage(QWidget):
@@ -689,15 +741,19 @@ class SettingsPage(QWidget):
             self._sites_count_label.setText(f"{len(storage.load_sites())} доменов")
 
     def _sub_info_text(self) -> str:
-        """Subscription-row subtitle: remaining traffic / expiry if the
-        provider sent Subscription-Userinfo, else the default hint."""
+        """Subscription-row subtitle: remaining traffic / expiry (if the
+        provider sent Subscription-Userinfo) plus how long ago we last
+        refreshed; else the default hint."""
         default = "одна ссылка → много конфигов от провайдера"
-        data = storage.load_settings().get("subscription_userinfo")
-        if not data:
-            return default
         try:
-            from ..core.subscription import SubscriptionInfo
-            return SubscriptionInfo.from_dict(data).summary() or default
+            from ..core.subscription import SubscriptionInfo, humanize_ago
+            settings = storage.load_settings()
+            data = settings.get("subscription_userinfo")
+            base = default
+            if data:
+                base = SubscriptionInfo.from_dict(data).summary() or default
+            ago = humanize_ago(int(settings.get("subscription_last_refresh", 0) or 0))
+            return f"{base} · обновлено {ago}" if ago else base
         except Exception:
             return default
 
@@ -1314,6 +1370,7 @@ class MainWindow(QMainWindow):
         self._sub_autorefresh = SubscriptionAutoRefresh(self)
         self._sub_autorefresh.configs_added.connect(self._on_sub_autorefresh_added)
         self._sub_autorefresh.log_message.connect(self.logs_page.append)
+        self._sub_autorefresh.userinfo_updated.connect(self._on_sub_userinfo_updated)
         self._sub_autorefresh.start()
 
         # Periodic status refresh — detects subprocess crashes and updates timer
@@ -1332,6 +1389,7 @@ class MainWindow(QMainWindow):
         self.settings_page.sites_clicked.connect(self._on_edit_sites)
         self.settings_page.logs_clicked.connect(lambda: self._goto("logs"))
         self.settings_page.subscription_clicked.connect(self._on_import_subscription)
+        self.home_page.banner_clicked.connect(self._on_import_subscription)
         # v1.14.0: nudge custom-painted widgets to repaint after any
         # setting flip (esp. theme — stylesheet change doesn't trigger
         # paintEvent on QPainter-drawn widgets, only on QSS-styled ones).
@@ -1838,6 +1896,12 @@ class MainWindow(QMainWindow):
                 2000,
                 lambda token=session_token: self._kick_ip_probe(token),
             )
+        # v3.1.9: now there's a live tunnel, pull the latest server list +
+        # balance from the subscription. The DPI-fallback can finally ride the
+        # tunnel, so a provider that's unreachable directly now refreshes.
+        # Delayed 5s so the tunnel + health-proxy are fully up; rate-limited
+        # internally (refresh_on_connect skips if refreshed in the last 10 min).
+        QTimer.singleShot(5000, self._sub_autorefresh.refresh_on_connect)
 
     def _prefill_country_from_config(self) -> None:
         """Show country + map immediately on connect (v1.14.3).
@@ -2462,8 +2526,10 @@ class MainWindow(QMainWindow):
                 added += 1
         storage.save_configs(self.configs)
         # Subscription-Userinfo was just persisted by the dialog — reflect
-        # the fresh remaining-traffic / expiry in the Settings subtitle.
+        # the fresh remaining-traffic / expiry in the Settings subtitle + the
+        # home-screen expiry banner.
         self.refresh_sub_info()
+        self.home_page.refresh_sub_banner()
         # If no active config yet, pick the first imported one
         if self._active_config is None and self.configs:
             self._active_config = self.configs[0]
@@ -2614,6 +2680,13 @@ class MainWindow(QMainWindow):
             f"Подписка обновилась: +{count} нов{'ый' if count == 1 else 'ых'} сервер{'' if count == 1 else 'ов' if count > 4 else 'а'}",
             kind="success", duration_ms=5000,
         )
+
+    def _on_sub_userinfo_updated(self) -> None:
+        """A subscription fetch refreshed the cached balance/expiry (and the
+        'last refreshed' stamp) — re-render the Settings sub-info line and the
+        home-screen expiry banner, even if no new servers arrived."""
+        self.settings_page.refresh_sub_info()
+        self.home_page.refresh_sub_banner()
 
     def _on_tray_config_picked(self, cfg: ProxyConfig) -> None:
         """User picked a config from the tray (quick-connect or submenu).

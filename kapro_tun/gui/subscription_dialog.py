@@ -106,6 +106,24 @@ class SubscriptionDialog(QDialog):
             self.url_edit.setText(last_url)
         layout.addWidget(self.url_edit)
 
+        # --- Quick import: clipboard / QR (v3.1.9) ---
+        # A provider's QR usually encodes either a subscription URL or a single
+        # share-link; both routes are handled by _ingest_text.
+        import_row = QHBoxLayout()
+        import_row.setSpacing(8)
+        self.paste_btn = QPushButton("📋 Вставить")
+        self.paste_btn.setObjectName("ghost")
+        self.paste_btn.setToolTip("Вставить ссылку / конфиг из буфера обмена")
+        self.paste_btn.clicked.connect(self._on_paste_clipboard)
+        import_row.addWidget(self.paste_btn)
+        self.qr_btn = QPushButton("🖼 Из QR")
+        self.qr_btn.setObjectName("ghost")
+        self.qr_btn.setToolTip("Распознать QR-код из картинки (PNG/JPG)")
+        self.qr_btn.clicked.connect(self._on_import_qr)
+        import_row.addWidget(self.qr_btn)
+        import_row.addStretch(1)
+        layout.addLayout(import_row)
+
         fetch_row = QHBoxLayout()
         self.fetch_btn = QPushButton("Загрузить и распарсить")
         self.fetch_btn.setObjectName("primary")
@@ -217,6 +235,91 @@ class SubscriptionDialog(QDialog):
         self._fetcher.succeeded.connect(self._on_fetched)
         self._fetcher.failed.connect(self._on_fetch_failed)
         self._fetcher.start()
+
+    def _ingest_text(self, text: str, source: str = "буфер") -> None:
+        """Route imported text: an http(s) URL → the URL fetch path (which
+        gates http:// + validates https); a share-URL list or base64 body →
+        the manual-parse path. Shared by clipboard + QR import."""
+        text = (text or "").strip()
+        if not text:
+            QMessageBox.information(
+                self, "Пусто", f"В источнике ({source}) нет ни ссылки, ни конфига.")
+            return
+        low = text.lower()
+        if low.startswith("https://") or low.startswith("http://"):
+            self.url_edit.setText(text)
+            self._on_fetch()
+            return
+        if not self.manual_toggle.isChecked():
+            self.manual_toggle.setChecked(True)
+        self.manual_edit.setPlainText(text)
+        self._on_parse_pasted()
+
+    def _on_paste_clipboard(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        cb = QApplication.clipboard()
+        text = cb.text()
+        if text and text.strip():
+            self._ingest_text(text, source="буфер")
+            return
+        # No text — maybe a copied QR image. Try to decode it.
+        img = cb.image()
+        if img is not None and not img.isNull():
+            decoded = self._decode_qimage(img)
+            if decoded:
+                self._ingest_text(decoded, source="QR из буфера")
+                return
+            QMessageBox.information(
+                self, "Буфер",
+                "В буфере картинка, но QR не распознан "
+                "(или QR-декодер не встроен в эту сборку).")
+            return
+        QMessageBox.information(self, "Буфер", "Буфер обмена пуст.")
+
+    def _on_import_qr(self) -> None:
+        from ..core import qr
+        if not qr.decoder_available():
+            QMessageBox.information(
+                self, "QR-импорт",
+                "QR-декодер не встроен в эту сборку. Вставь ссылку или "
+                "конфиг текстом — кнопка «📋 Вставить».")
+            return
+        from PySide6.QtWidgets import QFileDialog
+        path, _sel = QFileDialog.getOpenFileName(
+            self, "Выбери картинку с QR-кодом", "",
+            "Изображения (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if not path:
+            return
+        decoded = qr.decode_qr_image(path)
+        if not decoded:
+            QMessageBox.information(
+                self, "QR-импорт", "QR-код на этой картинке не распознан.")
+            return
+        self._ingest_text(decoded, source="QR")
+
+    def _decode_qimage(self, qimage) -> Optional[str]:
+        """Save a clipboard QImage to a temp PNG and decode it via core.qr.
+        None if no decoder / no QR. Never raises."""
+        from ..core import qr
+        if not qr.decoder_available():
+            return None
+        import os
+        import tempfile
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(suffix=".png", prefix="kt-qr-")
+            os.close(fd)
+            if not qimage.save(tmp, "PNG"):
+                return None
+            return qr.decode_qr_image(tmp)
+        except Exception:
+            return None
+        finally:
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
 
     def _on_fetched(self, result: SubscriptionResult) -> None:
         self.fetch_btn.setEnabled(True)
@@ -331,6 +434,8 @@ class SubscriptionDialog(QDialog):
         settings["subscription_urls"] = urls
         if self._result.userinfo is not None:
             settings["subscription_userinfo"] = self._result.userinfo.to_dict()
+        import time as _t
+        settings["subscription_last_refresh"] = int(_t.time())
         storage.save_settings(settings)
         self.accept()
 

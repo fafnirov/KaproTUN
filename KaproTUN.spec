@@ -67,6 +67,14 @@ a = Analysis(
         # naming it here guarantees PyInstaller's cryptography hook pulls
         # in the Rust backend (_rust). Harmless on Windows (DPAPI path).
         'cryptography.hazmat.primitives.ciphers.aead',
+        # zxing-cpp + Pillow (v3.1.9) — optional QR decoding for subscription /
+        # config import. core/qr.py imports them lazily with a graceful
+        # fallback, so a build that omits them just disables the QR button;
+        # naming them here makes the default build bundle the decoder. PIL is
+        # un-excluded below for the same reason. numpy stays excluded — zxing-cpp
+        # decodes a PIL image without it.
+        'zxingcpp',
+        'PIL.Image',
     ],
     hookspath=[],
     hooksconfig={},
@@ -79,7 +87,6 @@ a = Analysis(
         'matplotlib',
         'numpy',
         'scipy',
-        'PIL',
         'pytest',
         'unittest',
         'doctest',

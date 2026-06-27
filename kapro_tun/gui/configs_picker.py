@@ -581,13 +581,18 @@ class ConfigsPickerDialog(QDialog):
                 existing_by_name[cfg.name] = len(self._configs) - 1
                 added += 1
 
+        # Any successful fetch stamps the freshness + refreshes traffic/expiry
+        # so Settings' "обновлено N назад" and the home banner stay current,
+        # even when the server list itself didn't change.
+        if agg["ok"] > 0:
+            import time as _t
+            s = storage.load_settings()
+            s["subscription_last_refresh"] = int(_t.time())
+            if agg["userinfo"] is not None:
+                s["subscription_userinfo"] = agg["userinfo"].to_dict()
+            storage.save_settings(s)
         if added or updated:
             storage.save_configs(self._configs)
-            # Persist refreshed traffic/expiry info so Settings stays current.
-            if agg["userinfo"] is not None:
-                s = storage.load_settings()
-                s["subscription_userinfo"] = agg["userinfo"].to_dict()
-                storage.save_settings(s)
             self._refresh()
             self._start_pings()
 

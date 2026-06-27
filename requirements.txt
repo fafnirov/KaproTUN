@@ -2,3 +2,5 @@ PySide6>=6.6.0
 requests[socks]>=2.31.0
 psutil>=5.9.0
 cryptography>=42.0.0  # AES-256-GCM for config encryption on macOS/Linux (Windows uses DPAPI)
+zxing-cpp>=2.2.0  # optional QR decoding for subscription import (core/qr.py, lazy + graceful)
+Pillow>=10.0.0  # image loading for QR decode (paired with zxing-cpp)

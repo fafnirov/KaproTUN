@@ -3147,6 +3147,102 @@ check("subscription: DPI-fallback routes via sing-box health-proxy, not dead :20
       _subs_dpi_fallback_uses_health_proxy)
 
 
+def _subs_userinfo_expiry_helpers() -> None:
+    """v3.1.9: SubscriptionInfo.days_left / is_low / banner_text drive the
+    home expiry banner. Verify the thresholds (expired, <=3 days, <=10%
+    traffic) and that a healthy sub is NOT flagged."""
+    import time as _t
+    from kapro_tun.core.subscription import SubscriptionInfo
+    now = int(_t.time())
+    expired = SubscriptionInfo(total=100, download=10, expire=now - 1)
+    if not (expired.is_expired() and expired.is_low() and expired.days_left() == 0):
+        raise AssertionError("expired sub must be is_expired + is_low + 0 days left")
+    if "истек" not in expired.banner_text().lower():
+        raise AssertionError("expired banner must mention expiry")
+    low_days = SubscriptionInfo(total=100, download=10, expire=now + 2 * 86400)
+    if not low_days.is_low() or low_days.days_left() != 2:
+        raise AssertionError("<=3 days left must be is_low with correct day count")
+    low_traffic = SubscriptionInfo(total=100, download=95, expire=now + 60 * 86400)
+    if not low_traffic.is_low():
+        raise AssertionError("<=10% remaining traffic must be is_low")
+    healthy = SubscriptionInfo(total=100, download=50, expire=now + 30 * 86400)
+    if healthy.is_low():
+        raise AssertionError("a healthy sub (30 days, 50% left) must NOT be is_low")
+    if SubscriptionInfo().is_low() or SubscriptionInfo().banner_text() != "":
+        raise AssertionError("empty userinfo must be neither low nor banner-worthy")
+
+
+def _subs_humanize_ago() -> None:
+    """v3.1.9: humanize_ago powers the 'обновлено N назад' line. Deterministic
+    against a fixed 'now'; empty for an unset timestamp."""
+    from kapro_tun.core.subscription import humanize_ago
+    now = 2_000_000_000
+    cases = {
+        now - 10: "только что",
+        now - 300: "5 мин назад",
+        now - 3 * 3600: "3 ч назад",
+        now - 86400: "1 день назад",
+        now - 2 * 86400: "2 дня назад",
+        now - 5 * 86400: "5 дней назад",
+    }
+    for ts, expected in cases.items():
+        got = humanize_ago(ts, now=now)
+        if got != expected:
+            raise AssertionError(f"humanize_ago({ts}) = {got!r}, expected {expected!r}")
+    if humanize_ago(0, now=now) != "":
+        raise AssertionError("unset timestamp must humanize to ''")
+
+
+def _subs_qr_decoder_graceful() -> None:
+    """v3.1.9: QR decoding is optional. core.qr must never raise — a missing
+    decoder or a non-image path yields None, and decoder_available is a bool."""
+    from kapro_tun.core import qr
+    if not isinstance(qr.decoder_available(), bool):
+        raise AssertionError("decoder_available must return a bool")
+    if qr.decode_qr_image("/no/such/file.png") is not None:
+        raise AssertionError("decode of a missing file must be None, not raise")
+
+
+def _subs_refresh_on_connect_guard() -> None:
+    """v3.1.9: refresh_on_connect must skip when refreshed within the last
+    ON_CONNECT_MIN_INTERVAL_SEC, and must fire when stale/never. We stub _tick
+    to record calls and drive load_settings deterministically."""
+    import time as _t
+    from kapro_tun.gui import subscription_autorefresh as _ar
+    if not hasattr(_ar.SubscriptionAutoRefresh, "userinfo_updated"):
+        raise AssertionError("SubscriptionAutoRefresh must expose userinfo_updated signal")
+    mgr = _ar.SubscriptionAutoRefresh()
+    fired = {"n": 0}
+    mgr._tick = lambda: fired.__setitem__("n", fired["n"] + 1)
+    o_load = _ar.storage.load_settings
+    now = int(_t.time())
+    try:
+        # Fresh refresh 1 minute ago → skip.
+        _ar.storage.load_settings = lambda: {"subscription_last_refresh": now - 60}
+        mgr.refresh_on_connect()
+        if fired["n"] != 0:
+            raise AssertionError("refresh_on_connect must skip a recent (<10min) refresh")
+        # Stale refresh 20 minutes ago → fire.
+        _ar.storage.load_settings = lambda: {"subscription_last_refresh": now - 20 * 60}
+        mgr.refresh_on_connect()
+        # Never refreshed → fire.
+        _ar.storage.load_settings = lambda: {"subscription_last_refresh": 0}
+        mgr.refresh_on_connect()
+        if fired["n"] != 2:
+            raise AssertionError(f"stale/never must fire; got {fired['n']} fires")
+    finally:
+        _ar.storage.load_settings = o_load
+
+
+check("subscription: userinfo days_left/is_low/banner_text thresholds (v3.1.9)",
+      _subs_userinfo_expiry_helpers)
+check("subscription: humanize_ago 'обновлено N назад' (v3.1.9)", _subs_humanize_ago)
+check("subscription: QR decoder is optional + never raises (v3.1.9)",
+      _subs_qr_decoder_graceful)
+check("subscription: refresh_on_connect min-interval guard (v3.1.9)",
+      _subs_refresh_on_connect_guard)
+
+
 def _secret_migration_deferred_not_lost_on_encrypt_failure() -> None:
     """P2 regression (v2.0.2): if encryption fails during a save, a legacy
     plaintext subscription_url ALREADY on disk must NOT be deleted from

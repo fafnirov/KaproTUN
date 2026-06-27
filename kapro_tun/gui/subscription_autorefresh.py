@@ -78,6 +78,9 @@ class SubscriptionAutoRefresh(QObject):
     """
     configs_added = Signal(int)
     log_message = Signal(str)
+    # Emitted after any successful fetch (even with no new servers) so the UI
+    # can re-render the remaining-traffic / expiry banner + "обновлено N назад".
+    userinfo_updated = Signal()
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -113,6 +116,23 @@ class SubscriptionAutoRefresh(QObject):
         """
         self._tick()
 
+    # Don't re-fetch on every (re)connect — a flapping tunnel could otherwise
+    # hammer the provider. Only refresh on connect if the last successful
+    # refresh is older than this. The point of on-connect refresh is "pick up
+    # rotated servers + fresh balance now that we have a working tunnel", which
+    # a 10-minute floor satisfies without spamming.
+    ON_CONNECT_MIN_INTERVAL_SEC = 10 * 60
+
+    def refresh_on_connect(self) -> None:
+        """Fire a refresh right after a successful connect — now there's a live
+        tunnel the DPI-fallback can ride, so a previously-blocked provider
+        becomes reachable. Skipped if we refreshed within the last
+        ON_CONNECT_MIN_INTERVAL_SEC."""
+        last = int(storage.load_settings().get("subscription_last_refresh", 0) or 0)
+        if last and (int(time.time()) - last) < self.ON_CONNECT_MIN_INTERVAL_SEC:
+            return
+        self._tick()
+
     # --- internal --------------------------------------------------------
 
     def _first_tick(self) -> None:
@@ -139,12 +159,15 @@ class SubscriptionAutoRefresh(QObject):
         self._worker.start()
 
     def _on_fetched(self, result: SubscriptionResult) -> None:
-        # Refresh the cached remaining-traffic / expiry even when no new
-        # servers arrived — the balance still moves between refreshes.
+        # Stamp the successful refresh + cache the remaining-traffic / expiry
+        # even when no new servers arrived — the balance still moves between
+        # refreshes, and the "обновлено N назад" line needs the timestamp.
+        settings = storage.load_settings()
+        settings["subscription_last_refresh"] = int(time.time())
         if result.userinfo is not None:
-            settings = storage.load_settings()
             settings["subscription_userinfo"] = result.userinfo.to_dict()
-            storage.save_settings(settings)
+        storage.save_settings(settings)
+        self.userinfo_updated.emit()
         if not result.configs:
             return  # empty body — treat as transient, don't touch state
         existing = storage.load_configs()
