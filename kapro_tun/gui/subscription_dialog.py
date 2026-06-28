@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import storage
+from ..core.i18n import tr
 from ..core.parser import ProxyConfig
 from ..core.subscription import (
     FetchError,
@@ -68,7 +69,7 @@ class SubscriptionDialog(QDialog):
 
     def __init__(self, parent=None, prefill_url: Optional[str] = None):
         super().__init__(parent)
-        self.setWindowTitle("Импорт по подписке")
+        self.setWindowTitle(tr("sub.title"))
         self.resize(620, 520)
         self._result: Optional[SubscriptionResult] = None
         self._fetcher: Optional[_SubscriptionFetcher] = None
@@ -81,21 +82,17 @@ class SubscriptionDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        title = QLabel("Импорт конфигов из подписки")
+        title = QLabel(tr("sub.heading"))
         title.setObjectName("h2")
         layout.addWidget(title)
 
-        hint = QLabel(
-            "Многие провайдеры выдают одну ссылку, по которой возвращается "
-            "список всех их серверов (обычно в base64). Вставь её сюда — "
-            "все конфиги добавятся одним кликом."
-        )
+        hint = QLabel(tr("sub.intro_hint"))
         hint.setWordWrap(True)
         hint.setObjectName("dim")
         layout.addWidget(hint)
 
         # --- URL row ---
-        layout.addWidget(QLabel("URL подписки:"))
+        layout.addWidget(QLabel(tr("sub.url_label")))
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("https://provider.example/sub/abc123")
         # Precedence: explicit prefill (from auto-redirect) > last-used URL
@@ -111,26 +108,26 @@ class SubscriptionDialog(QDialog):
         # share-link; both routes are handled by _ingest_text.
         import_row = QHBoxLayout()
         import_row.setSpacing(8)
-        self.paste_btn = QPushButton("📋 Вставить")
+        self.paste_btn = QPushButton(tr("sub.paste_btn"))
         self.paste_btn.setObjectName("ghost")
-        self.paste_btn.setToolTip("Вставить ссылку / конфиг из буфера обмена")
+        self.paste_btn.setToolTip(tr("sub.paste_tooltip"))
         self.paste_btn.clicked.connect(self._on_paste_clipboard)
         import_row.addWidget(self.paste_btn)
-        self.qr_btn = QPushButton("🖼 Из QR")
+        self.qr_btn = QPushButton(tr("sub.qr_btn"))
         self.qr_btn.setObjectName("ghost")
-        self.qr_btn.setToolTip("Распознать QR-код из картинки (PNG/JPG)")
+        self.qr_btn.setToolTip(tr("sub.qr_tooltip"))
         self.qr_btn.clicked.connect(self._on_import_qr)
         import_row.addWidget(self.qr_btn)
         import_row.addStretch(1)
         layout.addLayout(import_row)
 
         fetch_row = QHBoxLayout()
-        self.fetch_btn = QPushButton("Загрузить и распарсить")
+        self.fetch_btn = QPushButton(tr("sub.fetch"))
         self.fetch_btn.setObjectName("primary")
         self.fetch_btn.clicked.connect(self._on_fetch)
         fetch_row.addWidget(self.fetch_btn)
         # Manual paste toggle — always available, also auto-revealed on fail.
-        self.manual_toggle = QPushButton("Вставить вручную ▾")
+        self.manual_toggle = QPushButton(tr("sub.manual_show"))
         self.manual_toggle.setObjectName("ghost")
         self.manual_toggle.setCheckable(True)
         self.manual_toggle.toggled.connect(self._on_manual_toggled)
@@ -149,26 +146,18 @@ class SubscriptionDialog(QDialog):
         manual_lay.setContentsMargins(0, 8, 0, 0)
         manual_lay.setSpacing(6)
 
-        manual_hint = QLabel(
-            "Если сайт провайдера не открывается из приложения, открой URL "
-            "в браузере, скопируй полностью ответ страницы и вставь сюда. "
-            "Подойдёт как base64-строка, так и обычный список share-ссылок "
-            "(vless://, trojan://, …) — каждая на своей строке."
-        )
+        manual_hint = QLabel(tr("sub.manual_hint"))
         manual_hint.setWordWrap(True)
         manual_hint.setObjectName("dim")
         manual_lay.addWidget(manual_hint)
 
         self.manual_edit = QPlainTextEdit()
-        self.manual_edit.setPlaceholderText(
-            "Сюда — содержимое страницы подписки\n"
-            "(одна большая base64-строка ИЛИ список share-URL построчно)"
-        )
+        self.manual_edit.setPlaceholderText(tr("sub.manual_placeholder"))
         self.manual_edit.setMinimumHeight(160)
         manual_lay.addWidget(self.manual_edit)
 
         manual_btn_row = QHBoxLayout()
-        self.manual_parse_btn = QPushButton("Распарсить вставленное")
+        self.manual_parse_btn = QPushButton(tr("sub.manual_parse_btn"))
         self.manual_parse_btn.setObjectName("primary")
         self.manual_parse_btn.clicked.connect(self._on_parse_pasted)
         manual_btn_row.addWidget(self.manual_parse_btn)
@@ -186,9 +175,9 @@ class SubscriptionDialog(QDialog):
         )
         self.save_btn = buttons.button(QDialogButtonBox.Save)
         self.save_btn.setObjectName("primary")
-        self.save_btn.setText("Добавить в список")
+        self.save_btn.setText(tr("sub.add_to_list"))
         self.save_btn.setEnabled(False)
-        buttons.button(QDialogButtonBox.Cancel).setText("Закрыть")
+        buttons.button(QDialogButtonBox.Cancel).setText(tr("sub.close"))
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -210,7 +199,7 @@ class SubscriptionDialog(QDialog):
     def _on_fetch(self) -> None:
         url = self.url_edit.text().strip()
         if not url:
-            QMessageBox.warning(self, "URL", "Введи URL подписки.")
+            QMessageBox.warning(self, "URL", tr("sub.warn_empty_url"))
             return
         # HTTPS-only: a subscription URL is a bearer credential and http://
         # sends it (and the server list it returns) in cleartext. Block it
@@ -218,32 +207,32 @@ class SubscriptionDialog(QDialog):
         # manual-paste path stays available for any edge case.
         if url.lower().startswith("http://"):
             QMessageBox.warning(
-                self, "Небезопасная ссылка",
-                "HTTP-подписки небезопасны — ссылка и список серверов "
-                "передаются открытым текстом и могут быть перехвачены. "
-                "Попросите у провайдера HTTPS-ссылку (https://).",
+                self, tr("sub.warn_insecure_title"),
+                tr("sub.warn_insecure_body"),
             )
             return
         if not is_https_url(url):
             QMessageBox.warning(
-                self, "URL", "Введи корректный https:// URL подписки.")
+                self, "URL", tr("sub.warn_bad_url"))
             return
         self.fetch_btn.setEnabled(False)
         self.save_btn.setEnabled(False)
-        self.status_label.setText("Загрузка…")
+        self.status_label.setText(tr("sub.loading"))
         self._fetcher = _SubscriptionFetcher(url, parent=self)
         self._fetcher.succeeded.connect(self._on_fetched)
         self._fetcher.failed.connect(self._on_fetch_failed)
         self._fetcher.start()
 
-    def _ingest_text(self, text: str, source: str = "буфер") -> None:
+    def _ingest_text(self, text: str, source: Optional[str] = None) -> None:
         """Route imported text: an http(s) URL → the URL fetch path (which
         gates http:// + validates https); a share-URL list or base64 body →
         the manual-parse path. Shared by clipboard + QR import."""
+        if source is None:
+            source = tr("sub.src_clipboard")
         text = (text or "").strip()
         if not text:
             QMessageBox.information(
-                self, "Пусто", f"В источнике ({source}) нет ни ссылки, ни конфига.")
+                self, tr("sub.empty_title"), tr("sub.src_empty", source=source))
             return
         low = text.lower()
         if low.startswith("https://") or low.startswith("http://"):
@@ -260,42 +249,40 @@ class SubscriptionDialog(QDialog):
         cb = QApplication.clipboard()
         text = cb.text()
         if text and text.strip():
-            self._ingest_text(text, source="буфер")
+            self._ingest_text(text, source=tr("sub.src_clipboard"))
             return
         # No text — maybe a copied QR image. Try to decode it.
         img = cb.image()
         if img is not None and not img.isNull():
             decoded = self._decode_qimage(img)
             if decoded:
-                self._ingest_text(decoded, source="QR из буфера")
+                self._ingest_text(decoded, source=tr("sub.src_clipboard_qr"))
                 return
             QMessageBox.information(
-                self, "Буфер",
-                "В буфере картинка, но QR не распознан "
-                "(или QR-декодер не встроен в эту сборку).")
+                self, tr("sub.clipboard_title"),
+                tr("sub.clipboard_qr_fail"))
             return
-        QMessageBox.information(self, "Буфер", "Буфер обмена пуст.")
+        QMessageBox.information(self, tr("sub.clipboard_title"), tr("sub.clipboard_empty"))
 
     def _on_import_qr(self) -> None:
         from ..core import qr
         if not qr.decoder_available():
             QMessageBox.information(
-                self, "QR-импорт",
-                "QR-декодер не встроен в эту сборку. Вставь ссылку или "
-                "конфиг текстом — кнопка «📋 Вставить».")
+                self, tr("sub.qr_import_title"),
+                tr("sub.qr_no_decoder"))
             return
         from PySide6.QtWidgets import QFileDialog
         path, _sel = QFileDialog.getOpenFileName(
-            self, "Выбери картинку с QR-кодом", "",
-            "Изображения (*.png *.jpg *.jpeg *.bmp *.webp)")
+            self, tr("sub.qr_pick_image"), "",
+            tr("sub.qr_image_filter"))
         if not path:
             return
         decoded = qr.decode_qr_image(path)
         if not decoded:
             QMessageBox.information(
-                self, "QR-импорт", "QR-код на этой картинке не распознан.")
+                self, tr("sub.qr_import_title"), tr("sub.qr_not_recognized"))
             return
-        self._ingest_text(decoded, source="QR")
+        self._ingest_text(decoded, source=tr("sub.src_qr"))
 
     def _decode_qimage(self, qimage) -> Optional[str]:
         """Save a clipboard QImage to a temp PNG and decode it via core.qr.
@@ -343,19 +330,19 @@ class SubscriptionDialog(QDialog):
     def _on_manual_toggled(self, checked: bool) -> None:
         self.manual_frame.setVisible(checked)
         self.manual_toggle.setText(
-            "Вставить вручную ▴" if checked else "Вставить вручную ▾"
+            tr("sub.manual_hide") if checked else tr("sub.manual_show")
         )
 
     def _on_parse_pasted(self) -> None:
         body = self.manual_edit.toPlainText().strip()
         if not body:
             QMessageBox.warning(
-                self, "Пусто",
-                "Сначала вставь содержимое страницы подписки.",
+                self, tr("sub.empty_title"),
+                tr("sub.warn_empty_paste"),
             )
             return
         result = result_from_body(body)
-        self._show_result(result, source_label="вставленный текст")
+        self._show_result(result, source_label=tr("sub.src_pasted"))
 
     def _show_result(
         self,
@@ -364,59 +351,28 @@ class SubscriptionDialog(QDialog):
     ) -> None:
         self._result = result
         if result.configs:
-            msg = (
-                f"<span style='color:#16a34a; font-weight:600'>"
-                f"✓ Найдено {len(result.configs)} конфигов</span>"
-            )
+            msg = tr("sub.result_found", n=len(result.configs))
             if source_label:
-                msg += (
-                    f"<br><span style='color:#a1a1aa'>"
-                    f"Источник: {source_label}.</span>"
-                )
+                msg += tr("sub.result_source", source=source_label)
             elif result.via_proxy:
-                msg += (
-                    "<br><span style='color:#a1a1aa'>"
-                    "Скачано через активный туннель (сайт провайдера "
-                    "недоступен напрямую).</span>"
-                )
+                msg += tr("sub.result_via_proxy")
             if result.errors:
-                msg += (
-                    f"<br><span style='color:#a1a1aa'>"
-                    f"Пропущено {len(result.errors)} строк "
-                    f"(нераспознанный формат)</span>"
-                )
+                msg += tr("sub.result_skipped_lines", n=len(result.errors))
             if result.placeholders:
-                msg += (
-                    f"<br><span style='color:#a1a1aa'>"
-                    f"Пропущена заглушка от провайдера "
-                    f"({len(result.placeholders)} шт., нерабочий сервер)</span>"
-                )
+                msg += tr("sub.result_skipped_stub", n=len(result.placeholders))
             if result.userinfo is not None and result.userinfo.summary():
-                msg += (
-                    f"<br><span style='color:#fbbf24'>"
-                    f"Подписка: {result.userinfo.summary()}</span>"
-                )
+                msg += tr("sub.result_userinfo", summary=result.userinfo.summary())
             self.status_label.setText(msg)
             self.save_btn.setEnabled(True)
         elif result.placeholders:
             # Parsed fine, but every entry was a provider stub (e.g.
             # gmailvpn's 0.0.0.0:1 "App not supported"). Explain instead
             # of silently importing a dead server.
-            n = len(result.placeholders)
             self.status_label.setText(
-                "<span style='color:#ef4444'>✕ Провайдер вернул только "
-                f"заглушку ({n}), а не рабочие серверы.</span><br>"
-                "<span style='color:#fbbf24'>Обычно это значит: подписка не "
-                "активирована / не оплачена, либо провайдер не отдаёт конфиги "
-                "стороннему клиенту (нужен их Clash / официальное приложение). "
-                "Проверь статус подписки у провайдера.</span>"
+                tr("sub.result_only_stub", n=len(result.placeholders))
             )
         else:
-            self.status_label.setText(
-                "<span style='color:#ef4444'>✕ В ответе не найдено ни одного "
-                "share-URL (vless://, trojan://, vmess://, ss://, hysteria2://). "
-                "Проверь, что скопировал страницу полностью.</span>"
-            )
+            self.status_label.setText(tr("sub.result_no_share_url"))
 
     def _on_accept(self) -> None:
         if not self._result or not self._result.configs:

@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from ..core.i18n import tr
 from ..core.updater import UpdateInfo
 
 
@@ -101,7 +102,7 @@ class _DownloadWorker(QThread):
                 # would otherwise be "downloaded" and then fail to launch.
                 if self._dest.stat().st_size < 1024 * 1024:
                     raise RuntimeError(
-                        f"файл подозрительно мал ({self._dest.stat().st_size} Б)"
+                        tr("upd.file_too_small", size=self._dest.stat().st_size)
                     )
                 self.finished_ok.emit(str(self._dest))
                 return
@@ -121,7 +122,7 @@ class UpdaterDialog(QDialog):
         self._download_worker: Optional[_DownloadWorker] = None
         self._setup_path: Optional[Path] = None
 
-        self.setWindowTitle("Доступно обновление")
+        self.setWindowTitle(tr("upd.window_title"))
         self.resize(540, 480)
 
         layout = QVBoxLayout(self)
@@ -132,11 +133,11 @@ class UpdaterDialog(QDialog):
         title.setObjectName("h1")
         layout.addWidget(title)
 
-        sub = QLabel(f"Текущая: v{__version__}")
+        sub = QLabel(tr("upd.current_version", version=__version__))
         sub.setObjectName("muted")
         layout.addWidget(sub)
 
-        notes_label = QLabel("Что нового:")
+        notes_label = QLabel(tr("upd.whats_new"))
         notes_label.setObjectName("h2")
         layout.addWidget(notes_label)
 
@@ -162,9 +163,9 @@ class UpdaterDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
-        self.later_btn = QPushButton("Отложить")
+        self.later_btn = QPushButton(tr("upd.later_button"))
         self.later_btn.clicked.connect(self.reject)
-        self.update_btn = QPushButton(f"Обновить до v{info.version}")
+        self.update_btn = QPushButton(tr("upd.update_button", version=info.version))
         self.update_btn.setObjectName("primary")
         self.update_btn.clicked.connect(self._start_download)
         btn_row.addWidget(self.later_btn)
@@ -178,8 +179,7 @@ class UpdaterDialog(QDialog):
         self.later_btn.setEnabled(False)
         self.status_label.setVisible(True)
         self.status_label.setText(
-            f"Качаю {SETUP_FILENAME} v{self._info.version} "
-            f"(зеркало, при сбое — GitHub)…"
+            tr("upd.downloading", filename=SETUP_FILENAME, version=self._info.version)
         )
         self.progress_bar.setVisible(True)
 
@@ -203,15 +203,15 @@ class UpdaterDialog(QDialog):
             mb_done = done // (1024 * 1024)
             mb_total = total // (1024 * 1024)
             self.status_label.setText(
-                f"Скачано {mb_done} / {mb_total} МБ ({pct} %)"
+                tr("upd.progress_pct", done=mb_done, total=mb_total, pct=pct)
             )
         else:
             mb = done // (1024 * 1024)
-            self.status_label.setText(f"Скачано {mb} МБ")
+            self.status_label.setText(tr("upd.progress_mb", mb=mb))
 
     def _on_downloaded(self, path: str) -> None:
         self._setup_path = Path(path)
-        self.status_label.setText("Запускаю установку…")
+        self.status_label.setText(tr("upd.launching"))
         self.progress_bar.setRange(0, 0)  # indeterminate spinner
 
         # Launch the installer in silent mode, detached so it survives
@@ -226,7 +226,7 @@ class UpdaterDialog(QDialog):
                 close_fds=True,
             )
         except OSError as e:
-            self._on_failed(f"Не удалось запустить установщик: {e}")
+            self._on_failed(tr("upd.launch_failed", error=e))
             return
 
         # Bow out so the installer can overwrite our exe.
@@ -235,13 +235,13 @@ class UpdaterDialog(QDialog):
 
     def _on_failed(self, msg: str) -> None:
         self.status_label.setText(
-            f"<span style='color:#ef4444'>Ошибка: {msg}</span><br>"
+            f"<span style='color:#ef4444'>{tr('upd.error_prefix', msg=msg)}</span><br>"
             f"<a href='{self._info.url}' style='color:#f59e0b'>"
-            f"Открыть страницу релиза в браузере</a>"
+            f"{tr('upd.open_release_page')}</a>"
         )
         self.status_label.setTextFormat(Qt.RichText)
         self.status_label.setOpenExternalLinks(True)
         self.progress_bar.setVisible(False)
         self.later_btn.setEnabled(True)
         self.update_btn.setEnabled(True)
-        self.update_btn.setText("Попробовать ещё раз")
+        self.update_btn.setText(tr("upd.retry_button"))

@@ -5,6 +5,7 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
 from ..core import geoip_ru, sing_box_installer
+from ..core.i18n import tr
 
 
 class _DownloadThread(QThread):
@@ -25,8 +26,8 @@ class _DownloadThread(QThread):
 
 
 def _run_download(parent, label: str, installer_fn, on_fail_msg: str) -> bool:
-    dlg = QProgressDialog(f"Загрузка {label}...", None, 0, 100, parent)
-    dlg.setWindowTitle("Первый запуск")
+    dlg = QProgressDialog(tr("inst.downloading", label=label), None, 0, 100, parent)
+    dlg.setWindowTitle(tr("inst.first_run_title"))
     dlg.setCancelButton(None)
     dlg.setMinimumDuration(0)
     dlg.setAutoClose(False)
@@ -39,9 +40,11 @@ def _run_download(parent, label: str, installer_fn, on_fail_msg: str) -> bool:
     def on_progress(done: int, total: int) -> None:
         if total > 0:
             dlg.setValue(int(done * 100 / total))
-            dlg.setLabelText(f"Загрузка {label}... {done // 1024} / {total // 1024} КБ")
+            dlg.setLabelText(tr("inst.downloading_progress", label=label,
+                                done=done // 1024, total=total // 1024))
         else:
-            dlg.setLabelText(f"Загрузка {label}... {done // 1024} КБ")
+            dlg.setLabelText(tr("inst.downloading_indeterminate", label=label,
+                                done=done // 1024))
 
     def on_done() -> None:
         dlg.setValue(100)
@@ -59,7 +62,7 @@ def _run_download(parent, label: str, installer_fn, on_fail_msg: str) -> bool:
     thread.wait()
 
     if error_holder:
-        QMessageBox.critical(parent, f"Не удалось скачать {label}",
+        QMessageBox.critical(parent, tr("inst.download_failed_title", label=label),
                              f"{error_holder[0]}\n\n{on_fail_msg}")
         return False
     return True
@@ -72,10 +75,7 @@ def ensure_sing_box_installed(parent) -> bool:
         return True
     return _run_download(
         parent, "sing-box + WinTUN", sing_box_installer.download_and_install,
-        f"Скачай вручную:\n"
-        f"- https://github.com/SagerNet/sing-box/releases\n"
-        f"- https://www.wintun.net/\n"
-        f"и положи sing-box.exe в:\n{sing_box_installer.paths.sing_box_dir()}",
+        tr("inst.singbox_manual_hint", path=sing_box_installer.paths.sing_box_dir()),
     ) and sing_box_installer.is_installed()
 
 
@@ -88,7 +88,6 @@ def ensure_geoip_ru_cached(parent) -> bool:
     if geoip_ru.is_cached():
         return True
     return _run_download(
-        parent, "CIDR-список прямых сайтов", geoip_ru.download,
-        f"Скачай вручную:\n{geoip_ru.GEOIP_RU_URL}\n"
-        f"и сохрани как:\n{geoip_ru.cache_file()}",
+        parent, tr("inst.geoip_label"), geoip_ru.download,
+        tr("inst.geoip_manual_hint", url=geoip_ru.GEOIP_RU_URL, path=geoip_ru.cache_file()),
     ) and geoip_ru.is_cached()

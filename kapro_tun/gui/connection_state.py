@@ -15,7 +15,9 @@ Pure data + helpers, no Qt imports — trivially unit-testable.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+from ..core.i18n import tr
 
 # --- the six canonical states ---------------------------------------------
 DISCONNECTED = "disconnected"
@@ -49,7 +51,9 @@ def normalize(state: str) -> str:
 @dataclass(frozen=True)
 class StateSpec:
     state: str            # canonical state
-    label: str            # status text (RU); '{detail}' optionally appended by caller
+    label: str            # status text; '{detail}' optionally appended by caller.
+                          # In _SPECS this holds an i18n KEY ("cstate.*"); spec()
+                          # resolves it to the active-locale string via tr().
     accent: str           # palette FIELD name: ACCENT | TEXT_MUTED | DANGER | SUCCESS
     glyph: str            # tiny indicator char (○ ◌ ● ✕ ■)
     button_text_key: str  # i18n key for the connect-button caption
@@ -58,28 +62,36 @@ class StateSpec:
     is_error: bool        # error-class state -> surface explicitly, never swallow
 
 
+# The `label` slot holds an i18n KEY here, not the literal text — spec()
+# resolves it through tr() at call time so the active locale (fixed at
+# startup) wins. Storing the key (not tr(...)) keeps _SPECS locale-agnostic
+# even though this module is imported before i18n.init_from_settings runs.
 _SPECS = {
     DISCONNECTED: StateSpec(
-        DISCONNECTED, "Не подключено", "TEXT_MUTED", "○",
+        DISCONNECTED, "cstate.disconnected", "TEXT_MUTED", "○",
         "home.connect", True, "idle", False),
     CONNECTING: StateSpec(
-        CONNECTING, "Подключение…", "TEXT_MUTED", "◌",
+        CONNECTING, "cstate.connecting", "TEXT_MUTED", "◌",
         "home.connecting", True, "connecting", False),
     CONNECTED: StateSpec(
-        CONNECTED, "Подключено", "ACCENT", "●",
+        CONNECTED, "cstate.connected", "ACCENT", "●",
         "home.disconnect", True, "connected", False),
     RECONNECTING: StateSpec(
-        RECONNECTING, "Переподключение…", "ACCENT", "◌",
+        RECONNECTING, "cstate.reconnecting", "ACCENT", "◌",
         "home.connecting", True, "connecting", False),
     ERROR: StateSpec(
-        ERROR, "Ошибка подключения", "DANGER", "✕",
+        ERROR, "cstate.error", "DANGER", "✕",
         "home.connect", True, "idle", True),
     KILLSWITCH_ACTIVE: StateSpec(
-        KILLSWITCH_ACTIVE, "Kill-switch: трафик заблокирован", "DANGER", "■",
+        KILLSWITCH_ACTIVE, "cstate.killswitch", "DANGER", "■",
         "home.connect", True, "idle", True),
 }
 
 
 def spec(state: str) -> StateSpec:
-    """Presentation spec for a state (input normalised first)."""
-    return _SPECS[normalize(state)]
+    """Presentation spec for a state (input normalised first).
+
+    The stored `label` is an i18n key; resolve it to the active-locale
+    string via tr() so callers get ready-to-display text in `.label`."""
+    base = _SPECS[normalize(state)]
+    return replace(base, label=tr(base.label))

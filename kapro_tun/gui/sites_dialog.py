@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import storage
+from ..core.i18n import tr
 
 
 class SitesDialog(QDialog):
@@ -20,23 +21,19 @@ class SitesDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Прямые сайты (всегда напрямую)")
+        self.setWindowTitle(tr("sites.window_title"))
         self.resize(520, 600)
 
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel(
-            "Эти домены всегда идут напрямую через твой реальный IP, "
-            "минуя прокси.\nПо одному домену в строке. Поддомены покрываются "
-            "автоматически (example.com → m.example.com, sub.example.com, и т.д.)."
-        ))
+        layout.addWidget(QLabel(tr("sites.intro")))
 
         self.editor = QPlainTextEdit()
         self.editor.setPlainText("\n".join(storage.load_sites()))
         layout.addWidget(self.editor, stretch=1)
 
         actions_row = QHBoxLayout()
-        reset_btn = QPushButton("Сбросить к стандартному списку")
+        reset_btn = QPushButton(tr("sites.reset_button"))
         reset_btn.clicked.connect(self._on_reset)
         actions_row.addWidget(reset_btn)
         actions_row.addStretch(1)
@@ -46,8 +43,8 @@ class SitesDialog(QDialog):
             QDialogButtonBox.Save | QDialogButtonBox.Cancel,
         )
         buttons.button(QDialogButtonBox.Save).setObjectName("primary")
-        buttons.button(QDialogButtonBox.Save).setText("Сохранить")
-        buttons.button(QDialogButtonBox.Cancel).setText("Отмена")
+        buttons.button(QDialogButtonBox.Save).setText(tr("sites.save"))
+        buttons.button(QDialogButtonBox.Cancel).setText(tr("sites.cancel"))
         buttons.accepted.connect(self._on_save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -67,8 +64,8 @@ class SitesDialog(QDialog):
     def _on_reset(self) -> None:
         confirm = QMessageBox.question(
             self,
-            "Сброс",
-            "Заменить текущий список на стандартный?",
+            tr("sites.reset_title"),
+            tr("sites.reset_confirm"),
         )
         if confirm == QMessageBox.Yes:
             sites = storage.reset_sites_to_default()

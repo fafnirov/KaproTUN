@@ -37,6 +37,7 @@ from typing import Optional
 import requests
 
 from .. import __version__
+from .i18n import tr
 from .parser import ParseError, ProxyConfig, parse
 from .sing_box_config import HEALTH_PROXY_PORT
 
@@ -62,13 +63,14 @@ SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://",
 
 def _human_bytes(n: int) -> str:
     """Compact byte size: 95.2 ГБ / 940 МБ / 12 КБ."""
-    units = ("Б", "КБ", "МБ", "ГБ", "ТБ", "ПБ")
+    units = ("b", "kb", "mb", "gb", "tb", "pb")
     val = float(max(0, n))
     for u in units:
+        label = tr("suberr.unit_" + u)
         if val < 1024.0 or u == units[-1]:
-            return f"{int(val)} {u}" if u == "Б" else f"{val:.1f} {u}"
+            return f"{int(val)} {label}" if u == "b" else f"{val:.1f} {label}"
         val /= 1024.0
-    return f"{n} Б"
+    return f"{n} {tr('suberr.unit_b')}"
 
 
 def humanize_ago(epoch: int, now: Optional[int] = None) -> str:
@@ -79,17 +81,17 @@ def humanize_ago(epoch: int, now: Optional[int] = None) -> str:
     now = int(time.time()) if now is None else int(now)
     sec = max(0, now - int(epoch))
     if sec < 60:
-        return "только что"
+        return tr("suberr.ago_just_now")
     mins = sec // 60
     if mins < 60:
-        return f"{mins} мин назад"
+        return tr("suberr.ago_minutes", mins=mins)
     hours = mins // 60
     if hours < 24:
-        return f"{hours} ч назад"
+        return tr("suberr.ago_hours", hours=hours)
     days = hours // 24
     tail = "день" if days % 10 == 1 and days % 100 != 11 else (
         "дня" if 2 <= days % 10 <= 4 and not 12 <= days % 100 <= 14 else "дней")
-    return f"{days} {tail} назад"
+    return tr("suberr.ago_days", days=days, tail=tail)
 
 
 @dataclass
@@ -148,18 +150,18 @@ class SubscriptionInfo:
         """Short, punchy status for the home-screen banner (not the verbose
         summary()). '' when the header carried nothing useful."""
         if self.is_expired():
-            return "Подписка истекла — продли у провайдера"
+            return tr("suberr.banner_expired")
         parts: list[str] = []
         dl = self.days_left()
         if dl is not None:
             if dl == 0:
-                parts.append("истекает сегодня")
+                parts.append(tr("suberr.banner_expires_today"))
             else:
                 tail = "день" if dl % 10 == 1 and dl % 100 != 11 else (
                     "дня" if 2 <= dl % 10 <= 4 and not 12 <= dl % 100 <= 14 else "дней")
-                parts.append(f"осталось {dl} {tail}")
+                parts.append(tr("suberr.banner_days_left", dl=dl, tail=tail))
         if self.total > 0:
-            parts.append(f"{_human_bytes(self.remaining or 0)} трафика")
+            parts.append(tr("suberr.banner_traffic", size=_human_bytes(self.remaining or 0)))
         return " · ".join(parts)
 
     def summary(self) -> str:
@@ -167,15 +169,18 @@ class SubscriptionInfo:
         parts: list[str] = []
         if self.total > 0:
             parts.append(
-                f"осталось {_human_bytes(self.remaining or 0)} "
-                f"из {_human_bytes(self.total)}"
+                tr("suberr.summary_remaining",
+                   remaining=_human_bytes(self.remaining or 0),
+                   total=_human_bytes(self.total))
             )
         elif self.used > 0:
-            parts.append(f"использовано {_human_bytes(self.used)}")
+            parts.append(tr("suberr.summary_used", used=_human_bytes(self.used)))
         d = self.expire_date()
         if d is not None:
             parts.append(
-                f"истекла {d:%d.%m.%Y}" if self.is_expired() else f"до {d:%d.%m.%Y}"
+                tr("suberr.summary_expired", date=f"{d:%d.%m.%Y}")
+                if self.is_expired()
+                else tr("suberr.summary_until", date=f"{d:%d.%m.%Y}")
             )
         return " · ".join(parts)
 
@@ -283,55 +288,48 @@ def classify_fetch_error(exc: Exception) -> FetchError:
         if status in (404, 410):
             return FetchError(
                 "not_found", raw,
-                f"Подписка не найдена (HTTP {status}).",
-                "Ссылка неверная или устарела — ручная вставка не поможет. "
-                "Запроси у провайдера актуальную ссылку.",
+                tr("suberr.err_not_found_title", status=status),
+                tr("suberr.err_not_found_detail"),
                 suggest_manual=False,
             )
         if status in (401, 403):
             return FetchError(
                 "auth", raw,
-                f"Доступ запрещён (HTTP {status}).",
-                "Подписка не активна / требует авторизации, либо доступ "
-                "ограничен по IP. Если URL открывается в браузере — "
-                "скопируй ответ и вставь вручную.",
+                tr("suberr.err_auth_title", status=status),
+                tr("suberr.err_auth_detail"),
                 suggest_manual=True,
             )
         return FetchError(
             "server", raw,
-            f"Сервер провайдера ответил ошибкой (HTTP {status}).",
-            "Это на стороне провайдера. Попробуй позже или запроси новую ссылку.",
+            tr("suberr.err_server_title", status=status),
+            tr("suberr.err_server_detail"),
             suggest_manual=False,
         )
     if _looks_like_dpi_block(exc):
         return FetchError(
             "dpi", raw,
-            "Похоже на DPI-блокировку или REALITY / IP-белый список.",
-            "Открой URL в браузере, скопируй ответ целиком и вставь вручную. "
-            "Или подключись к любому серверу — KaproTUN попробует ещё раз "
-            "через туннель.",
+            tr("suberr.err_dpi_title"),
+            tr("suberr.err_dpi_detail"),
             suggest_manual=True,
         )
     if isinstance(exc, requests.exceptions.Timeout):
         return FetchError(
             "timeout", raw,
-            "Таймаут — сервер не ответил.",
-            "Проверь интернет и ссылку. Если сайт открывается в браузере — "
-            "вставь ответ вручную.",
+            tr("suberr.err_timeout_title"),
+            tr("suberr.err_timeout_detail"),
             suggest_manual=True,
         )
     if isinstance(exc, requests.exceptions.ConnectionError):
         return FetchError(
             "conn", raw,
-            "Не удалось соединиться с сервером провайдера.",
-            "Проверь ссылку и интернет. Если URL открывается в браузере — "
-            "вставь ответ вручную.",
+            tr("suberr.err_conn_title"),
+            tr("suberr.err_conn_detail"),
             suggest_manual=True,
         )
     return FetchError(
         "unknown", raw,
-        "Не удалось загрузить подписку.",
-        "Если URL открывается в браузере — скопируй ответ и вставь вручную.",
+        tr("suberr.err_unknown_title"),
+        tr("suberr.err_unknown_detail"),
         suggest_manual=True,
     )
 

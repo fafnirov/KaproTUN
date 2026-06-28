@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import leak_test
+from ..core.i18n import tr
 from . import styles
 
 
@@ -95,7 +96,7 @@ class LeakTestDialog(QDialog):
     def __init__(self, socks_proxy: Optional[str], manager=None,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setWindowTitle("Проверка утечек")
+        self.setWindowTitle(tr("leak.title"))
         self.setModal(True)
         self.setMinimumWidth(440)
         # Manager lets us flip a protection setting in-place when the test
@@ -116,16 +117,9 @@ class LeakTestDialog(QDialog):
         # spinner alone is opaque.
         connected = socks_proxy is not None
         if not connected:
-            initial_caption = (
-                "⚠ VPN не подключён. Проверяю IPv4/IPv6/DNS/WebRTC через "
-                "обычный канал — результат покажет «как видно без защиты».\n"
-                "Это займёт до 25 секунд."
-            )
+            initial_caption = tr("leak.caption_no_vpn")
         else:
-            initial_caption = (
-                "Проверяем IPv4, IPv6, DNS, WebRTC через активный VPN…\n"
-                "Это займёт до 20 секунд."
-            )
+            initial_caption = tr("leak.caption_running")
         self._running_caption = QLabel(initial_caption)
         self._running_caption.setWordWrap(True)
         self._layout.addWidget(self._running_caption)
@@ -159,7 +153,7 @@ class LeakTestDialog(QDialog):
         self._fix_caption.setWordWrap(True)
         self._fix_caption.setVisible(False)
         self._layout.addWidget(self._fix_caption)
-        self._fix_btn = QPushButton("🛡 Включить защиту")
+        self._fix_btn = QPushButton(tr("leak.fix_enable_btn"))
         self._fix_btn.setObjectName("primary")
         self._fix_btn.setVisible(False)
         self._fix_btn.clicked.connect(self._on_action_clicked)
@@ -168,7 +162,7 @@ class LeakTestDialog(QDialog):
         # ----- Close button at the bottom -----
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
-        self._close_btn = QPushButton("Закрыть")
+        self._close_btn = QPushButton(tr("leak.close_btn"))
         self._close_btn.clicked.connect(self.accept)
         btn_row.addWidget(self._close_btn)
         self._layout.addLayout(btn_row)
@@ -220,49 +214,42 @@ class LeakTestDialog(QDialog):
             country_text = f" ({v4.country})" if v4.country else ""
             self._row_ipv4.set_pass(f"{v4.ip}{country_text}")
         else:
-            self._row_ipv4.set_fail(v4.error or "не удалось получить IP")
+            self._row_ipv4.set_fail(v4.error or tr("leak.ipv4_no_ip"))
 
         # --- IPv6 ---
         v6 = report.ipv6
         if v6.ipv6_blocked:
-            self._row_ipv6.set_pass("заблокирован (нет утечки)")
+            self._row_ipv6.set_pass(tr("leak.ipv6_blocked"))
         else:
             # We got an IPv6 — that means traffic went out the real ISP.
             self._row_ipv6.set_fail(
-                f"утечка: {v6.ip} прошёл мимо туннеля"
+                tr("leak.ipv6_leak", ip=v6.ip)
             )
 
         # --- DNS ---
         dns = report.dns
         if dns.error:
-            self._row_dns.set_fail(f"ошибка теста: {dns.error}")
+            self._row_dns.set_fail(tr("leak.dns_error", error=dns.error))
         elif not dns.resolvers:
-            self._row_dns.set_warn(
-                "bash.ws не зарегистрировал ни одного резолвера "
-                "(возможно, заблокирован VPN-провайдером)"
-            )
+            self._row_dns.set_warn(tr("leak.dns_no_resolvers"))
         elif dns.suspected_leak:
             self._row_dns.set_fail(
-                f"подозрение на утечку — {len(dns.resolvers)} резолверов, "
-                f"один из них похож на ISP"
+                tr("leak.dns_suspected", n=len(dns.resolvers))
             )
             self._dns_detail.setText(self._format_dns_resolvers(dns))
             self._dns_detail.setVisible(True)
         else:
             self._row_dns.set_pass(
-                f"{len(dns.resolvers)} резолверов, все похожи на VPN/CDN"
+                tr("leak.dns_clean", n=len(dns.resolvers))
             )
 
         # --- WebRTC ---
         wr = report.webrtc
         if wr.stun_blocked:
-            note = "stun.l.google.com:19302 заблокирован firewall'ом"
+            note = tr("leak.webrtc_blocked")
             self._row_webrtc.set_pass(note)
         else:
-            self._row_webrtc.set_fail(
-                "STUN ответил — браузер может узнать реальный IP "
-                "(включи 'Защита от WebRTC leak' в настройках)"
-            )
+            self._row_webrtc.set_fail(tr("leak.webrtc_leak"))
 
         # Reveal the rows.
         for row in (self._row_ipv4, self._row_ipv6,
@@ -277,11 +264,8 @@ class LeakTestDialog(QDialog):
             if self._fixable:
                 self._action = "enable"
                 names = ", ".join(label for _, label in self._fixable)
-                self._fix_caption.setText(
-                    f"Защита для {names} выключена в настройках — поэтому "
-                    f"утечка. Можно включить прямо сейчас:"
-                )
-                self._fix_btn.setText(f"🛡 Включить защиту ({names})")
+                self._fix_caption.setText(tr("leak.fix_off_caption", names=names))
+                self._fix_btn.setText(tr("leak.fix_enable_named", names=names))
                 self._fix_caption.setVisible(True)
                 self._fix_btn.setVisible(True)
             elif (not report.ipv6.ipv6_blocked
@@ -291,13 +275,8 @@ class LeakTestDialog(QDialog):
                 # but still leaks" case). Offer a diagnostics bundle for
                 # support instead of a toggle (it's already on).
                 self._action = "diag"
-                self._fix_caption.setText(
-                    "Защита IPv6 включена, но правило firewall не сработало в "
-                    "твоей системе (редкий случай — сторонний firewall или "
-                    "отключённая фильтрация IPv6). Собери диагностику для "
-                    "поддержки:"
-                )
-                self._fix_btn.setText("📋 Скопировать диагностику")
+                self._fix_caption.setText(tr("leak.diag_caption"))
+                self._fix_btn.setText(tr("leak.diag_copy_btn"))
                 self._fix_caption.setVisible(True)
                 self._fix_btn.setVisible(True)
 
@@ -320,11 +299,8 @@ class LeakTestDialog(QDialog):
             self._manager.update_settings(**{key: True})
         names = ", ".join(label for _, label in self._fixable)
         self._fix_btn.setEnabled(False)
-        self._fix_btn.setText(f"✓ Защита {names} включена")
-        self._fix_caption.setText(
-            f"Защита {names} включена. Переподключись (выключи и снова включи "
-            f"VPN), чтобы применить, затем запусти проверку заново."
-        )
+        self._fix_btn.setText(tr("leak.fix_enabled_btn", names=names))
+        self._fix_caption.setText(tr("leak.fix_enabled_caption", names=names))
         self.adjustSize()
 
     def _copy_diagnostics(self) -> None:
@@ -337,14 +313,11 @@ class LeakTestDialog(QDialog):
         try:
             diag = ipv6_block.diagnostics()
         except Exception as e:  # noqa: BLE001 — never let copy crash the dialog
-            diag = f"(не удалось собрать диагностику: {e})"
+            diag = tr("leak.diag_collect_fail", error=e)
         QApplication.clipboard().setText(diag)
         self._fix_btn.setEnabled(False)
-        self._fix_btn.setText("✓ Скопировано в буфер обмена")
-        self._fix_caption.setText(
-            "Диагностика скопирована — вставь её в письмо в поддержку. "
-            "(Команды только читают состояние firewall, ничего не меняют.)"
-        )
+        self._fix_btn.setText(tr("leak.diag_copied_btn"))
+        self._fix_caption.setText(tr("leak.diag_copied_caption"))
         self.adjustSize()
 
     def _format_dns_resolvers(self, dns: leak_test.DnsResult) -> str:
@@ -357,7 +330,7 @@ class LeakTestDialog(QDialog):
             hostname = entry.get("hostname") or ""
             tail = " · ".join(p for p in (country, asn, hostname) if p)
             lines.append(f"• {ip}    {tail}" if tail else f"• {ip}")
-        return "\n".join(lines) if lines else "(нет данных)"
+        return "\n".join(lines) if lines else tr("leak.dns_no_data")
 
     def _on_watchdog_fire(self) -> None:
         """Probes exceeded the 35 s overall budget — show timeout error.
@@ -371,12 +344,10 @@ class LeakTestDialog(QDialog):
         self._progress.setVisible(False)
         # Show all rows as ✗ with a generic timeout message — the user
         # gets something actionable instead of an indefinite spinner.
-        self._row_ipv4.set_fail("таймаут — VPN отключён или сеть тормозит?")
-        self._row_ipv6.set_fail("таймаут")
-        self._row_dns.set_fail(
-            "таймаут — DNS не отвечает за 35 с. Проверь VPN/настройки."
-        )
-        self._row_webrtc.set_fail("таймаут")
+        self._row_ipv4.set_fail(tr("leak.timeout_ipv4"))
+        self._row_ipv6.set_fail(tr("leak.timeout"))
+        self._row_dns.set_fail(tr("leak.timeout_dns"))
+        self._row_webrtc.set_fail(tr("leak.timeout"))
         for row in (self._row_ipv4, self._row_ipv6,
                     self._row_dns, self._row_webrtc):
             row.setVisible(True)

@@ -25,6 +25,7 @@ from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 from ..core import bandwidth_history
+from ..core.i18n import tr
 from . import styles
 
 
@@ -45,10 +46,10 @@ def _format_rate(bytes_per_sec: float) -> str:
     has no cross-module pull at paint time. KB/s up to 1024, then MB/s.
     """
     if bytes_per_sec >= 1024 * 1024:
-        return f"{bytes_per_sec / (1024 * 1024):.1f} МБ/с"
+        return tr("bw.rate_mbps", val=f"{bytes_per_sec / (1024 * 1024):.1f}")
     if bytes_per_sec >= 1024:
-        return f"{bytes_per_sec / 1024:.0f} КБ/с"
-    return f"{int(bytes_per_sec)} Б/с"
+        return tr("bw.rate_kbps", val=f"{bytes_per_sec / 1024:.0f}")
+    return tr("bw.rate_bps", val=int(bytes_per_sec))
 
 
 class BandwidthChartWidget(QWidget):
@@ -109,7 +110,7 @@ class BandwidthChartWidget(QWidget):
             p.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
-                "Нет данных за последние 24 часа",
+                tr("bw.no_data_24h"),
             )
             p.end()
             return
@@ -244,9 +245,9 @@ def format_bytes(n: int) -> str:
     doesn't have to pull xray_stats just for one helper.
     """
     if n >= 1024 ** 3:
-        return f"{n / 1024 ** 3:.1f} ГБ"
+        return tr("bw.size_gb", val=f"{n / 1024 ** 3:.1f}")
     if n >= 1024 ** 2:
-        return f"{n / 1024 ** 2:.1f} МБ"
+        return tr("bw.size_mb", val=f"{n / 1024 ** 2:.1f}")
     if n >= 1024:
-        return f"{n / 1024:.0f} КБ"
-    return f"{n} Б"
+        return tr("bw.size_kb", val=f"{n / 1024:.0f}")
+    return tr("bw.size_b", val=n)

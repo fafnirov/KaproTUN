@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.i18n import tr
 from ..core.parser import ParseError, ProxyConfig, parse
 from .toast import show_toast
 
@@ -44,23 +45,20 @@ class AddConfigPage(QWidget):
 
         # --- Header ---
         header = QHBoxLayout()
-        back_btn = QPushButton("← Назад")
+        back_btn = QPushButton(tr("add.back"))
         back_btn.clicked.connect(self.back_clicked)
         header.addWidget(back_btn)
         header.addStretch(1)
         outer.addLayout(header)
 
-        title = QLabel("Добавить конфиг")
+        title = QLabel(tr("add.title"))
         title.setObjectName("h1")
         outer.addWidget(title)
 
         # --- URL field ---
-        outer.addWidget(QLabel("Вставь share-URL:"))
+        outer.addWidget(QLabel(tr("add.url_label")))
         self.url_edit = QPlainTextEdit()
-        self.url_edit.setPlaceholderText(
-            "vless://uuid@host:443?type=xhttp&security=reality...#Server name\n"
-            "(Также trojan://, vmess://, ss://, hysteria2://)"
-        )
+        self.url_edit.setPlaceholderText(tr("add.url_placeholder"))
         self.url_edit.setMinimumHeight(120)
         self.url_edit.setMaximumHeight(160)
         # As soon as user types, re-validate
@@ -74,13 +72,13 @@ class AddConfigPage(QWidget):
         outer.addWidget(self.status_label)
 
         # --- Name field ---
-        outer.addWidget(QLabel("Имя (как будет отображаться в списке):"))
+        outer.addWidget(QLabel(tr("add.name_label")))
         self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("например, NL Server #2")
+        self.name_edit.setPlaceholderText(tr("add.name_placeholder"))
         outer.addWidget(self.name_edit)
 
         # --- Primary action ---
-        self.save_btn = QPushButton("Сохранить и подключить")
+        self.save_btn = QPushButton(tr("add.save"))
         self.save_btn.setObjectName("primary")
         self.save_btn.setEnabled(False)
         self.save_btn.clicked.connect(self._on_save)
@@ -94,14 +92,13 @@ class AddConfigPage(QWidget):
 
         # --- Alternative: subscription ---
         sub_label = QLabel(
-            "<span style='color:#a1a1aa'>Если провайдер выдал ссылку на "
-            "подписку — все сервера одним кликом</span>"
+            "<span style='color:#a1a1aa'>" + tr("add.sub_hint") + "</span>"
         )
         sub_label.setTextFormat(Qt.RichText)
         sub_label.setWordWrap(True)
         outer.addWidget(sub_label)
 
-        sub_btn = QPushButton("📥 Импорт по подписке")
+        sub_btn = QPushButton(tr("add.sub_button"))
         sub_btn.clicked.connect(self.subscription_clicked)
         outer.addWidget(sub_btn)
 
@@ -132,9 +129,10 @@ class AddConfigPage(QWidget):
         if text.lower().startswith(("http://", "https://")):
             self._parsed = None
             self.status_label.setText(
-                "<span style='color:#fbbf24'>⚠ Похоже на URL подписки.</span> "
-                "<span style='color:#a1a1aa'>Жми «📥 Импорт по подписке» "
-                "ниже — это другая кнопка.</span>"
+                "<span style='color:#fbbf24'>⚠ " + tr("add.looks_like_sub")
+                + "</span> "
+                "<span style='color:#a1a1aa'>" + tr("add.use_sub_button")
+                + "</span>"
             )
             self.save_btn.setEnabled(False)
             return
@@ -143,7 +141,8 @@ class AddConfigPage(QWidget):
         except ParseError as e:
             self._parsed = None
             self.status_label.setText(
-                f"<span style='color:#ef4444'>✕ Не удалось разобрать:</span> "
+                "<span style='color:#ef4444'>✕ " + tr("add.parse_failed")
+                + "</span> "
                 f"<span style='color:#a1a1aa'>{e}</span>"
             )
             self.save_btn.setEnabled(False)
@@ -166,7 +165,7 @@ class AddConfigPage(QWidget):
             return
         name = self.name_edit.text().strip()
         if not name:
-            show_toast(self.window(), "Укажи имя для конфига", kind="error")
+            show_toast(self.window(), tr("add.name_required"), kind="error")
             self.name_edit.setFocus()
             return
         self._parsed.name = name

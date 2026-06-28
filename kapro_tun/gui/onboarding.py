@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..core.i18n import current_locale
+from ..core.i18n import tr
 
 
 # Where to send users without a provider — kaprovpn.pro main page is
@@ -57,25 +57,18 @@ class OnboardingPage(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setObjectName("page")
-        ru = current_locale() == "ru"
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(28, 28, 28, 20)
         outer.setSpacing(14)
 
         # --- Hero ---
-        title = QLabel("Добро пожаловать в KaproTUN" if ru else "Welcome to KaproTUN")
+        title = QLabel(tr("onb.welcome_title"))
         title.setObjectName("h1")
         title.setAlignment(Qt.AlignHCenter)
         outer.addWidget(title)
 
-        subtitle = QLabel(
-            "Чтобы начать — добавь свой первый сервер.\n"
-            "Это занимает 10 секунд."
-            if ru else
-            "To get started — add your first server.\n"
-            "Takes about 10 seconds."
-        )
+        subtitle = QLabel(tr("onb.welcome_subtitle"))
         subtitle.setObjectName("dim")
         subtitle.setAlignment(Qt.AlignHCenter)
         subtitle.setWordWrap(True)
@@ -86,45 +79,27 @@ class OnboardingPage(QWidget):
         # --- Three big action cards ---
         outer.addWidget(self._make_card(
             emoji="📥",
-            title="У меня есть URL подписки" if ru else "I have a subscription URL",
-            subtitle=(
-                "Ссылка вида https://provider.com/sub/xxx — обычно её "
-                "выдают провайдеры с несколькими серверами разом."
-                if ru else
-                "A URL like https://provider.com/sub/xxx — typically "
-                "issued by providers with multiple servers to import at once."
-            ),
-            button_text="Импорт по подписке" if ru else "Import subscription",
+            title=tr("onb.card_sub_title"),
+            subtitle=tr("onb.card_sub_subtitle"),
+            button_text=tr("onb.card_sub_button"),
             on_click=self.subscription_clicked.emit,
             primary=True,
         ))
 
         outer.addWidget(self._make_card(
             emoji="📋",
-            title="У меня есть share-URL одного сервера" if ru else "I have a single share URL",
-            subtitle=(
-                "Строки вида vless://… / trojan://… / vmess://… / ss://… — "
-                "часто рассылают TG-боты VPN-провайдеров."
-                if ru else
-                "Strings like vless://… / trojan://… / vmess://… / ss://… — "
-                "commonly sent by provider bots in Telegram."
-            ),
-            button_text="Вставить URL" if ru else "Paste a URL",
+            title=tr("onb.card_url_title"),
+            subtitle=tr("onb.card_url_subtitle"),
+            button_text=tr("onb.card_url_button"),
             on_click=self.add_config_clicked.emit,
             primary=False,
         ))
 
         outer.addWidget(self._make_card(
             emoji="🌐",
-            title="У меня ещё нет VPN-провайдера" if ru else "I don't have a VPN provider yet",
-            subtitle=(
-                "Откроем нашу страницу с подборкой проверенных провайдеров "
-                "и краткой инструкцией."
-                if ru else
-                "Opens our guide with a curated list of providers and a "
-                "short setup walkthrough."
-            ),
-            button_text="Открыть гайд" if ru else "Open the guide",
+            title=tr("onb.card_guide_title"),
+            subtitle=tr("onb.card_guide_subtitle"),
+            button_text=tr("onb.card_guide_button"),
             on_click=self._on_guide_clicked,
             primary=False,
         ))
@@ -132,13 +107,7 @@ class OnboardingPage(QWidget):
         outer.addStretch(1)
 
         # --- Tiny footer reassurance ---
-        footer = QLabel(
-            "Конфиги хранятся локально на твоём компьютере. "
-            "Мы не видим что ты добавляешь и куда подключаешься."
-            if ru else
-            "Configs are stored locally on your machine. "
-            "We don't see what you add or where you connect."
-        )
+        footer = QLabel(tr("onb.footer_privacy"))
         footer.setObjectName("dim")
         footer.setAlignment(Qt.AlignHCenter)
         footer.setWordWrap(True)

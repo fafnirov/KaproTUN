@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..core.i18n import tr
 from ..core.parser import ProxyConfig
 from . import flags, styles
 
@@ -60,7 +61,7 @@ class CircleConnectButton(QPushButton):
     CONNECTED_GLOW = 30.0
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__("ВКЛЮЧИТЬ", parent)
+        super().__init__(tr("wid.connect"), parent)
         self.setObjectName("circleBtn")
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
@@ -185,7 +186,7 @@ class ConfigCard(QFrame):
         outer.setContentsMargins(16, 14, 16, 14)
         outer.setSpacing(6)
 
-        self.title = QLabel("Конфиг не выбран")
+        self.title = QLabel(tr("wid.card_no_config"))
         self.title.setObjectName("cardTitle")
         self.title.setWordWrap(True)
         outer.addWidget(self.title)
@@ -194,7 +195,7 @@ class ConfigCard(QFrame):
         bottom_row.setSpacing(8)
         self.badge = QLabel("—")
         self.badge.setObjectName("cardBadge")
-        self.sub = QLabel("Нажми, чтобы выбрать или добавить конфиг")
+        self.sub = QLabel(tr("wid.card_sub_pick"))
         self.sub.setObjectName("cardSub")
         bottom_row.addWidget(self.badge)
         bottom_row.addWidget(self.sub, stretch=1)
@@ -205,9 +206,9 @@ class ConfigCard(QFrame):
 
     def set_config(self, cfg: Optional[ProxyConfig]) -> None:
         if cfg is None:
-            self.title.setText("Конфиг не выбран")
+            self.title.setText(tr("wid.card_no_config"))
             self.badge.setText("—")
-            self.sub.setText("Нажми, чтобы добавить конфиг")
+            self.sub.setText(tr("wid.card_sub_add"))
             return
         self.title.setText(flags.prefix_with_flag(cfg))
         self.badge.setText(cfg.protocol.upper())
@@ -273,10 +274,10 @@ class NavBar(QWidget):
         layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(0)
 
-        self.btn_home = IconButton(self.HOME_GLYPH, "Главная")
-        self.btn_stats = IconButton(self.STATS_GLYPH, "Статистика")
-        self.btn_settings = IconButton(self.SETTINGS_GLYPH, "Настройки")
-        self.btn_add = IconButton(self.ADD_GLYPH, "Добавить конфиг")
+        self.btn_home = IconButton(self.HOME_GLYPH, tr("wid.nav_home"))
+        self.btn_stats = IconButton(self.STATS_GLYPH, tr("wid.nav_stats"))
+        self.btn_settings = IconButton(self.SETTINGS_GLYPH, tr("wid.nav_settings"))
+        self.btn_add = IconButton(self.ADD_GLYPH, tr("wid.nav_add"))
 
         self.btn_home.clicked.connect(self.home_clicked)
         self.btn_stats.clicked.connect(self.stats_clicked)
@@ -306,7 +307,7 @@ class StatusLabel(QLabel):
     """Status text under the connect button. Color reflects connection state."""
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__("Не подключено", parent)
+        super().__init__(tr("wid.status_idle"), parent)
         self.setAlignment(Qt.AlignCenter)
         self.setObjectName("muted")
 
@@ -376,7 +377,8 @@ class TrafficLegend(QWidget):
         self.down_value.setText(format_rate(down_rate))
         self.up_value.setText(format_rate(up_rate))
         self.caption.setText(
-            f"за сессию: ↓ {format_bytes(down_total)}  ·  ↑ {format_bytes(up_total)}"
+            tr("wid.session_totals",
+               down=format_bytes(down_total), up=format_bytes(up_total))
         )
 
     def clear(self) -> None:

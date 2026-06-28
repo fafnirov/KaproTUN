@@ -14,6 +14,7 @@ from . import (
     admin, app_log, dns_health, ipv6_block, killswitch, linux_tun_route,
     paths, proc_stats, storage, tun_recovery, webrtc_block,
 )
+from .i18n import tr
 from .parser import ProxyConfig
 from .sing_box_process import SingBoxProcess, is_benign_noise
 from . import sing_box_config, sing_box_installer
@@ -233,15 +234,11 @@ class ConnectionManager:
 
     def connect(self, config: ProxyConfig, direct_domains: list[str]) -> None:
         if self.is_connected():
-            raise ConnectionError("Уже подключено. Сначала отключись.")
+            raise ConnectionError(tr("err.already_connected"))
         try:
             self._connect_tun_sing_box(config, direct_domains)
         except sing_box_config.UnsupportedBySingBox as e:
-            raise ConnectionError(
-                f"{e}\n\nЭтот тип сервера (например, XHTTP/splithttp) пока не "
-                f"поддерживается. Используй сервер на VLESS/Trojan/Shadowsocks/"
-                f"Hysteria2."
-            ) from e
+            raise ConnectionError(tr("err.unsupported_server", error=e)) from e
 
     def disconnect(self) -> None:
         # sing-box owns the TUN + its routes (auto_route removes them on a clean
@@ -510,18 +507,16 @@ class ConnectionManager:
         if not admin.is_admin():
             raise ConnectionError(self._tun_admin_message())
         if not sing_box_installer.is_installed():
-            raise ConnectionError(
-                "Движок sing-box ещё не установлен. Дай приложению докачать "
-                "его (Настройки → переподключись) или выбери legacy-движок.")
+            raise ConnectionError(tr("err.singbox_not_installed"))
 
         server_host = str(config.outbound.get("server", "")).strip()
         if not server_host:
-            raise ConnectionError("В конфиге нет адреса сервера.")
+            raise ConnectionError(tr("err.no_server_address"))
         try:
             server_ip = socket.gethostbyname(server_host)
         except socket.gaierror as e:
             raise ConnectionError(
-                f"Не удалось резолвнуть VPN-сервер «{server_host}»: {e}") from e
+                tr("err.resolve_failed", host=server_host, error=e)) from e
 
         self._log("[*] Движок: sing-box (нативный TUN, без tun2socks/SOCKS-моста)")
         # v3.1.1: DNS is always the system resolver — no dns_option / leak toggle.
@@ -543,7 +538,7 @@ class ConnectionManager:
         ok, msg = sing_box_config.check_config(cfg_path)
         if not ok:
             paths.remove_runtime_configs()
-            raise ConnectionError(f"sing-box отверг конфиг:\n{msg}")
+            raise ConnectionError(tr("err.singbox_rejected_config", msg=msg))
 
         # Kill-switch BEFORE the tunnel comes up, allowing sing-box.exe out.
         self._maybe_arm_killswitch()
@@ -556,7 +551,7 @@ class ConnectionManager:
             except Exception:
                 pass
             paths.remove_runtime_configs()
-            raise ConnectionError(f"Не удалось запустить sing-box: {e}") from e
+            raise ConnectionError(tr("err.singbox_start_failed", error=e)) from e
 
         try:
             # Did it die immediately (bad config / driver / TUN collision)?
@@ -579,18 +574,15 @@ class ConnectionManager:
                         self.sing_box_process.start(cfg_path)
                     except Exception as e:
                         raise ConnectionError(
-                            f"Не удалось перезапустить sing-box: {e}") from e
+                            tr("err.singbox_restart_failed", error=e)) from e
                 if not self._wait_until_running(4.0):
                     tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
                     if tun_busy:
                         raise ConnectionError(
-                            "sing-box не смог создать TUN-устройство «KaproTun» — "
-                            "оно занято другим процессом. Полностью закрой "
-                            "KaproTUN и запусти снова (при старте оно вычищает "
-                            "орфанов), затем подключись."
-                            + (f"\n\nЛог sing-box:\n{tail}" if tail else ""))
+                            tr("err.tun_device_busy")
+                            + (tr("err.singbox_log_tail", tail=tail) if tail else ""))
                     raise ConnectionError(
-                        "sing-box завершился сразу после старта"
+                        tr("err.singbox_died_on_start")
                         + (f":\n{tail}" if tail else "."))
             # Linux (kernel 7.0+): sing-box ran with auto_route OFF because its
             # netlink route-add is rejected by the kernel. Now that the TUN
@@ -608,11 +600,8 @@ class ConnectionManager:
                         if not is_benign_noise(l, live=False)]
                 tail = "\n".join(diag[-6:])
                 raise ConnectionError(
-                    "sing-box поднялся, но VPN-сервер не пропускает реальный "
-                    "трафик. DNS проверяется отдельно и может работать даже при "
-                    "мёртвом транспорте. Подключение отменено. Попробуй другой "
-                    "сервер из подписки."
-                    + (f"\n\nДиагностика sing-box:\n{tail}" if tail else ""))
+                    tr("err.singbox_no_real_traffic")
+                    + (tr("err.singbox_diag_tail", tail=tail) if tail else ""))
             # Confirmed live → switch the log filter to steady-state, so
             # ambiguous network errors become transient noise instead of alarms.
             self.sing_box_process.mark_live()
@@ -633,17 +622,10 @@ class ConnectionManager:
     def _tun_admin_message(self) -> str:
         """Per-OS 'TUN needs admin' message."""
         if sys.platform == "win32":
-            return (
-                "KaproTUN требует прав администратора.\n"
-                "Перезапусти от имени администратора "
-                "(правый клик по ярлыку → «Запуск от имени администратора»).")
+            return tr("err.admin_required_win")
         if sys.platform == "darwin":
-            return (
-                "KaproTUN нужен root для создания utun-интерфейса.\n"
-                "Запусти из терминала через sudo.")
-        return (
-            "KaproTUN нужен root для управления маршрутами.\n"
-            "Запусти через sudo / pkexec.")
+            return tr("err.admin_required_mac")
+        return tr("err.admin_required_linux")
 
     def current_engine(self) -> str:
         """Always the sing-box engine (the only one since v3.1.0)."""

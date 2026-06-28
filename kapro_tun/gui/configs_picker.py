@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import storage
+from ..core.i18n import tr
 from ..core.parser import ProxyConfig
 from . import flags, styles, world_map
 from .config_dialog import AddConfigDialog
@@ -31,7 +32,15 @@ from .subscription_dialog import SubscriptionDialog
 # Sort modes for the picker. Key = combo label, value = sort-key function
 # name handled in _sorted_configs.
 _SORT_SPEED, _SORT_NAME, _SORT_COUNTRY, _SORT_PROTO = range(4)
-_SORT_LABELS = ["⚡ По скорости", "Имя", "Страна", "Протокол"]
+
+
+def _sort_labels() -> list[str]:
+    return [
+        tr("picker.sort_speed"),
+        tr("picker.sort_name"),
+        tr("picker.sort_country"),
+        tr("picker.sort_proto"),
+    ]
 
 
 class _PingerThread(QThread):
@@ -138,7 +147,7 @@ class ConfigsPickerDialog(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Выбор конфига")
+        self.setWindowTitle(tr("picker.title"))
         self.resize(440, 540)
         self._configs = list(configs)
         self._current_name = current_name
@@ -154,7 +163,7 @@ class ConfigsPickerDialog(QDialog):
         layout.setSpacing(12)
 
         header_row = QHBoxLayout()
-        title = QLabel("Конфиги")
+        title = QLabel(tr("picker.header"))
         title.setObjectName("h2")
         header_row.addWidget(title)
         # Count label updates as the search filters in — "12 из 47"
@@ -164,15 +173,15 @@ class ConfigsPickerDialog(QDialog):
         header_row.addWidget(self.count_label)
         header_row.addStretch(1)
         # Sort selector — speed (default) / name / country / protocol.
-        header_row.addWidget(QLabel("Сорт:"))
+        header_row.addWidget(QLabel(tr("picker.sort_label")))
         self.sort_combo = QComboBox()
-        self.sort_combo.addItems(_SORT_LABELS)
+        self.sort_combo.addItems(_sort_labels())
         self.sort_combo.setCurrentIndex(self._sort_mode)
-        self.sort_combo.setToolTip("Сортировка списка серверов")
+        self.sort_combo.setToolTip(tr("picker.sort_tooltip"))
         self.sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         header_row.addWidget(self.sort_combo)
-        self.refresh_ping_btn = QPushButton("↻ Пинг")
-        self.refresh_ping_btn.setToolTip("Перепроверить задержку до каждого сервера")
+        self.refresh_ping_btn = QPushButton(tr("picker.ping_button"))
+        self.refresh_ping_btn.setToolTip(tr("picker.ping_tooltip"))
         self.refresh_ping_btn.clicked.connect(self._start_pings)
         header_row.addWidget(self.refresh_ping_btn)
         layout.addLayout(header_row)
@@ -184,7 +193,7 @@ class ConfigsPickerDialog(QDialog):
         # is annoying.
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(
-            "Поиск (имя, IP, протокол, порт)…"
+            tr("picker.search_placeholder")
         )
         self.search_input.setClearButtonEnabled(True)
         self.search_input.textChanged.connect(self._on_search_changed)
@@ -203,7 +212,7 @@ class ConfigsPickerDialog(QDialog):
         # Empty-state label — shown only when the search query yields
         # zero matches. Without this the list silently goes blank and
         # the user doesn't know if the picker is broken or just filtered.
-        self.empty_label = QLabel("Ничего не найдено")
+        self.empty_label = QLabel(tr("picker.empty"))
         self.empty_label.setObjectName("dim")
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setVisible(False)
@@ -212,18 +221,18 @@ class ConfigsPickerDialog(QDialog):
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
 
-        add_btn = QPushButton("＋ Добавить")
+        add_btn = QPushButton(tr("picker.add_button"))
         add_btn.clicked.connect(self._on_add)
-        sub_btn = QPushButton("📥 Подписка")
-        sub_btn.setToolTip("Импортировать сразу много конфигов из URL подписки")
+        sub_btn = QPushButton(tr("picker.sub_button"))
+        sub_btn.setToolTip(tr("picker.sub_tooltip"))
         sub_btn.clicked.connect(self._on_import_subscription)
         # Re-fetch every saved subscription and pull in new/updated servers.
-        self.refresh_subs_btn = QPushButton("🔄 Обновить")
+        self.refresh_subs_btn = QPushButton(tr("picker.refresh_button"))
         self.refresh_subs_btn.setToolTip(
-            "Заново скачать все сохранённые подписки и добавить новые серверы"
+            tr("picker.refresh_tooltip")
         )
         self.refresh_subs_btn.clicked.connect(self._on_refresh_subscriptions)
-        remove_btn = QPushButton("Удалить")
+        remove_btn = QPushButton(tr("picker.remove"))
         remove_btn.setObjectName("danger")
         remove_btn.clicked.connect(self._on_remove)
 
@@ -236,9 +245,9 @@ class ConfigsPickerDialog(QDialog):
 
         bottom_row = QHBoxLayout()
         bottom_row.addStretch(1)
-        cancel_btn = QPushButton("Закрыть")
+        cancel_btn = QPushButton(tr("picker.close"))
         cancel_btn.clicked.connect(self.reject)
-        use_btn = QPushButton("Использовать")
+        use_btn = QPushButton(tr("picker.use"))
         use_btn.setObjectName("primary")
         use_btn.clicked.connect(self._on_use)
         bottom_row.addWidget(cancel_btn)
@@ -340,7 +349,7 @@ class ConfigsPickerDialog(QDialog):
         # Count label — silent when no filter is active to avoid
         # redundant "47 из 47", informative once the user starts typing.
         if q:
-            self.count_label.setText(f"{visible} из {total}")
+            self.count_label.setText(tr("picker.count", visible=visible, total=total))
         else:
             self.count_label.setText("")
         # If the currently-selected row got hidden by the filter, move
@@ -382,7 +391,7 @@ class ConfigsPickerDialog(QDialog):
         top.addWidget(name)
         top.addStretch(1)
         if cfg.name == self._current_name:
-            active = QLabel("● активен")
+            active = QLabel(tr("picker.active_marker"))
             active.setStyleSheet(f"color:{p.ACCENT}; font-size:8pt; font-weight:600;")
             top.addWidget(active)
         v.addLayout(top)
@@ -423,9 +432,9 @@ class ConfigsPickerDialog(QDialog):
         elif value == -1:
             text, color = "UDP", p.TEXT_MUTED   # UDP-only (hy2/wg): can't TCP-probe
         elif value is None:
-            text, color = "недоступен", p.DANGER
+            text, color = tr("picker.ping_unreachable"), p.DANGER
         elif isinstance(value, int):
-            text = f"{value} мс"
+            text = tr("picker.ping_ms", ms=value)
             color = p.SUCCESS if value < 100 else (p.ACCENT if value < 250 else p.DANGER)
         else:
             text, color = "…", p.TEXT_MUTED
@@ -518,8 +527,8 @@ class ConfigsPickerDialog(QDialog):
         self._start_pings()
         QMessageBox.information(
             self,
-            "Импорт завершён",
-            f"Добавлено новых: {added}\nЗаменено существующих: {replaced}",
+            tr("picker.import_done_title"),
+            tr("picker.import_done_body", added=added, replaced=replaced),
         )
 
     def _all_subscription_urls(self) -> list[str]:
@@ -550,20 +559,19 @@ class ConfigsPickerDialog(QDialog):
         if not urls:
             QMessageBox.information(
                 self,
-                "Подписки",
-                "Нет сохранённых подписок.\n"
-                "Добавь хотя бы одну через «📥 Подписка».",
+                tr("picker.subs_title"),
+                tr("picker.no_subs_body"),
             )
             return
         self.refresh_subs_btn.setEnabled(False)
-        self.refresh_subs_btn.setText("⏳ Обновляю…")
+        self.refresh_subs_btn.setText(tr("picker.refreshing"))
         self._subs_refresher = _SubsRefreshThread(urls, parent=self)
         self._subs_refresher.done.connect(self._on_subs_refreshed)
         self._subs_refresher.start()
 
     def _on_subs_refreshed(self, agg: dict) -> None:
         self.refresh_subs_btn.setEnabled(True)
-        self.refresh_subs_btn.setText("🔄 Обновить")
+        self.refresh_subs_btn.setText(tr("picker.refresh_button"))
 
         # Merge: add new servers by name, refresh existing ones (providers
         # rotate IPs/keys). Never delete — a single failed or partial fetch
@@ -598,27 +606,27 @@ class ConfigsPickerDialog(QDialog):
 
         # Report — counts + any per-subscription failures.
         lines = [
-            f"Подписок обновлено: {agg['ok']} из {agg['total']}",
-            f"Добавлено новых серверов: {added}",
-            f"Обновлено существующих: {updated}",
+            tr("picker.subs_refreshed", ok=agg['ok'], total=agg['total']),
+            tr("picker.servers_added", added=added),
+            tr("picker.servers_updated", updated=updated),
         ]
         errors = agg["errors"]
         if errors:
             lines.append("")
-            lines.append(f"Не удалось обновить ({len(errors)}):")
+            lines.append(tr("picker.refresh_failed", n=len(errors)))
             for url, info in errors[:5]:
                 short = url if len(url) <= 48 else url[:45] + "…"
                 lines.append(f"• {short} — {info.title}")
             if len(errors) > 5:
-                lines.append(f"…и ещё {len(errors) - 5}")
-        QMessageBox.information(self, "Обновление подписок", "\n".join(lines))
+                lines.append(tr("picker.and_more", n=len(errors) - 5))
+        QMessageBox.information(self, tr("picker.refresh_report_title"), "\n".join(lines))
 
     def _on_remove(self) -> None:
         cfg = self._selected_cfg()
         if cfg is None:
             return
         confirm = QMessageBox.question(
-            self, "Удалить", f"Удалить конфиг «{cfg.name}»?"
+            self, tr("picker.remove_title"), tr("picker.remove_confirm", name=cfg.name)
         )
         if confirm != QMessageBox.Yes:
             return
@@ -630,7 +638,7 @@ class ConfigsPickerDialog(QDialog):
     def _on_use(self) -> None:
         cfg = self._selected_cfg()
         if cfg is None:
-            QMessageBox.information(self, "Конфиг", "Выбери конфиг из списка.")
+            QMessageBox.information(self, tr("picker.no_selection_title"), tr("picker.no_selection_body"))
             return
         self._chosen = cfg
         self.accept()

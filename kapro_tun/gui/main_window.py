@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from ..core.i18n import tr
 from ..core import (
     admin, app_log, autostart, sing_box_config,
     sing_box_installer, storage, updater, xray_stats,
@@ -236,7 +237,7 @@ class HomePage(QWidget):
         if city:
             place = f"{country_name} · {city}" if country_name else city
         self.public_ip_label.setText(
-            f"<span style='color:#71717a'>Ваш IP: </span>"
+            f"<span style='color:#71717a'>{tr('mw.your_ip')} </span>"
             f"<span style='color:#fafafa'>{ip}</span>"
             f"<span style='color:#71717a'>  ·  {place}</span>"
         )
@@ -265,9 +266,9 @@ class HomePage(QWidget):
     def refresh_sites_count(self) -> None:
         sites_count = len(storage.load_sites())
         self._info_label.setText(
-            f"<span style='color:#a1a1aa'>Прямые сайты — </span>"
+            f"<span style='color:#a1a1aa'>{tr('mw.direct_sites_prefix')} </span>"
             f"<span style='color:#fafafa'>{sites_count}</span> "
-            f"<span style='color:#a1a1aa'>доменов идут напрямую</span>"
+            f"<span style='color:#a1a1aa'>{tr('mw.direct_sites_suffix')}</span>"
         )
 
     def refresh_sub_banner(self) -> None:
@@ -290,13 +291,13 @@ class HomePage(QWidget):
             banner.setVisible(False)
             return
         expired = info.is_expired()
-        text = info.banner_text() or ("Подписка истекла" if expired else "Подписка скоро истечёт")
+        text = info.banner_text() or (tr("mw.sub_expired") if expired else tr("mw.sub_expiring"))
         icon = "⛔" if expired else "⏳"
         # Red for expired, amber for "running low". Inline style so it works
         # regardless of the active QSS theme.
         bg = "#7f1d1d" if expired else "#78350f"
         fg = "#fecaca" if expired else "#fde68a"
-        link = "обновить" if expired else "продлить"
+        link = tr("mw.sub_renew") if expired else tr("mw.sub_extend")
         banner.setStyleSheet(
             f"QLabel {{ background:{bg}; color:{fg}; border-radius:8px;"
             f" padding:8px 12px; font-weight:600; }}"
@@ -344,7 +345,7 @@ class SettingsPage(QWidget):
         outer.setContentsMargins(24, 20, 24, 16)
         outer.setSpacing(14)
 
-        title = QLabel("Настройки")
+        title = QLabel(tr("mw.settings_title"))
         title.setObjectName("h1")
         outer.addWidget(title)
 
@@ -355,7 +356,7 @@ class SettingsPage(QWidget):
         self._admin_label = QLabel()
         self._admin_label.setObjectName("dim")
         self._admin_row.addWidget(self._admin_label, stretch=1)
-        self._relaunch_btn = QPushButton("Перезапустить от админа")
+        self._relaunch_btn = QPushButton(tr("mw.relaunch_admin"))
         self._relaunch_btn.clicked.connect(self._on_relaunch_admin)
         self._admin_row.addWidget(self._relaunch_btn)
         admin_row_widget = QWidget()
@@ -368,20 +369,20 @@ class SettingsPage(QWidget):
         sep_startup.setFrameShape(QFrame.HLine)
         outer.addWidget(sep_startup)
 
-        startup_label = QLabel("При запуске Windows")
+        startup_label = QLabel(tr("mw.startup_section"))
         startup_label.setObjectName("h2")
         outer.addWidget(startup_label)
 
-        self.autostart_check = QCheckBox("Запускать вместе с Windows")
+        self.autostart_check = QCheckBox(tr("mw.autostart_check"))
         self.autostart_check.setChecked(autostart.is_enabled())
         self.autostart_check.toggled.connect(self._on_autostart_changed)
         outer.addWidget(self.autostart_check)
-        autostart_hint = QLabel("Запустится свёрнутым в трей.")
+        autostart_hint = QLabel(tr("mw.autostart_hint"))
         autostart_hint.setObjectName("dim")
         autostart_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(autostart_hint)
 
-        self.autoconnect_check = QCheckBox("Сразу подключаться при старте")
+        self.autoconnect_check = QCheckBox(tr("mw.autoconnect_check"))
         self.autoconnect_check.setChecked(
             bool(manager.settings.get("autoconnect_on_launch", False))
         )
@@ -393,21 +394,17 @@ class SettingsPage(QWidget):
         sep_kill.setFrameShape(QFrame.HLine)
         outer.addWidget(sep_kill)
 
-        kill_label = QLabel("Безопасность")
+        kill_label = QLabel(tr("mw.security_section"))
         kill_label.setObjectName("h2")
         outer.addWidget(kill_label)
 
-        self.kill_check = QCheckBox("Kill-switch — не пускать трафик мимо VPN")
+        self.kill_check = QCheckBox(tr("mw.kill_switch_check"))
         self.kill_check.setChecked(
             bool(manager.settings.get("kill_switch", False))
         )
         self.kill_check.toggled.connect(self._on_kill_switch_changed)
         outer.addWidget(self.kill_check)
-        kill_hint = QLabel(
-            "Если xray упадёт или VPN отвалится — туннель останется поднят, "
-            "иностранный трафик будет блокироваться вместо утечки через "
-            "реальную сеть. Только для TUN-режима."
-        )
+        kill_hint = QLabel(tr("mw.kill_switch_hint"))
         kill_hint.setObjectName("dim")
         kill_hint.setWordWrap(True)
         kill_hint.setContentsMargins(28, 0, 0, 0)
@@ -418,19 +415,13 @@ class SettingsPage(QWidget):
         # ISPs hand out public v6), apps with AAAA records leak through
         # the real ISP. Default ON because the user is almost always
         # surprised when we explain it ("я думал VPN покрывает всё").
-        self.ipv6_check = QCheckBox("Защита от IPv6-утечек")
+        self.ipv6_check = QCheckBox(tr("mw.ipv6_check"))
         self.ipv6_check.setChecked(
             bool(manager.settings.get("ipv6_leak_protection", True))
         )
         self.ipv6_check.toggled.connect(self._on_ipv6_leak_changed)
         outer.addWidget(self.ipv6_check)
-        ipv6_hint = QLabel(
-            "TUN-режим туннелирует только IPv4. Если у вашего провайдера "
-            "включён IPv6 (Билайн, МТС, Ростелеком обычно дают), v6-трафик "
-            "идёт мимо туннеля и провайдер видит куда вы заходите. Это "
-            "правило блокирует outbound IPv6 к публичным адресам через "
-            "Windows Firewall — локальная сеть (fe80::) и mDNS не трогаются."
-        )
+        ipv6_hint = QLabel(tr("mw.ipv6_hint"))
         ipv6_hint.setObjectName("dim")
         ipv6_hint.setWordWrap(True)
         ipv6_hint.setContentsMargins(28, 0, 0, 0)
@@ -442,22 +433,13 @@ class SettingsPage(QWidget):
         # bypassing the VPN. HTTP-proxy mode is the most exposed
         # (system proxy only catches TCP); TUN mode is technically safe
         # but defence-in-depth is cheap. Default ON for both.
-        self.webrtc_check = QCheckBox("Защита от WebRTC-утечек")
+        self.webrtc_check = QCheckBox(tr("mw.webrtc_check"))
         self.webrtc_check.setChecked(
             bool(manager.settings.get("webrtc_leak_protection", True))
         )
         self.webrtc_check.toggled.connect(self._on_webrtc_leak_changed)
         outer.addWidget(self.webrtc_check)
-        webrtc_hint = QLabel(
-            "Браузер через WebRTC может узнать ваш реальный IP, "
-            "запросив STUN-сервер (это используется в видеозвонках). "
-            "Любой JavaScript на странице может прочитать этот IP. "
-            "Правило блокирует outbound UDP к STUN-портам (3478, 5349, "
-            "19302, 19305-19308) через Windows Firewall. "
-            "⚠ Может сломать видеозвонки в браузере (Google Meet, "
-            "Discord-web, Jitsi). Десктопные приложения (Zoom, Teams, "
-            "Discord native) — не страдают, у них свой STUN."
-        )
+        webrtc_hint = QLabel(tr("mw.webrtc_hint"))
         webrtc_hint.setObjectName("dim")
         webrtc_hint.setWordWrap(True)
         webrtc_hint.setContentsMargins(28, 0, 0, 0)
@@ -470,17 +452,12 @@ class SettingsPage(QWidget):
         # 3 firewall rules + DNS routing actually work end-to-end.
         leak_test_row = QHBoxLayout()
         leak_test_row.setContentsMargins(28, 6, 0, 0)
-        self.leak_test_btn = QPushButton("Проверить утечки")
+        self.leak_test_btn = QPushButton(tr("mw.leak_test_btn"))
         self.leak_test_btn.clicked.connect(self._on_leak_test_clicked)
         leak_test_row.addWidget(self.leak_test_btn)
         leak_test_row.addStretch(1)
         outer.addLayout(leak_test_row)
-        leak_test_hint = QLabel(
-            "Запустит активную проверку: ваш ли это IPv4, утекает ли "
-            "IPv6 мимо туннеля, какие DNS-серверы вы используете, "
-            "проходит ли WebRTC STUN-запрос. Занимает ~10-15 секунд. "
-            "Используется только пока вы подключены к VPN."
-        )
+        leak_test_hint = QLabel(tr("mw.leak_test_hint"))
         leak_test_hint.setObjectName("dim")
         leak_test_hint.setWordWrap(True)
         leak_test_hint.setContentsMargins(28, 0, 0, 0)
@@ -491,19 +468,13 @@ class SettingsPage(QWidget):
         # show "Ваш IP: X (страна)" in the UI as visible proof the
         # tunnel works. Some users prefer zero "phone home"-looking
         # calls — let them opt out.
-        self.ip_probe_check = QCheckBox(
-            "Показывать публичный IP после подключения"
-        )
+        self.ip_probe_check = QCheckBox(tr("mw.ip_probe_check"))
         self.ip_probe_check.setChecked(
             bool(manager.settings.get("public_ip_probe", True))
         )
         self.ip_probe_check.toggled.connect(self._on_ip_probe_changed)
         outer.addWidget(self.ip_probe_check)
-        ip_probe_hint = QLabel(
-            "Один запрос к ipinfo.io через VPN-туннель после connect. "
-            "Никаких user-ID, никакого логирования. Выключи если не хочешь "
-            "никаких 'phone-home' запросов в принципе."
-        )
+        ip_probe_hint = QLabel(tr("mw.ip_probe_hint"))
         ip_probe_hint.setObjectName("dim")
         ip_probe_hint.setWordWrap(True)
         ip_probe_hint.setContentsMargins(28, 0, 0, 0)
@@ -524,15 +495,7 @@ class SettingsPage(QWidget):
         dns_label = QLabel("DNS")
         dns_label.setObjectName("h2")
         outer.addWidget(dns_label)
-        dns_note = QLabel(
-            "Используется системный DNS — тот же резолвер, что и без VPN. "
-            "Все запросы внутри туннеля идут одним надёжным путём. Отдельные "
-            "DoH-резолверы убраны: их часто режут на уровне провайдера, и из-за "
-            "этого подключение ошибочно срывалось.\n"
-            "Важно: провайдер может видеть запрашиваемые домены — DNS не "
-            "шифруется. Это плата за надёжность; содержимое трафика остаётся "
-            "внутри туннеля."
-        )
+        dns_note = QLabel(tr("mw.dns_note"))
         dns_note.setObjectName("dim")
         dns_note.setWordWrap(True)
         dns_note.setContentsMargins(28, 0, 0, 0)
@@ -546,27 +509,18 @@ class SettingsPage(QWidget):
         sep_routing.setFrameShape(QFrame.HLine)
         outer.addWidget(sep_routing)
 
-        routing_label = QLabel("Маршрутизация")
+        routing_label = QLabel(tr("mw.routing_section"))
         routing_label.setObjectName("h2")
         outer.addWidget(routing_label)
 
 
-        self.ru_direct_check = QCheckBox("Российские сайты напрямую (по гео-IP)")
+        self.ru_direct_check = QCheckBox(tr("mw.ru_direct_check"))
         self.ru_direct_check.setChecked(
             bool(manager.settings.get("route_ru_direct", False))
         )
         self.ru_direct_check.toggled.connect(self._on_route_ru_direct_changed)
         outer.addWidget(self.ru_direct_check)
-        ru_direct_hint = QLabel(
-            "Весь трафик к российским IP (geoip:ru) идёт мимо VPN, а не "
-            "только домены из встроенного списка. Полезно для банков, "
-            "госуслуг и маркетплейсов, которые блокируют заграничные IP.\n"
-            "⚠️ Это широкий обход для ВСЕХ российских IP — может задеть "
-            "приложения и CDN, у которых часть серверов в РФ (например, "
-            "Telegram): их трафик пойдёт частью мимо VPN, частью через. Если "
-            "что-то начинает глючить/виснуть — выключи. "
-            "Применяется при следующем подключении."
-        )
+        ru_direct_hint = QLabel(tr("mw.ru_direct_hint"))
         ru_direct_hint.setObjectName("dim")
         ru_direct_hint.setWordWrap(True)
         ru_direct_hint.setContentsMargins(28, 0, 0, 0)
@@ -596,11 +550,7 @@ class SettingsPage(QWidget):
         self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
         lang_row.addWidget(self.lang_combo)
         outer.addLayout(lang_row)
-        lang_hint = QLabel(
-            "Изменение применится после перезапуска KaproTUN."
-            if _i18n.current_locale() == "ru"
-            else "Changes take effect after KaproTUN restarts."
-        )
+        lang_hint = QLabel(tr("mw.lang_hint"))
         lang_hint.setObjectName("dim")
         lang_hint.setWordWrap(True)
         lang_hint.setContentsMargins(0, 0, 0, 0)
@@ -614,16 +564,16 @@ class SettingsPage(QWidget):
         # — restart is simpler than chasing every label).
         theme_row = QHBoxLayout()
         theme_row.setContentsMargins(0, 6, 0, 0)
-        theme_label_text = "Тема" if _i18n.current_locale() == "ru" else "Theme"
+        theme_label_text = tr("mw.theme_label")
         theme_label = QLabel(theme_label_text)
         theme_row.addWidget(theme_label)
         theme_row.addStretch(1)
         self.theme_combo = QComboBox()
         # Same order convention as language — Auto first (sensible default),
         # then alphabetical.
-        auto_label = "Авто (по системе)" if _i18n.current_locale() == "ru" else "Auto (system)"
-        dark_label = "Тёмная" if _i18n.current_locale() == "ru" else "Dark"
-        light_label = "Светлая" if _i18n.current_locale() == "ru" else "Light"
+        auto_label = tr("mw.theme_auto")
+        dark_label = tr("mw.theme_dark")
+        light_label = tr("mw.theme_light")
         self.theme_combo.addItem(auto_label, "auto")
         self.theme_combo.addItem(dark_label, "dark")
         self.theme_combo.addItem(light_label, "light")
@@ -635,15 +585,7 @@ class SettingsPage(QWidget):
         self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         theme_row.addWidget(self.theme_combo)
         outer.addLayout(theme_row)
-        theme_hint = QLabel(
-            "Применяется сразу. Если несколько мелких элементов "
-            "(круглая кнопка, график) остались в старой палитре — "
-            "перезапусти приложение, остальные обновятся."
-            if _i18n.current_locale() == "ru"
-            else "Applied instantly. If a few small widgets (round "
-                 "button, graph) stay in the old palette, restart "
-                 "KaproTUN to refresh them."
-        )
+        theme_hint = QLabel(tr("mw.theme_hint"))
         theme_hint.setObjectName("dim")
         theme_hint.setWordWrap(True)
         theme_hint.setContentsMargins(0, 0, 0, 0)
@@ -659,7 +601,7 @@ class SettingsPage(QWidget):
         # Subtitle doubles as a live status line: remaining traffic /
         # expiry from the provider's Subscription-Userinfo, when known.
         sub_row, self._sub_info_label = self._make_link_row(
-            "Импорт по подписке",
+            tr("mw.sub_import_title"),
             self._sub_info_text(),
             self.subscription_clicked.emit,
         )
@@ -667,16 +609,16 @@ class SettingsPage(QWidget):
 
         # --- Sites editor link ---
         sites_row, self._sites_count_label = self._make_link_row(
-            "Прямые сайты (всегда напрямую)",
-            f"{len(storage.load_sites())} доменов",
+            tr("mw.direct_sites_title"),
+            tr("mw.domains_count", n=len(storage.load_sites())),
             self.sites_clicked.emit,
         )
         outer.addLayout(sites_row)
 
         # --- Logs viewer link ---
         logs_row, _ = self._make_link_row(
-            "Логи sing-box",
-            "посмотреть последние строки",
+            tr("mw.logs_title"),
+            tr("mw.logs_hint"),
             self.logs_clicked.emit,
         )
         outer.addLayout(logs_row)
@@ -688,7 +630,7 @@ class SettingsPage(QWidget):
         sep2.setFrameShape(QFrame.HLine)
         outer.addWidget(sep2)
 
-        sb_version = sing_box_installer.get_installed_version() or "не установлен"
+        sb_version = sing_box_installer.get_installed_version() or tr("mw.not_installed")
         about = QLabel(
             f"<div style='color:#fafafa; font-weight:600'>KaproTUN v{__version__}</div>"
             f"<div style='color:#71717a; font-size:9pt'>sing-box: {sb_version}</div>"
@@ -708,7 +650,7 @@ class SettingsPage(QWidget):
         self.update_status_label.setObjectName("dim")
         self.update_status_label.setWordWrap(True)
         upd_row.addWidget(self.update_status_label, stretch=1)
-        self.check_updates_btn = QPushButton("Проверить обновления")
+        self.check_updates_btn = QPushButton(tr("mw.check_updates_btn"))
         self.check_updates_btn.clicked.connect(self._on_check_updates_clicked)
         upd_row.addWidget(self.check_updates_btn)
         outer.addLayout(upd_row)
@@ -727,7 +669,7 @@ class SettingsPage(QWidget):
         hint_lbl.setWordWrap(True)
         text_block.addWidget(hint_lbl)
         row.addLayout(text_block, stretch=1)
-        btn = QPushButton("Открыть")
+        btn = QPushButton(tr("mw.open_btn"))
         # Pin enough width that the QSS padding doesn't truncate the label
         # ("Открыт" instead of "Открыть") — Qt's sizeHint doesn't account
         # for QSS padding.
@@ -738,13 +680,13 @@ class SettingsPage(QWidget):
 
     def refresh_sites_count(self) -> None:
         if self._sites_count_label is not None:
-            self._sites_count_label.setText(f"{len(storage.load_sites())} доменов")
+            self._sites_count_label.setText(tr("mw.domains_count", n=len(storage.load_sites())))
 
     def _sub_info_text(self) -> str:
         """Subscription-row subtitle: remaining traffic / expiry (if the
         provider sent Subscription-Userinfo) plus how long ago we last
         refreshed; else the default hint."""
-        default = "одна ссылка → много конфигов от провайдера"
+        default = tr("mw.sub_default_hint")
         try:
             from ..core.subscription import SubscriptionInfo, humanize_ago
             settings = storage.load_settings()
@@ -753,7 +695,7 @@ class SettingsPage(QWidget):
             if data:
                 base = SubscriptionInfo.from_dict(data).summary() or default
             ago = humanize_ago(int(settings.get("subscription_last_refresh", 0) or 0))
-            return f"{base} · обновлено {ago}" if ago else base
+            return tr("mw.sub_updated_ago", base=base, ago=ago) if ago else base
         except Exception:
             return default
 
@@ -861,10 +803,10 @@ class SettingsPage(QWidget):
 
     def _refresh_admin_row(self) -> None:
         if admin.is_admin():
-            self._admin_label.setText("✓ Запущено с правами администратора")
+            self._admin_label.setText(tr("mw.admin_yes"))
             self._relaunch_btn.setVisible(False)
         else:
-            self._admin_label.setText("⚠ Запущено без прав администратора — TUN не сработает")
+            self._admin_label.setText(tr("mw.admin_no"))
             self._relaunch_btn.setVisible(True)
 
     def _on_relaunch_admin(self) -> None:
@@ -875,9 +817,8 @@ class SettingsPage(QWidget):
             sys.exit(0)
         else:
             QMessageBox.warning(
-                self, "Не удалось перезапустить",
-                "Ты отменил запрос UAC или произошла ошибка. "
-                "Запусти KaproTUN вручную правым кликом → «Запуск от имени администратора».",
+                self, tr("mw.relaunch_failed_title"),
+                tr("mw.relaunch_failed_body"),
             )
 
 
@@ -923,7 +864,7 @@ class _ConnectWorker(QThread):
         except VPNConnectionError as e:
             self.failed.emit(str(e))
         except Exception as e:
-            self.failed.emit(f"Неожиданная ошибка: {type(e).__name__}: {e}")
+            self.failed.emit(tr("mw.unexpected_error", err=f"{type(e).__name__}: {e}"))
 
 
 class _IpProbeWorker(QThread):
@@ -1083,16 +1024,16 @@ class LogsPage(QWidget):
         layout.setSpacing(10)
 
         header = QHBoxLayout()
-        back_btn = QPushButton("← Назад")
+        back_btn = QPushButton(tr("mw.logs_back"))
         back_btn.clicked.connect(self.back_clicked)
         header.addWidget(back_btn)
         header.addStretch(1)
-        clear_btn = QPushButton("Очистить")
+        clear_btn = QPushButton(tr("mw.logs_clear"))
         clear_btn.clicked.connect(self._on_clear)
         header.addWidget(clear_btn)
         layout.addLayout(header)
 
-        title = QLabel("Логи sing-box")
+        title = QLabel(tr("mw.logs_title"))
         title.setObjectName("h2")
         layout.addWidget(title)
 
@@ -1634,8 +1575,7 @@ class MainWindow(QMainWindow):
                     )
                     show_toast(
                         self,
-                        "VPN упал. Kill-switch блокирует утечку. "
-                        "Нажми «ВКЛЮЧИТЬ» для переподключения.",
+                        tr("mw.toast_killswitch_hold"),
                         kind="error",
                         duration_ms=10000,
                     )
@@ -1661,7 +1601,7 @@ class MainWindow(QMainWindow):
                         )
                         show_toast(
                             self,
-                            f"VPN упал. Переподключение #{self._reconnect_attempts}…",
+                            tr("mw.toast_reconnecting", n=self._reconnect_attempts),
                             kind="info", duration_ms=delay * 1000,
                         )
                         # Tear down xray/proxy state but DON'T clear self._active
@@ -1680,8 +1620,7 @@ class MainWindow(QMainWindow):
                         )
                         show_toast(
                             self,
-                            f"VPN не поднимается ({self._reconnect_max} попыток). "
-                            f"Переподключи вручную.",
+                            tr("mw.toast_reconnect_failed", n=self._reconnect_max),
                             kind="error", duration_ms=10000,
                         )
                         self._crash_notified = True
@@ -1740,7 +1679,7 @@ class MainWindow(QMainWindow):
                 self.tray.set_state("connecting", active_name)
             elif (self._active_config is not None
                     and self._reconnect_attempts >= self._reconnect_max):
-                self.home_page.set_state(connection_state.ERROR, "VPN не поднялся")
+                self.home_page.set_state(connection_state.ERROR, tr("mw.state_vpn_failed"))
                 self.tray.set_state("idle", active_name)
             else:
                 self.home_page.set_state(connection_state.DISCONNECTED)
@@ -1819,8 +1758,8 @@ class MainWindow(QMainWindow):
             return
         if self._active_config is None:
             QMessageBox.information(
-                self, "Нет конфига",
-                "Сначала добавь конфиг — нажми «+» в нижней панели или тапни карточку.",
+                self, tr("mw.no_config_title"),
+                tr("mw.no_config_body"),
             )
             return
         # User-initiated connect → clear any auto-recovery lockout + storm
@@ -1875,7 +1814,7 @@ class MainWindow(QMainWindow):
         )
         # On-disk lifecycle line — no server name/secret.
         app_log.log(f"[connect] mode=TUN engine={self.manager.current_engine()}")
-        show_toast(self, f"Подключено к «{self._active_config.name}»", kind="success")
+        show_toast(self, tr("mw.toast_connected", name=self._active_config.name), kind="success")
         self._refresh_home()
         # v1.14.3: show country + map immediately based on the config
         # name's flag emoji. No waiting for the 2-second probe — user
@@ -2002,7 +1941,7 @@ class MainWindow(QMainWindow):
                 f"[!] Попытка #{self._reconnect_attempts} не удалась: {msg}"
             )
             return
-        QMessageBox.critical(self, "Не удалось подключиться", msg)
+        QMessageBox.critical(self, tr("mw.connect_failed_title"), msg)
 
     def _arm_reconnect(self, reason: str, attempt: int, total: int) -> bool:
         """Gate + log EVERY auto-reconnect initiation. Returns True if the
@@ -2051,8 +1990,7 @@ class MainWindow(QMainWindow):
         line = f"[{reason_tag}] {detail}"
         self.logs_page.append("[!] " + line)
         app_log.log(line)
-        show_toast(self, "VPN остановлен. Автовосстановление прекращено — "
-                   "переподключи вручную.", kind="error", duration_ms=12000)
+        show_toast(self, tr("mw.toast_emergency_stop"), kind="error", duration_ms=12000)
         self._refresh_home()
 
     def _do_auto_reconnect(self) -> None:
@@ -2107,8 +2045,7 @@ class MainWindow(QMainWindow):
                 )
                 show_toast(
                     self,
-                    "VPN: DNS не работает. Отключено, сеть восстановлена. "
-                    "Переподключи вручную.",
+                    tr("mw.toast_dns_failed_stop"),
                     kind="error", duration_ms=10000,
                 )
                 self._crash_notified = True
@@ -2130,7 +2067,7 @@ class MainWindow(QMainWindow):
         )
         show_toast(
             self,
-            f"DNS не работает — восстановление #{self._reconnect_attempts}…",
+            tr("mw.toast_dns_recover", n=self._reconnect_attempts),
             kind="info", duration_ms=delay * 1000,
         )
         # Same tear-down-but-keep-config dance as the crash path, so the timer
@@ -2189,8 +2126,7 @@ class MainWindow(QMainWindow):
                   f"(reason=socket_exhaustion)")
             self.logs_page.append("[!] " + em)
             app_log.log(em)
-            show_toast(self, "Слишком много локальных соединений — "
-                       "переподключаюсь один раз…", kind="info", duration_ms=4000)
+            show_toast(self, tr("mw.toast_socket_exhaust"), kind="info", duration_ms=4000)
             saved = self._active_config
             self.manager.disconnect()
             self._active_config = saved
@@ -2327,8 +2263,7 @@ class MainWindow(QMainWindow):
                        f"вручную, когда удобно.")
                 self.logs_page.append(msg)
                 app_log.log(msg)
-                show_toast(self, "VPN: высокое потребление памяти, "
-                           "авто-восстановление исчерпано. Переподключи вручную.",
+                show_toast(self, tr("mw.toast_mem_exhausted"),
                            kind="error", duration_ms=10000)
                 self._mem_heal_exhausted_notified = True
             return
@@ -2372,7 +2307,7 @@ class MainWindow(QMainWindow):
         if not self._arm_reconnect(f"memory_{severity}",
                                    self._mem_heal_count, self._mem_heal_max):
             return
-        show_toast(self, f"Сброс памяти VPN — переподключение #{self._mem_heal_count}…",
+        show_toast(self, tr("mw.toast_mem_reset", n=self._mem_heal_count),
                    kind="info", duration_ms=4000)
         saved = self._active_config
         self.manager.disconnect()
@@ -2401,7 +2336,7 @@ class MainWindow(QMainWindow):
         self._connected_at = 0.0
         self.logs_page.append("[*] Отключено, системный прокси восстановлен")
         app_log.log(f"[disconnect] reason={reason}")
-        show_toast(self, "Отключено", kind="info")
+        show_toast(self, tr("mw.toast_disconnected"), kind="info")
         self._refresh_home()
 
     # --- update checking --------------------------------------------------
@@ -2410,7 +2345,7 @@ class MainWindow(QMainWindow):
         if self._update_worker is not None and self._update_worker.isRunning():
             return
         if interactive:
-            self.settings_page.set_update_status("Проверяю…", accent=False)
+            self.settings_page.set_update_status(tr("mw.update_checking"), accent=False)
         self._update_worker = _UpdateCheckWorker(parent=self)
         self._update_worker.update_available.connect(
             lambda info: self._on_update_available(info, interactive)
@@ -2422,16 +2357,16 @@ class MainWindow(QMainWindow):
 
     def _on_update_available(self, info: "updater.UpdateInfo",
                               interactive: bool) -> None:
-        msg = f"Доступна KaproTUN v{info.version}"
+        msg = tr("mw.update_available", version=info.version)
         self.settings_page.set_update_status(
-            f"{msg} — клик чтобы обновить", accent=True,
+            tr("mw.update_available_status", msg=msg), accent=True,
         )
         # Hook the Settings "Update" button to the in-app updater dialog.
         try:
             self.settings_page.check_updates_btn.clicked.disconnect()
         except (TypeError, RuntimeError):
             pass
-        self.settings_page.check_updates_btn.setText(f"Обновить до v{info.version}")
+        self.settings_page.check_updates_btn.setText(tr("mw.update_to_version", version=info.version))
         self.settings_page.check_updates_btn.clicked.connect(
             lambda _checked=False, i=info: self._open_updater(i)
         )
@@ -2440,7 +2375,7 @@ class MainWindow(QMainWindow):
         if not interactive:
             show_toast(
                 self,
-                f"{msg} — открой Настройки чтобы обновить одним кликом",
+                tr("mw.update_toast", msg=msg),
                 kind="info",
                 duration_ms=8000,
             )
@@ -2448,7 +2383,7 @@ class MainWindow(QMainWindow):
     def _on_no_update(self, interactive: bool) -> None:
         if interactive:
             self.settings_page.set_update_status(
-                f"У тебя последняя версия (v{__version__})", accent=False,
+                tr("mw.update_latest", version=__version__), accent=False,
             )
 
     def _open_updater(self, info: "updater.UpdateInfo") -> None:
@@ -2504,7 +2439,7 @@ class MainWindow(QMainWindow):
         self.manager.update_settings(last_config_name=new_cfg.name)
         self._goto("home")
         self._refresh_home()
-        show_toast(self, f"Конфиг «{new_cfg.name}» добавлен", kind="success")
+        show_toast(self, tr("mw.toast_config_added", name=new_cfg.name), kind="success")
 
     def _on_import_subscription(self) -> None:
         from .subscription_dialog import SubscriptionDialog
@@ -2537,8 +2472,7 @@ class MainWindow(QMainWindow):
         self._refresh_home()
         show_toast(
             self,
-            f"Импорт: +{added} новых, ↻{replaced} обновлено · "
-            f"пингую серверы…",
+            tr("mw.toast_import_done", added=added, replaced=replaced),
             kind="success",
             duration_ms=4000,
         )
@@ -2560,7 +2494,7 @@ class MainWindow(QMainWindow):
             valid = [(n, ms) for n, ms in results.items() if ms is not None]
             if not valid:
                 show_toast(
-                    self, "Ни один из импортированных серверов не отвечает",
+                    self, tr("mw.toast_no_servers_respond"),
                     kind="error", duration_ms=5000,
                 )
                 return
@@ -2573,8 +2507,7 @@ class MainWindow(QMainWindow):
             if self.manager.is_connected():
                 show_toast(
                     self,
-                    f"Самый быстрый: {fastest_name[:40]} ({fastest_ms} мс). "
-                    f"Сменишь сам.",
+                    tr("mw.toast_fastest_connected", name=fastest_name[:40], ms=fastest_ms),
                     kind="info", duration_ms=6000,
                 )
                 return
@@ -2584,7 +2517,7 @@ class MainWindow(QMainWindow):
             short = fastest_name[:40] + ("…" if len(fastest_name) > 40 else "")
             show_toast(
                 self,
-                f"Выбран самый быстрый: {short} ({fastest_ms} мс)",
+                tr("mw.toast_fastest_picked", name=short, ms=fastest_ms),
                 kind="success", duration_ms=6000,
             )
 
@@ -2616,12 +2549,12 @@ class MainWindow(QMainWindow):
         if self.manager.is_connected():
             show_toast(
                 self,
-                "Список сайтов обновлён. Применится при следующем подключении.",
+                tr("mw.toast_sites_updated_apply"),
                 kind="info",
                 duration_ms=5000,
             )
         else:
-            show_toast(self, "Список сайтов обновлён", kind="success")
+            show_toast(self, tr("mw.toast_sites_updated"), kind="success")
 
     # --- tray + window lifecycle ------------------------------------------
 
@@ -2638,9 +2571,8 @@ class MainWindow(QMainWindow):
             # Show a hint once so the user knows the app is still running
             if not getattr(self, "_close_hint_shown", False):
                 self.tray.show_message(
-                    "KaproTUN свёрнут в трей",
-                    "Программа работает в фоне. Чтобы полностью выйти — "
-                    "правый клик по иконке в трее → Выход.",
+                    tr("mw.tray_minimized_title"),
+                    tr("mw.tray_minimized_body"),
                 )
                 self._close_hint_shown = True
         else:
@@ -2675,9 +2607,11 @@ class MainWindow(QMainWindow):
         self.configs = storage.load_configs()
         self._refresh_home()
         self._refresh_tray_pings()
+        msg = (tr("mw.toast_sub_refreshed_one") if count == 1
+               else tr("mw.toast_sub_refreshed_many", n=count))
         show_toast(
             self,
-            f"Подписка обновилась: +{count} нов{'ый' if count == 1 else 'ых'} сервер{'' if count == 1 else 'ов' if count > 4 else 'а'}",
+            msg,
             kind="success", duration_ms=5000,
         )
 

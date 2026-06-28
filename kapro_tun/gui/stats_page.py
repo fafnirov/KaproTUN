@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import bandwidth_history
+from ..core.i18n import tr
 from ..core.xray_stats import format_bytes as format_bytes_session
 from ..core.xray_stats import format_rate
 from . import styles
@@ -71,7 +72,7 @@ class StatsPage(QWidget):
 
         # ============ Page title =========================================
 
-        title = QLabel("Статистика")
+        title = QLabel(tr("stats.title"))
         title.setObjectName("h1")
         outer.addWidget(title)
 
@@ -82,7 +83,7 @@ class StatsPage(QWidget):
         live_head_row = QHBoxLayout()
         live_head_row.setContentsMargins(0, 0, 0, 0)
         live_head_row.setSpacing(8)
-        live_head = QLabel("Сейчас")
+        live_head = QLabel(tr("stats.live_head"))
         live_head.setObjectName("h2")
         live_head_row.addWidget(live_head)
         live_head_row.addStretch(1)
@@ -91,7 +92,7 @@ class StatsPage(QWidget):
         # ACCENT (connected) and TEXT_MUTED (idle) via setStyleSheet
         # at runtime. Single QLabel, not two, so the layout doesn't
         # shift on state change.
-        self._status_label = QLabel("○ Не подключено")
+        self._status_label = QLabel("○ " + tr("stats.disconnected"))
         self._status_label.setObjectName("liveStatus")
         live_head_row.addWidget(self._status_label)
         outer.addLayout(live_head_row)
@@ -103,8 +104,8 @@ class StatsPage(QWidget):
         rates_row = QHBoxLayout()
         rates_row.setSpacing(24)
         rates_row.setContentsMargins(0, 4, 0, 0)
-        rates_row.addWidget(self._build_rate_block("↓ Скачивание", "down"))
-        rates_row.addWidget(self._build_rate_block("↑ Отправка", "up"))
+        rates_row.addWidget(self._build_rate_block("↓ " + tr("stats.download"), "down"))
+        rates_row.addWidget(self._build_rate_block("↑ " + tr("stats.upload"), "up"))
         rates_row.addStretch(1)
         outer.addLayout(rates_row)
 
@@ -117,7 +118,7 @@ class StatsPage(QWidget):
 
         # Session totals — small dim line. "Session" = since the last
         # connect (xray's cumulative counters reset on every spawn).
-        self._session_label = QLabel("За сессию: —")
+        self._session_label = QLabel(tr("stats.session_empty"))
         self._session_label.setObjectName("dim")
         outer.addWidget(self._session_label)
 
@@ -131,7 +132,7 @@ class StatsPage(QWidget):
         outer.addWidget(divider)
 
         # ============ 24h block ==========================================
-        h24_head = QLabel("За последние 24 часа")
+        h24_head = QLabel(tr("stats.h24_head"))
         h24_head.setObjectName("h2")
         outer.addWidget(h24_head)
 
@@ -139,9 +140,9 @@ class StatsPage(QWidget):
         # explains "when", these explain "how much".
         totals_row = QHBoxLayout()
         totals_row.setSpacing(24)
-        self.down_label = QLabel("Скачано: —")
+        self.down_label = QLabel(tr("stats.downloaded_empty"))
         self.down_label.setTextFormat(Qt.RichText)
-        self.up_label = QLabel("Отправлено: —")
+        self.up_label = QLabel(tr("stats.uploaded_empty"))
         self.up_label.setTextFormat(Qt.RichText)
         totals_row.addWidget(self.down_label)
         totals_row.addWidget(self.up_label)
@@ -158,11 +159,7 @@ class StatsPage(QWidget):
 
         # Note about gaps in the chart — preempts "why is there empty
         # space in the middle?" support questions.
-        note = QLabel(
-            "Пустые промежутки на графике — это время, когда VPN был "
-            "отключён или приложение закрыто. Мы измеряем трафик только "
-            "пока туннель активен."
-        )
+        note = QLabel(tr("stats.gaps_note"))
         note.setObjectName("dim")
         note.setWordWrap(True)
         outer.addWidget(note)
@@ -174,7 +171,7 @@ class StatsPage(QWidget):
         # paranoid users who don't want to dig for the sqlite file.
         clear_row = QHBoxLayout()
         clear_row.addStretch(1)
-        self.clear_btn = QPushButton("Очистить историю")
+        self.clear_btn = QPushButton(tr("stats.clear_history"))
         self.clear_btn.setObjectName("danger")
         self.clear_btn.clicked.connect(self._on_clear_clicked)
         clear_row.addWidget(self.clear_btn)
@@ -227,14 +224,14 @@ class StatsPage(QWidget):
 
     def _apply_connected_styling(self) -> None:
         """Status badge → amber bullet + 'Подключено'."""
-        self._status_label.setText("● Подключено")
+        self._status_label.setText("● " + tr("stats.connected"))
         self._status_label.setStyleSheet(
             f"color: {styles.ACCENT}; font-size: 10pt; font-weight: 500;"
         )
 
     def _apply_disconnected_styling(self) -> None:
         """Status badge → muted bullet + 'Не подключено'."""
-        self._status_label.setText("○ Не подключено")
+        self._status_label.setText("○ " + tr("stats.disconnected"))
         self._status_label.setStyleSheet(
             f"color: {styles.TEXT_MUTED}; font-size: 10pt;"
         )
@@ -248,7 +245,7 @@ class StatsPage(QWidget):
         self._up_rate_label.setStyleSheet(
             f"color: {styles.TEXT_MUTED}; font-size: 22pt; font-weight: 600;"
         )
-        self._session_label.setText("За сессию: —")
+        self._session_label.setText(tr("stats.session_empty"))
 
     # ----- LIVE feed (pushed from MainWindow) ------------------------------
     # Split into two channels:
@@ -291,7 +288,7 @@ class StatsPage(QWidget):
             )
             self._down_rate_label.setText(format_rate(0))
             self._up_rate_label.setText(format_rate(0))
-            self._session_label.setText("За сессию: считаем…")
+            self._session_label.setText(tr("stats.session_counting"))
         else:
             self._apply_disconnected_styling()
             self.live_sparkline.reset()
@@ -318,8 +315,11 @@ class StatsPage(QWidget):
         self._down_rate_label.setText(format_rate(down_bps))
         self._up_rate_label.setText(format_rate(up_bps))
         self._session_label.setText(
-            f"За сессию: ↓ {format_bytes_session(down_total)}  ·  "
-            f"↑ {format_bytes_session(up_total)}"
+            tr(
+                "stats.session_totals",
+                down=format_bytes_session(down_total),
+                up=format_bytes_session(up_total),
+            )
         )
         self.live_sparkline.add_sample(up_bps, down_bps)
 
@@ -340,12 +340,12 @@ class StatsPage(QWidget):
         """Re-read 24h totals and tell the chart to repaint."""
         up_bytes, down_bytes = bandwidth_history.totals_24h()
         self.down_label.setText(
-            f"<span style='color:#a1a1aa'>Скачано: </span>"
+            f"<span style='color:#a1a1aa'>{tr('stats.downloaded_label')} </span>"
             f"<span style='font-size:14pt; font-weight:600'>"
             f"{format_bytes(down_bytes)}</span>"
         )
         self.up_label.setText(
-            f"<span style='color:#a1a1aa'>Отправлено: </span>"
+            f"<span style='color:#a1a1aa'>{tr('stats.uploaded_label')} </span>"
             f"<span style='font-size:14pt; font-weight:600'>"
             f"{format_bytes(up_bytes)}</span>"
         )
@@ -367,9 +367,8 @@ class StatsPage(QWidget):
     def _on_clear_clicked(self) -> None:
         reply = QMessageBox.question(
             self,
-            "Очистить статистику",
-            "Удалить всю историю трафика за последние 24 часа? "
-            "Это действие необратимо.",
+            tr("stats.clear_dialog_title"),
+            tr("stats.clear_dialog_body"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
