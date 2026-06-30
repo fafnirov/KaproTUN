@@ -287,6 +287,15 @@ def _run_app() -> int:
     # actually visible. Without this, fast machines flash it for 1 frame.
     QTimer.singleShot(600 if not start_minimized else 0, reveal)
 
+    # Runtime crash guard: from here on we're in the Qt event loop, where an
+    # unhandled exception in a slot/timer/QThread callback would otherwise make
+    # PySide6 ABORT the whole process (the "app vanishes after a few minutes"
+    # class). Install it AFTER startup so genuine startup failures still reach
+    # main()'s crash dialog by normal stack unwinding — sys.excepthook only
+    # governs the event-loop phase.
+    from .core import runtime_guard
+    runtime_guard.install()
+
     return app.exec()
 
 

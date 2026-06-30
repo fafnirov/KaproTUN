@@ -2907,11 +2907,51 @@ def _main_safe_mode_wiring() -> None:
         _main._run_app, _ch._show_dialog, _paths.logs_dir = orig_run, orig_dialog, orig_logs
 
 
+def _runtime_guard_keeps_app_alive() -> None:
+    """v3.2.1: the runtime guard must (1) install a sys.excepthook that SWALLOWS
+    a normal exception without re-raising — this is what stops PySide6 from
+    aborting the whole process on an unhandled slot/timer/QThread exception
+    ('app vanishes after a few minutes'); (2) route KeyboardInterrupt/SystemExit
+    to the original hook so Ctrl+C / explicit exit still work; (3) be wired into
+    main() right before app.exec()."""
+    import sys as _sys
+    from kapro_tun.core import runtime_guard as _rg
+    _rg.install()
+    if _sys.excepthook is not _rg._excepthook:
+        raise AssertionError("runtime_guard.install() must replace sys.excepthook")
+    _rg.install()  # idempotent — must not raise or re-wrap
+    # A normal exception must be swallowed (no re-raise → event loop survives).
+    try:
+        raise ValueError("smoke-runtime-boom")
+    except ValueError:
+        et, ev, tb = _sys.exc_info()
+    _rg._excepthook(et, ev, tb)  # must NOT raise
+    # SystemExit/KeyboardInterrupt must reach the ORIGINAL hook, not be swallowed.
+    routed = {"hit": False}
+    _rg._orig_excepthook = lambda t, v, b: routed.__setitem__("hit", t is SystemExit)
+    try:
+        raise SystemExit(0)
+    except SystemExit:
+        et, ev, tb = _sys.exc_info()
+    _rg._excepthook(et, ev, tb)
+    if not routed["hit"]:
+        raise AssertionError("SystemExit must pass through to the original hook")
+    # main() must install the guard before entering the event loop.
+    import inspect as _ins
+    from kapro_tun import main as _main
+    src = _ins.getsource(_main._run_app)
+    if "runtime_guard" not in src or "install()" not in src:
+        raise AssertionError("main()._run_app must call runtime_guard.install() before app.exec()")
+    if src.index("runtime_guard") > src.rindex("app.exec"):
+        raise AssertionError("runtime_guard.install() must come BEFORE app.exec()")
+
+
 check("atomic write: round-trip + no .tmp leftover", _atomic_round_trip)
 check("crash_handler: writes crash log",             _crash_log_written)
 check("crash_handler: quarantine settings",          _quarantine_moves_settings)
 check("crash_handler: dialog builds (3 buttons)",    _crash_dialog_builds)
 check("main(): startup crash -> logged + exit 1",    _main_safe_mode_wiring)
+check("runtime_guard: swallows slot exc, app stays alive (v3.2.1)", _runtime_guard_keeps_app_alive)
 
 
 # ---------------------------------------------------------------------------
