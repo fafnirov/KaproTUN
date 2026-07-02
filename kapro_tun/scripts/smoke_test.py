@@ -5351,19 +5351,23 @@ def _v3_ru_direct_default_and_turbo_stack() -> None:
         raise AssertionError("high_speed must default to False (gvisor, universally works)")
     # geoip:ru is only added when the CIDR cache is present; the smoke sandbox
     # has none, so stub it to a large fixed list to test the rule deterministically.
-    _o_ru = sb._ru_cidrs
+    # Turbo's kernel 'mixed' stack is gated to NON-Linux (Windows/macOS) — on
+    # Linux it stays gvisor. Pin _IS_LINUX=False so the stack switch is testable
+    # on any CI OS (the smoke runs on Linux in GitHub Actions).
+    _o_ru, _o_linux = sb._ru_cidrs, sb._IS_LINUX
     sb._ru_cidrs = lambda: [f"10.{i // 256}.{i % 256}.0/24" for i in range(2000)]
+    sb._IS_LINUX = False
     try:
         gv = sb.build_config(parsed["vless"], ["gosuslugi.ru"], server_ip="1.2.3.4",
                              route_ru_direct=True, high_speed=False)
         mx = sb.build_config(parsed["vless"], ["gosuslugi.ru"], server_ip="1.2.3.4",
                              route_ru_direct=True, high_speed=True)
     finally:
-        sb._ru_cidrs = _o_ru
+        sb._ru_cidrs, sb._IS_LINUX = _o_ru, _o_linux
     if gv["inbounds"][0]["stack"] != "gvisor":
         raise AssertionError("default TUN stack must be gvisor")
     if mx["inbounds"][0]["stack"] != "mixed":
-        raise AssertionError("high_speed=True must select the kernel 'mixed' stack")
+        raise AssertionError("high_speed=True must select the kernel 'mixed' stack (non-Linux)")
     rules = gv["route"]["rules"]
     i_forced = next((i for i, r in enumerate(rules)
                      if r.get("outbound") == "proxy" and r.get("domain_suffix")), None)
