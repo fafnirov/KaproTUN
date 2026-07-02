@@ -2954,6 +2954,48 @@ check("main(): startup crash -> logged + exit 1",    _main_safe_mode_wiring)
 check("runtime_guard: swallows slot exc, app stays alive (v3.2.1)", _runtime_guard_keeps_app_alive)
 
 
+def _net_conflict_detector() -> None:
+    """v3.3.1: detect_running_conflicts() must (1) always return a list and
+    never raise (it runs on the connect path), and (2) actually match a known
+    network-hijacking app (Meta Horizon Link / Oculus) by process-name
+    substring when one is present."""
+    from kapro_tun.core import net_conflicts as _nc
+    live = _nc.detect_running_conflicts()
+    if not isinstance(live, list):
+        raise AssertionError("detect_running_conflicts must return a list")
+    # Meta Horizon Link must be in the known set + detectable by its process names.
+    meta = next((d for d in _nc._KNOWN_CONFLICTS
+                 if "Meta" in d or "Oculus" in d), None)
+    if meta is None:
+        raise AssertionError("Meta Horizon Link / Oculus must be a known conflict")
+
+    class _FakeProc:
+        def __init__(self, name):
+            self.info = {"name": name}
+
+    class _FakePsutil:
+        @staticmethod
+        def process_iter(_fields):
+            return [_FakeProc("explorer.exe"), _FakeProc("OVRServer_x64.exe")]
+
+    import sys as _sys
+    _real = _sys.modules.get("psutil")
+    _sys.modules["psutil"] = _FakePsutil
+    try:
+        got = _nc.detect_running_conflicts()
+    finally:
+        if _real is not None:
+            _sys.modules["psutil"] = _real
+        else:
+            _sys.modules.pop("psutil", None)
+    if meta not in got:
+        raise AssertionError(f"OVRServer_x64.exe must be flagged as {meta!r}, got {got}")
+
+
+check("net-conflict: detects Meta Horizon Link / Oculus, never raises (v3.3.1)",
+      _net_conflict_detector)
+
+
 # ---------------------------------------------------------------------------
 # Test 14 — subscription: error classification + stub detection (v1.16.14)
 # ---------------------------------------------------------------------------

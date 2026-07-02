@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..core.i18n import tr
 from ..core import (
-    admin, app_log, autostart, sing_box_config,
+    admin, app_log, autostart, net_conflicts, sing_box_config,
     sing_box_installer, storage, updater, xray_stats,
 )
 from ..core import controller as _controller
@@ -1798,6 +1798,26 @@ class MainWindow(QMainWindow):
         # Soft-required — TUN works without it but RU split-routing is less
         # comprehensive. Don't gate connection on it.
         ensure_geoip_ru_cached(self)
+
+        # Warn about third-party apps that hijack Windows networking (virtual
+        # adapters / packet filters) and can silently eat all VPN traffic — the
+        # classic "connected but nothing loads" that looks like OUR bug. We
+        # can't override another app's network driver from userspace, so surface
+        # the culprit instead of letting the user hunt a phantom VPN failure.
+        try:
+            conflicts = net_conflicts.detect_running_conflicts()
+        except Exception:
+            conflicts = []
+        if conflicts:
+            names = ", ".join(conflicts)
+            app_log.log(f"[net-conflict] running: {names} (can break VPN routing)")
+            self.logs_page.append(
+                f"[!] Обнаружено сетевое приложение «{names}» — оно "
+                f"перехватывает трафик и может ломать VPN (нет интернета при "
+                f"«Подключено»). Закрой его, если сайты не грузятся."
+            )
+            show_toast(self, tr("mw.net_conflict_warn", app=names),
+                       kind="error", duration_ms=14000)
 
         # Kick off the worker BEFORE flipping UI state — that way the
         # set_state call starts its burst + pulse animation on a Qt event
