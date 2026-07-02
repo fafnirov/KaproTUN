@@ -5335,6 +5335,49 @@ check("disconnect/rollback stops sing-box → system DNS/routes restored",
       _v3_disconnect_restores_dns)
 check("ipv6: captured + rejected, gvisor stack, safe MTU/EIN (v3.0.13)",
       _v3_ipv6_capture_and_throughput)
+
+
+def _v3_ru_direct_default_and_turbo_stack() -> None:
+    """v3.3.0: RU-direct is now the DEFAULT (RU IP → real IP, everything else →
+    VPN), and the Turbo toggle switches the TUN network stack to the kernel
+    'mixed' path; gvisor stays the safe default. Force-proxy suffixes must still
+    precede the geoip:ru direct rule so YouTube/OpenAI on a RU-geoip CDN IP keep
+    tunnelling instead of leaking direct."""
+    from kapro_tun.core import sing_box_config as sb
+    from kapro_tun.core import storage as _st
+    if _st.DEFAULT_SETTINGS.get("route_ru_direct") is not True:
+        raise AssertionError("route_ru_direct must default to True (RU IP bypasses the VPN)")
+    if _st.DEFAULT_SETTINGS.get("high_speed") is not False:
+        raise AssertionError("high_speed must default to False (gvisor, universally works)")
+    # geoip:ru is only added when the CIDR cache is present; the smoke sandbox
+    # has none, so stub it to a large fixed list to test the rule deterministically.
+    _o_ru = sb._ru_cidrs
+    sb._ru_cidrs = lambda: [f"10.{i // 256}.{i % 256}.0/24" for i in range(2000)]
+    try:
+        gv = sb.build_config(parsed["vless"], ["gosuslugi.ru"], server_ip="1.2.3.4",
+                             route_ru_direct=True, high_speed=False)
+        mx = sb.build_config(parsed["vless"], ["gosuslugi.ru"], server_ip="1.2.3.4",
+                             route_ru_direct=True, high_speed=True)
+    finally:
+        sb._ru_cidrs = _o_ru
+    if gv["inbounds"][0]["stack"] != "gvisor":
+        raise AssertionError("default TUN stack must be gvisor")
+    if mx["inbounds"][0]["stack"] != "mixed":
+        raise AssertionError("high_speed=True must select the kernel 'mixed' stack")
+    rules = gv["route"]["rules"]
+    i_forced = next((i for i, r in enumerate(rules)
+                     if r.get("outbound") == "proxy" and r.get("domain_suffix")), None)
+    i_geoip = next((i for i, r in enumerate(rules)
+                    if r.get("outbound") == "direct"
+                    and isinstance(r.get("ip_cidr"), list) and len(r["ip_cidr"]) > 1000), None)
+    if i_geoip is None:
+        raise AssertionError("route_ru_direct must add a geoip:ru direct rule")
+    if i_forced is None or i_forced >= i_geoip:
+        raise AssertionError("force-proxy suffixes must come BEFORE the geoip:ru direct rule")
+
+
+check("config: RU-direct default ON + Turbo→mixed kernel stack (v3.3.0)",
+      _v3_ru_direct_default_and_turbo_stack)
 check("ipv6: sing-box engine skips the netsh firewall block (v3.0.9)",
       _v3_singbox_skips_firewall_ipv6_block)
 check("firewall_sweep: matches KaproTUN-/KaproVPN- prefixes; win_job safe no-op (v3.0.9)",

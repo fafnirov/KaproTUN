@@ -521,7 +521,10 @@ class ConnectionManager:
         self._log("[*] Движок: sing-box (нативный TUN, без tun2socks/SOCKS-моста)")
         # v3.1.1: DNS is always the system resolver — no dns_option / leak toggle.
         block_ads = bool(self.settings.get("block_ads", False))
-        route_ru_direct = bool(self.settings.get("route_ru_direct", False))
+        # v3.3.0: RU-direct defaults ON (RU IP → real IP, else → VPN); high_speed
+        # (Turbo kernel stack) defaults OFF.
+        route_ru_direct = bool(self.settings.get("route_ru_direct", True))
+        high_speed = bool(self.settings.get("high_speed", False))
 
         # Honest ONE-TIME notice (not on every reconnect) that ad-block is
         # legacy-only — see _note_singbox_adblock_once().
@@ -533,7 +536,7 @@ class ConnectionManager:
         cfg_path = sing_box_config.write_config(
             config, direct_domains, server_ip=server_ip,
             block_ads=block_ads, route_ru_direct=route_ru_direct,
-            on_log=self._log,
+            high_speed=high_speed, on_log=self._log,
         )
         ok, msg = sing_box_config.check_config(cfg_path)
         if not ok:

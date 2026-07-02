@@ -257,12 +257,17 @@ def build_config(
     dns_leak_protection: bool = True,
     block_ads: bool = False,
     route_ru_direct: bool = False,
+    high_speed: bool = False,
     log_level: str = "warn",
     on_log=None,
 ) -> dict[str, Any]:
     """Full sing-box config dict for TUN mode. Raises UnsupportedBySingBox if
     the proxy can't be faithfully reproduced. `on_log` (optional) receives
     human notices about limitations (e.g. ad-block).
+
+    `high_speed` (v3.3.0): False → gvisor stack (userspace, universally works);
+    True → "mixed" stack (kernel TCP, much faster, but carries no traffic on
+    some Windows setups). Opt-in "Turbo" — see TUN_STACK.
 
     `dns_option` / `dns_leak_protection` are accepted for call-site
     compatibility but IGNORED as of v3.1.1: DNS is always the system resolver
@@ -342,7 +347,10 @@ def build_config(
         "mtu": TUN_MTU,
         "auto_route": not _IS_LINUX,
         "strict_route": False,
-        "stack": TUN_STACK,
+        # v3.3.0 Turbo: opt into the kernel-TCP "mixed" stack for much higher
+        # throughput. Default stays gvisor (TUN_STACK) — universally works. Not
+        # applied on Linux, whose manual-route path is tuned around gvisor.
+        "stack": ("mixed" if (high_speed and not _IS_LINUX) else TUN_STACK),
         # Full-cone NAT for the gVisor UDP path: QUIC/HTTP3 (YouTube/Google video)
         # and WebRTC reuse one mapping instead of per-destination sessions. On
         # Linux this is also REQUIRED for plain UDP (incl. DNS) to traverse the
@@ -394,6 +402,7 @@ def write_config(
     dns_leak_protection: bool = True,
     block_ads: bool = False,
     route_ru_direct: bool = False,
+    high_speed: bool = False,
     on_log=None,
 ) -> str:
     """Build + atomically write the runtime config (user-only perms; it carries
@@ -403,7 +412,7 @@ def write_config(
         proxy, direct_domains,
         server_ip=server_ip, dns_option=dns_option,
         dns_leak_protection=dns_leak_protection, block_ads=block_ads,
-        route_ru_direct=route_ru_direct, on_log=on_log,
+        route_ru_direct=route_ru_direct, high_speed=high_speed, on_log=on_log,
     )
     target = paths.write_secure_text(
         paths.sing_box_runtime_config_file(),

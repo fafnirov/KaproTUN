@@ -516,7 +516,7 @@ class SettingsPage(QWidget):
 
         self.ru_direct_check = QCheckBox(tr("mw.ru_direct_check"))
         self.ru_direct_check.setChecked(
-            bool(manager.settings.get("route_ru_direct", False))
+            bool(manager.settings.get("route_ru_direct", True))
         )
         self.ru_direct_check.toggled.connect(self._on_route_ru_direct_changed)
         outer.addWidget(self.ru_direct_check)
@@ -525,6 +525,17 @@ class SettingsPage(QWidget):
         ru_direct_hint.setWordWrap(True)
         ru_direct_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(ru_direct_hint)
+
+        # --- Turbo (kernel TUN stack) — v3.3.0 ---
+        self.turbo_check = QCheckBox(tr("mw.turbo_check"))
+        self.turbo_check.setChecked(bool(manager.settings.get("high_speed", False)))
+        self.turbo_check.toggled.connect(self._on_high_speed_changed)
+        outer.addWidget(self.turbo_check)
+        turbo_hint = QLabel(tr("mw.turbo_hint"))
+        turbo_hint.setObjectName("dim")
+        turbo_hint.setWordWrap(True)
+        turbo_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(turbo_hint)
 
 
         # --- Language toggle ---
@@ -730,6 +741,10 @@ class SettingsPage(QWidget):
 
     def _on_route_ru_direct_changed(self, checked: bool) -> None:
         self._manager.update_settings(route_ru_direct=checked)
+        self.settings_changed.emit()
+
+    def _on_high_speed_changed(self, checked: bool) -> None:
+        self._manager.update_settings(high_speed=checked)
         self.settings_changed.emit()
 
     def _on_leak_test_clicked(self) -> None:

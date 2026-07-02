@@ -316,7 +316,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "hysteria_up_mbps": 0,    # uplink Mbps for hy2 brutal CC — auto-measured (auto mode) or manual; 0 = BBR
     "hysteria_down_mbps": 0,  # downlink Mbps for hy2 brutal CC — auto-measured (auto mode) or manual; 0 = BBR
     "block_ads": False,  # drop geosite:category-ads-all at the xray routing layer (any DNS) — v1.19.0
-    "route_ru_direct": False,  # route all geoip:ru traffic direct (bypass VPN), not just the curated domain list — v1.19.0
+    "route_ru_direct": True,  # v3.3.0: ALL geoip:ru IPs bypass the VPN by default (RU IP → real IP, else → VPN). Was False (curated list only), which left non-listed RU sites tunnelled through the foreign exit → geo-blocked. Toggle off for the Telegram/CDN split-brain edge case.
+    "high_speed": False,  # v3.3.0: TUN network stack. False = gvisor (userspace, universally works). True = mixed (kernel TCP, much faster) — but carries NO traffic on some Windows setups (WinTUN + AV/NIC filters), so it's opt-in "Turbo".
     "performance_preset": "balanced",  # v2.1.6: tun2socks TCP buffer ceiling — economy(512k)/balanced(1m, default)/speed(4m). Caps per-flow memory; default is NOT the old 4m blow-up
     "theme": "auto",  # "auto" (follow OS) / "dark" / "light" — see gui/styles.py
     "window_size": [480, 870],  # [w, h] — restored on launch (advanced resizable mode only)
