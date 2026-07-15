@@ -1975,6 +1975,47 @@ class MainWindow(QMainWindow):
             self.logs_page.append(
                 f"[!] Попытка #{self._reconnect_attempts} не удалась: {msg}"
             )
+            # v3.3.2: re-arm the NEXT backoff step. Previously we just returned,
+            # so a hard-down server got only attempt #1 and the 5s/15s backoff
+            # steps never ran — the whole multi-attempt self-heal was dead after
+            # the first failure (backoff collapsed to a single 1s try, then a
+            # silent drop to DISCONNECTED that contradicted the "#1/3" toast).
+            # Walk the backoff to _reconnect_max, then give up cleanly (same
+            # notify + DNS/routes-restoring teardown as the crash path).
+            if (self._reconnect_attempts < self._reconnect_max
+                    and not self._reconnect_timer.isActive()
+                    and not self._auto_recovery_disabled):
+                delay = self._reconnect_backoff[self._reconnect_attempts]
+                self._reconnect_attempts += 1
+                if self._arm_reconnect("retry", self._reconnect_attempts,
+                                       self._reconnect_max):
+                    self.logs_page.append(
+                        f"[!] Повторная попытка #{self._reconnect_attempts}/"
+                        f"{self._reconnect_max} через {delay} с…"
+                    )
+                    show_toast(
+                        self,
+                        tr("mw.toast_reconnecting", n=self._reconnect_attempts),
+                        kind="info", duration_ms=delay * 1000,
+                    )
+                    self._reconnect_timer.start(delay * 1000)
+            elif self._reconnect_attempts >= self._reconnect_max:
+                if not self._crash_notified:
+                    self.logs_page.append(
+                        f"[!] Авто-переподключение не удалось после "
+                        f"{self._reconnect_max} попыток. Ткни «ВКЛЮЧИТЬ» "
+                        f"вручную когда захочешь снова."
+                    )
+                    show_toast(
+                        self,
+                        tr("mw.toast_reconnect_failed", n=self._reconnect_max),
+                        kind="error", duration_ms=10000,
+                    )
+                    self._crash_notified = True
+                self._reconnect_timer.stop()
+                self.manager.disconnect()
+                self._connected_at = 0.0
+                self._refresh_home()
             return
         QMessageBox.critical(self, tr("mw.connect_failed_title"), msg)
 

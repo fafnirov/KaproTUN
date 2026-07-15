@@ -5424,6 +5424,164 @@ def _v3_ru_direct_default_and_turbo_stack() -> None:
 
 check("config: RU-direct default ON + Turbo→mixed kernel stack (v3.3.0)",
       _v3_ru_direct_default_and_turbo_stack)
+
+
+def _v3_quic_reject_on_gvisor_only() -> None:
+    """v3.3.2: on the default gvisor stack, tunnelled QUIC (UDP :443) is
+    REJECTED so foreign sites fall back to reliable TCP (fixes 'иностранное со
+    временем перестаёт грузиться'). The reject must sit AFTER the LAN/private
+    direct rules (so LAN QUIC still goes direct) and BEFORE the force-proxy
+    suffixes / geoip:ru rules. On the Turbo 'mixed' kernel stack QUIC is kept
+    (that stack carries UDP well), so no reject rule there."""
+    from kapro_tun.core import sing_box_config as sb
+
+    def _quic_idx(rules):
+        return next((i for i, r in enumerate(rules)
+                     if r.get("action") == "reject"
+                     and r.get("network") == "udp" and r.get("port") == 443), None)
+
+    _o_linux = sb._IS_LINUX
+    sb._IS_LINUX = False
+    try:
+        gv = sb.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                             route_ru_direct=True, high_speed=False)
+        mx = sb.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                             route_ru_direct=True, high_speed=True)
+    finally:
+        sb._IS_LINUX = _o_linux
+
+    gv_rules = gv["route"]["rules"]
+    qi = _quic_idx(gv_rules)
+    if qi is None:
+        raise AssertionError("gvisor stack must REJECT tunnelled QUIC (udp/443)")
+    if _quic_idx(mx["route"]["rules"]) is not None:
+        raise AssertionError("Turbo 'mixed' stack must KEEP QUIC (no udp/443 reject)")
+    # Ordering: LAN/private direct rules precede the QUIC reject; the force-proxy
+    # suffix rule and the geoip:ru direct rule follow it.
+    lan_idx = [i for i, r in enumerate(gv_rules)
+               if r.get("outbound") == "direct" and isinstance(r.get("ip_cidr"), list)
+               and any(str(c).startswith(("10.", "192.168.", "172.")) for c in r["ip_cidr"])]
+    if not lan_idx or min(lan_idx) >= qi:
+        raise AssertionError("QUIC reject must come AFTER the LAN/private direct rules")
+    i_forced = next((i for i, r in enumerate(gv_rules)
+                     if r.get("outbound") == "proxy" and r.get("domain_suffix")), None)
+    if i_forced is None or i_forced <= qi:
+        raise AssertionError("force-proxy suffix rule must come AFTER the QUIC reject")
+
+
+check("config: QUIC (udp/443) rejected on gvisor, kept on Turbo (v3.3.2)",
+      _v3_quic_reject_on_gvisor_only)
+
+
+def _v3_app_log_utf8_bom() -> None:
+    """v3.3.2: app.log is written with a leading UTF-8 BOM so Windows
+    PowerShell 5.1 Get-Content / Notepad auto-detect UTF-8 (no Cyrillic
+    mojibake). Exactly ONE BOM at the very start — never injected mid-stream
+    when a later session re-opens the existing (non-empty) file."""
+    import pathlib as _pl
+    import tempfile as _tf
+    from kapro_tun.core import app_log as _al
+    from kapro_tun.core import paths as _p
+    d = _pl.Path(_tf.mkdtemp())
+    f = d / "app.log"
+    _orig = _p.app_log_file
+    _p.app_log_file = lambda: f
+    try:
+        _al._reset_for_test(); _al.log("[mem] sing-box: 117.8 МБ, 840 хэндлов")
+        _al._reset_for_test()                    # flush/close session 1
+        _al._reset_for_test(); _al.log("[connect] mode=TUN")
+        _al._reset_for_test()                    # reopen + close session 2
+        raw = f.read_bytes()
+    finally:
+        _p.app_log_file = _orig
+        _al._reset_for_test()
+    if raw[:3] != b"\xef\xbb\xbf":
+        raise AssertionError("app.log must start with a UTF-8 BOM (EF BB BF)")
+    if raw.count(b"\xef\xbb\xbf") != 1:
+        raise AssertionError("app.log must have exactly ONE BOM (none mid-stream on re-open)")
+    # Cyrillic survives a UTF-8 read intact.
+    text = raw.decode("utf-8-sig")
+    if "МБ" not in text or "хэндлов" not in text:
+        raise AssertionError("Cyrillic diagnostics must round-trip as UTF-8")
+
+
+check("logs: app.log written UTF-8 with a single leading BOM (v3.3.2)",
+      _v3_app_log_utf8_bom)
+
+
+def _v3_self_heal_rearms_backoff() -> None:
+    """v3.3.2 (#8): a failed auto-reconnect attempt must re-arm the timer with
+    the NEXT backoff step (walking to _reconnect_max), not stop after attempt
+    #1. Previously _on_connect_failed just returned, so the 3-attempt / 1-5-15s
+    backoff machinery was dead after the first failure. Driven with a light fake
+    `self` so no real MainWindow / QApplication is needed."""
+    import types
+    from kapro_tun.gui import main_window as mw
+
+    class _Timer:
+        def __init__(self):
+            self._active = False
+            self.started: list[int] = []
+            self.stopped = 0
+
+        def isActive(self):
+            return self._active
+
+        def start(self, ms):
+            self._active = True
+            self.started.append(ms)
+
+        def stop(self):
+            self._active = False
+            self.stopped += 1
+
+    def _make_self(attempts):
+        s = types.SimpleNamespace()
+        s._connecting = True
+        s._reconnect_attempts = attempts
+        s._reconnect_max = 3
+        s._reconnect_backoff = (1, 5, 15)
+        s._auto_recovery_disabled = False
+        s._crash_notified = False
+        s._connected_at = 123.0
+        s._reconnect_timer = _Timer()
+        s.home_page = types.SimpleNamespace(set_state=lambda *_a: None)
+        s.logs_page = types.SimpleNamespace(append=lambda *_a: None)
+        s._refresh_home = lambda: None
+        s._arm_reconnect = lambda reason, n, total: True
+        s.manager = types.SimpleNamespace(disconnect=lambda: None)
+        return s
+
+    _orig_toast = mw.show_toast
+    mw.show_toast = lambda *a, **k: None       # needs a real QWidget parent otherwise
+    try:
+        # attempt #1 failed → re-arm at backoff[1]=5s, attempts 1→2
+        s1 = _make_self(1)
+        mw.MainWindow._on_connect_failed(s1, "boom")
+        if s1._reconnect_attempts != 2 or s1._reconnect_timer.started != [5000]:
+            raise AssertionError(
+                f"attempt #1 fail must re-arm at 5000ms & advance to 2; "
+                f"got attempts={s1._reconnect_attempts} started={s1._reconnect_timer.started}")
+
+        # attempt #2 failed → re-arm at backoff[2]=15s, attempts 2→3
+        s2 = _make_self(2)
+        mw.MainWindow._on_connect_failed(s2, "boom")
+        if s2._reconnect_attempts != 3 or s2._reconnect_timer.started != [15000]:
+            raise AssertionError("attempt #2 fail must re-arm at 15000ms & advance to 3")
+
+        # attempt #3 (== max) failed → NO re-arm, clean notified give-up
+        s3 = _make_self(3)
+        mw.MainWindow._on_connect_failed(s3, "boom")
+        if s3._reconnect_timer.started:
+            raise AssertionError("at _reconnect_max the timer must NOT be re-armed")
+        if not s3._crash_notified:
+            raise AssertionError("give-up must set _crash_notified (one-shot notice)")
+    finally:
+        mw.show_toast = _orig_toast
+
+
+check("watchdog: failed self-heal re-arms backoff to max, then gives up (v3.3.2 #8)",
+      _v3_self_heal_rearms_backoff)
 check("ipv6: sing-box engine skips the netsh firewall block (v3.0.9)",
       _v3_singbox_skips_firewall_ipv6_block)
 check("firewall_sweep: matches KaproTUN-/KaproVPN- prefixes; win_job safe no-op (v3.0.9)",

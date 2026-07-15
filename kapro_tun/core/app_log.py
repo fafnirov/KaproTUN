@@ -16,11 +16,45 @@ break the app.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 from . import paths
+
+
+class _Utf8BomRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that guarantees a UTF-8 BOM at the very START of
+    every log file (active + rotated).
+
+    Why: the file is genuinely UTF-8, but Windows PowerShell 5.1 `Get-Content`
+    and Notepad default to the ANSI code page (CP1251 on RU Windows) when there
+    is no BOM, so Cyrillic diagnostics render as mojibake (`117.8 РњР‘`). A
+    leading BOM makes those tools auto-detect UTF-8 and show the log correctly.
+
+    We keep the plain `utf-8` codec (NOT `utf-8-sig`, whose incremental encoder
+    would inject a BOM on the first write after re-opening a NON-empty file on
+    restart — i.e. mid-stream) and emit the BOM ourselves only when the target
+    file is empty. On rollover the base file is recreated empty, so each rotated
+    file also starts with a BOM; on append to an existing file, none is added.
+    """
+
+    def _open(self):
+        fresh = True
+        try:
+            fresh = (not os.path.exists(self.baseFilename)
+                     or os.path.getsize(self.baseFilename) == 0)
+        except OSError:
+            fresh = False
+        stream = super()._open()
+        if fresh:
+            try:
+                stream.write("\ufeff")   # \ufeff -> EF BB BF in UTF-8 = the BOM
+                stream.flush()
+            except Exception:
+                pass
+        return stream
 
 # Share-links (vless/vmess/trojan/ss/hysteria2/tuic/http(s)) embed the UUID,
 # password and host — redact the whole token. Then redact any remaining bare
@@ -61,7 +95,7 @@ def _get_logger() -> Optional[logging.Logger]:
         lg.propagate = False  # don't leak into the root logger / console
         path = paths.app_log_file()
         path.parent.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(
+        handler = _Utf8BomRotatingFileHandler(
             str(path), maxBytes=_MAX_BYTES, backupCount=_BACKUPS,
             encoding="utf-8",
         )

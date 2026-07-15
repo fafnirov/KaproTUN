@@ -313,6 +313,23 @@ def build_config(
     # v6 never egresses the physical NIC (no leak). LAN-direct MUST precede reject.
     rules.append({"ip_cidr": list(PRIVATE_CIDRS6), "action": "route", "outbound": "direct"})
     rules.append({"ip_cidr": ["2000::/3"], "action": "reject", "method": "default"})
+    # QUIC / HTTP-3 (UDP :443) reject on the gvisor stack (v3.3.2). The
+    # userspace gvisor UDP path does NOT carry QUIC-over-VLESS/Trojan
+    # reliably: a foreign site loads fine over TCP at first, then the browser
+    # discovers QUIC via Alt-Svc and migrates its connections to UDP :443,
+    # which stalls — so "иностранное со временем перестаёт грузиться" while
+    # RU-direct (real network) stays fine. Rejecting tunnelled QUIC with an
+    # ICMP-unreachable makes the browser fall back instantly to HTTP/2-over-TLS
+    # (TCP), which the proxy carries reliably — the same defence-in-depth trade
+    # as the IPv6 reject above. LAN/private UDP already went DIRECT; RU/direct
+    # sites just re-probe once over TCP (sub-second). Only the kernel "mixed"
+    # stack (Turbo) handles UDP well enough to keep QUIC, so gate on gvisor.
+    # NOTE: this rejects app→internet QUIC that would be PROXIED; sing-box's own
+    # dial-out to a QUIC-transport server (Hysteria2/TUIC) is its outbound's
+    # egress (auto_route-excluded), not TUN-inbound traffic, so it is untouched.
+    if not high_speed:
+        rules.append({"network": "udp", "port": 443,
+                      "action": "reject", "method": "default"})
     # Always-proxy critical geo-restricted services BEFORE any direct/bypass
     # rule, so a CDN IP in geoip:ru can't pull them out the real interface.
     rules.append({"domain_suffix": list(_ALWAYS_PROXY_SUFFIXES),
