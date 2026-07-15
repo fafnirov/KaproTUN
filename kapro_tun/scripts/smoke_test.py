@@ -1623,6 +1623,56 @@ def _connection_state_model() -> None:
         if not hasattr(_sty, cs.spec(s).accent):
             raise AssertionError(f"styles missing accent {cs.spec(s).accent}")
 
+    # v3.3.5 state-colour language: connected = GREEN (safe), connecting/
+    # reconnecting = amber (brand "working"), error/killswitch = red. The ring
+    # + status colour alone must tell you the state at a glance.
+    want = {
+        cs.DISCONNECTED: "TEXT_MUTED",
+        cs.CONNECTING: "ACCENT",
+        cs.CONNECTED: "SUCCESS",
+        cs.RECONNECTING: "ACCENT",
+        cs.ERROR: "DANGER",
+        cs.KILLSWITCH_ACTIVE: "DANGER",
+    }
+    for st, accent in want.items():
+        if cs.spec(st).accent != accent:
+            raise AssertionError(f"{st}: accent must be {accent}, got {cs.spec(st).accent}")
+    # The connected glow needs a brighter green than the base SUCCESS.
+    if not hasattr(_sty, "SUCCESS_HI"):
+        raise AssertionError("styles.SUCCESS_HI (connected glow) missing")
+    for pal in (_sty.DARK_PALETTE, _sty.LIGHT_PALETTE):
+        if not (pal.SUCCESS.startswith("#") and pal.SUCCESS_HI.startswith("#")):
+            raise AssertionError("both palettes need SUCCESS + SUCCESS_HI hex")
+
+
+def _traffic_sparkline_richer() -> None:
+    """v3.3.5: the home graph builds a smooth spline (not a jagged polyline)
+    and never raises on empty/partial/full sample sets."""
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QPainterPath
+    from kapro_tun.gui.sparkline import TrafficSparkline
+    _app = QApplication.instance() or QApplication([])
+    sp = TrafficSparkline()
+    # Spline: >=3 points must yield a curved path (cubic CurveTo elements).
+    pts = [QPointF(0, 10), QPointF(10, 2), QPointF(20, 14), QPointF(30, 6)]
+    path = TrafficSparkline._spline(pts)
+    if path.elementCount() < len(pts):
+        raise AssertionError("spline must span all points")
+    curve = QPainterPath.ElementType.CurveToElement
+    types = [path.elementAt(i).type for i in range(path.elementCount())]
+    if curve not in types:
+        raise AssertionError("spline must use cubic curves (CurveTo), not straight lines")
+    # Empty + partial + full histories must all paint without raising.
+    sp.reset()
+    sp.add_sample(0.0, 0.0)
+    for i in range(80):
+        sp.add_sample(1000.0 * i, 2000.0 * i)
+    sp.resize(200, 48)
+    sp.grab()  # force a paintEvent
+
 
 def _typography_tokens_in_qss() -> None:
     from kapro_tun.gui import styles
@@ -1728,7 +1778,10 @@ def _window_presets() -> None:
         _teardown_window(comp)
 
 
-check("ui: connection-state model (6 states, normalize, accents)", _connection_state_model)
+check("ui: connection-state model + state colours (connected=green, amber connecting) (v3.3.5)",
+      _connection_state_model)
+check("ui: traffic sparkline smooth spline, never raises (v3.3.5)",
+      _traffic_sparkline_richer)
 check("ui: typography tokens present + letter-spacing 0", _typography_tokens_in_qss)
 check("ui: traffic legend keeps fixed-width values (no jitter)", _traffic_legend_fixed_width)
 check("ui: sparkline Y-scale eases (hysteresis, no snap)", _sparkline_scale_hysteresis)
