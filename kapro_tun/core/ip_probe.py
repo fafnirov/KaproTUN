@@ -41,11 +41,31 @@ _probe_lock = threading.Lock()
 
 
 def _looks_ipv4(ip: str) -> bool:
-    """True only for an IPv4 literal. We reject IPv6 results outright: the
-    probe exists to show the VPN's IPv4 egress, and KaproTUN's TUN only
-    tunnels IPv4 — any IPv6 we'd get back is the user's REAL leaked address,
-    which must never be shown as 'your IP'."""
+    """True only for an IPv4 literal."""
     return bool(ip) and ":" not in ip and ip.count(".") == 3
+
+
+def _looks_ipv6(ip: str) -> bool:
+    """True for a plausible IPv6 literal (hex groups + at least one colon)."""
+    return (bool(ip) and ":" in ip
+            and all(c in "0123456789abcdefABCDEF:." for c in ip))
+
+
+def _acceptable_ip(ip: str, proxied: bool) -> bool:
+    """Whether `ip` may be surfaced as 'your IP'.
+
+    IPv4 is always fine. IPv6 is accepted ONLY when the probe ran THROUGH the
+    proxy (`proxied`): the request was pinned to outbound=proxy and physically
+    traversed the tunnel, so the returned address is the VPN SERVER's egress —
+    not the user. Some servers (e.g. an NL Trojan that egresses via a DE
+    datacentre) exit over IPv6; showing that v6 is correct, and rejecting it was
+    why "Ваш IP: —" appeared on a working Trojan tunnel (v3.3.4).
+
+    On the DIRECT path (no proxy) an IPv6 result could be the user's REAL leaked
+    address (TUN only captures IPv4), so it is still rejected there."""
+    if _looks_ipv4(ip):
+        return True
+    return proxied and _looks_ipv6(ip)
 
 
 @contextmanager
@@ -346,6 +366,10 @@ def _probe_with_fallback(
     manager wraps it cleanly without nested indentation.
     """
     last_error = "no endpoints tried"
+    # Through the proxy the result is the VPN server's egress (pinned to
+    # outbound=proxy), so an IPv6 answer is the server's v6 exit, NOT a user
+    # leak — accept it. Only the direct path could leak the user's real v6.
+    proxied = bool(proxies)
 
     # CRITICAL (v3.0.11): bypass any system / environment HTTP proxy. The probe
     # must reach the endpoints by the SAME route real traffic uses — in TUN mode
@@ -407,13 +431,12 @@ def _probe_with_fallback(
                 _say(f"[ip-probe] {host}: handler failed: {type(e).__name__}: {e}, trying next")
                 continue
 
-            # Belt-and-suspenders: never surface an IPv6 as "your IP". If
-            # one slipped through (monkeypatch raced, or HTTP-mode socks5h
-            # resolved AAAA remotely), it's the user's leaked real address —
-            # skip it and try the next endpoint for the v4 egress.
-            if not _looks_ipv4(ip):
-                last_error = f"{host}: got non-IPv4 {ip!r} (leak?) — skipping"
-                _say(f"[ip-probe] {host}: got non-IPv4 {ip!r}, skipping (would be a leak)")
+            # IPv4 always OK. IPv6 OK only when proxied (= VPN server egress,
+            # not a user leak — see _acceptable_ip). On the direct path an IPv6
+            # would be the user's real leaked address, so it's still skipped.
+            if not _acceptable_ip(ip, proxied):
+                last_error = f"{host}: unusable IP {ip!r} (v6 on direct path?) — skipping"
+                _say(f"[ip-probe] {host}: skipping {ip!r} (v6 leak guard, direct path)")
                 continue
 
             # Success. country_code may be empty (ipify is IP-only) — that's

@@ -5629,6 +5629,56 @@ def _v3_ip_probe_warmup_tolerant() -> None:
 
 check("ip-probe: warm-up tolerant (retries) + fallback endpoint (v3.3.3)",
       _v3_ip_probe_warmup_tolerant)
+
+
+def _v3_ip_probe_accepts_server_ipv6_when_proxied() -> None:
+    """v3.3.4: some servers (e.g. an NL Trojan exiting via a DE datacentre)
+    egress over IPv6. Because the probe is pinned to outbound=proxy, that v6 is
+    the VPN SERVER's egress — NOT a user leak — so it must be shown, not dropped
+    (dropping it was the 'Ваш IP: —' on a working Trojan tunnel). On the DIRECT
+    path a v6 could be the user's real leaked address, so it stays rejected."""
+    from kapro_tun.core import ip_probe as ipx
+    v6 = "2a01:ecc0:200:1b63::2"
+    # IPv4 always acceptable, both paths.
+    if not (ipx._acceptable_ip("1.2.3.4", True) and ipx._acceptable_ip("1.2.3.4", False)):
+        raise AssertionError("IPv4 must always be acceptable")
+    # IPv6 accepted ONLY when proxied (server egress); rejected direct (leak).
+    if not ipx._acceptable_ip(v6, proxied=True):
+        raise AssertionError("proxied IPv6 (VPN server egress) must be accepted")
+    if ipx._acceptable_ip(v6, proxied=False):
+        raise AssertionError("direct-path IPv6 (possible user leak) must be rejected")
+    # Garbage rejected regardless of path.
+    if ipx._acceptable_ip("not-an-ip", True) or ipx._acceptable_ip("", True):
+        raise AssertionError("non-IP strings must be rejected")
+
+    # End-to-end: a proxied probe whose endpoint returns v6 must yield a PublicIp.
+    class _Resp:
+        status_code = 200
+        text = "ip=2a01:ecc0:200:1b63::2\nloc=DE\n"
+        def json(self):  # not used by the cloudflare-trace handler
+            return {}
+    class _Sess:
+        trust_env = True
+        def get(self, *a, **k):
+            return _Resp()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+    import requests as _rq
+    _orig = _rq.Session
+    _rq.Session = _Sess
+    try:
+        got = ipx._probe_with_fallback(
+            {"https": "socks5h://127.0.0.1:2082"}, 1.0, "ru", lambda *_: None)
+    finally:
+        _rq.Session = _orig
+    if got is None or got.ip != "2a01:ecc0:200:1b63::2" or got.country_code != "DE":
+        raise AssertionError(f"proxied v6-egress probe must resolve; got {got}")
+
+
+check("ip-probe: server IPv6 egress accepted when proxied, not shown as leak (v3.3.4)",
+      _v3_ip_probe_accepts_server_ipv6_when_proxied)
 check("ipv6: sing-box engine skips the netsh firewall block (v3.0.9)",
       _v3_singbox_skips_firewall_ipv6_block)
 check("firewall_sweep: matches KaproTUN-/KaproVPN- prefixes; win_job safe no-op (v3.0.9)",
