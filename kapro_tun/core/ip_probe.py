@@ -236,8 +236,18 @@ def _handle_cloudflare_trace(r) -> tuple[str, str, Optional[str]]:
     return ip, values.get("loc", "").upper(), None
 
 
+# v3.3.3: a SECOND endpoint as fallback. The old single-endpoint list meant one
+# slow/hiccuping trace request = "Ваш IP: —" with nothing behind it. The reasons
+# the list was narrowed to cloudflare-trace (AdGuard NXDOMAIN'ing domain
+# endpoints; 1.1.1.1 routed DIRECT) applied to the OLD direct/system-route probe.
+# The probe now runs through the sing-box health inbound over socks5h (see
+# main_window._kick_ip_probe → outbound=proxy), so the target host is resolved
+# SERVER-SIDE and dialled through the VPN: local AdGuard DNS and geoip:ru-direct
+# routing can't touch it. So a proxy-side fallback is safe and strictly more
+# robust — if cloudflare's trace stalls, api.myip.com still yields the egress.
 _PROBE_ENDPOINTS: list[tuple[str, callable]] = [
     ("https://www.cloudflare.com/cdn-cgi/trace", _handle_cloudflare_trace),
+    ("https://api.myip.com", _handle_api_myip),
 ]
 
 

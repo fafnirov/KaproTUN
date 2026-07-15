@@ -913,20 +913,25 @@ class _IpProbeWorker(QThread):
     def run(self) -> None:
         from ..core import ip_probe
         try:
-            # v3.0.10: be cold-start tolerant. The probe fires right after connect,
-            # while the REALITY tunnel's proxy connection pool is still warming up —
-            # the first few HTTPS requests can time out for ~10 s even though the
-            # tunnel is perfectly healthy (general traffic already flows). A short
-            # 2-retry window left the UI showing "Ваш IP: —" and made a WORKING VPN
-            # look disconnected. Widen the warm-up window to ~12 s (matches the
-            # v3.0.8 connect-liveness poll). Returns on the first success, so a warm
-            # tunnel still resolves the IP in well under a second.
+            # v3.0.10 / v3.3.3: be cold-start tolerant. The probe fires right after
+            # connect, while the tunnel's proxy connection pool is still warming up —
+            # the first few HTTPS requests can time out even though the tunnel is
+            # perfectly healthy (general traffic already flows). This is worse on
+            # Trojan than on VLESS-REALITY: Trojan runs the probe's HTTPS INSIDE its
+            # own outer TLS (TLS-in-TLS), so the cold handshake is heavier and a lone
+            # 2 s single-shot (the old timeout=2.0, retries=0 — which flatly
+            # contradicted this docstring) routinely missed the window and left the UI
+            # on "Ваш IP: —" for a working Trojan VPN. Restore the ~12 s warm-up
+            # window the docstring always promised: 4 attempts × 3 s with 1.5 s pauses.
+            # Returns on the FIRST success, so a warm tunnel still resolves in well
+            # under a second and pays none of this.
             info = ip_probe.fetch_public_ip(
                 socks_proxy=self._socks_proxy,
                 locale=self._locale,
                 debug=None,
-                timeout=2.0,
-                retries=0,
+                timeout=3.0,
+                retries=3,
+                retry_delay=1.5,
             )
         except Exception as e:
             # Defence in depth — ip_probe already catches everything,

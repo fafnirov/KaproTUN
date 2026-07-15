@@ -5582,6 +5582,53 @@ def _v3_self_heal_rearms_backoff() -> None:
 
 check("watchdog: failed self-heal re-arms backoff to max, then gives up (v3.3.2 #8)",
       _v3_self_heal_rearms_backoff)
+
+
+def _v3_ip_probe_warmup_tolerant() -> None:
+    """v3.3.3: the IP probe must be cold-start tolerant — retry the whole pass
+    `retries` times so a slow-to-warm tunnel (esp. Trojan, whose TLS-in-TLS
+    handshake is heavier than VLESS-REALITY) still resolves the egress IP
+    instead of showing 'Ваш IP: —'. Also a 2nd endpoint now backs up the trace.
+    Driven by stubbing the per-pass worker so no network is touched."""
+    from kapro_tun.core import ip_probe as ipx
+
+    # (1) A fallback endpoint exists (single-endpoint = one hiccup zeroed the UI).
+    if len(ipx._PROBE_ENDPOINTS) < 2:
+        raise AssertionError("IP probe must have >=2 endpoints (fallback)")
+
+    # (2) The retry loop keeps trying until success, up to retries+1 passes.
+    calls = {"n": 0}
+    good = ipx.PublicIp(ip="1.2.3.4", country_code="NL",
+                        country_name="Нидерланды", city=None)
+
+    def _fake_pass(proxies, t, locale, say):
+        calls["n"] += 1
+        return good if calls["n"] >= 3 else None   # cold for 2 passes, warms on 3rd
+
+    _orig = ipx._probe_with_fallback
+    ipx._probe_with_fallback = _fake_pass
+    try:
+        got = ipx.fetch_public_ip(socks_proxy="127.0.0.1:2082", timeout=0.1,
+                                  retries=3, retry_delay=0.0)
+        if got is None or got.ip != "1.2.3.4":
+            raise AssertionError(f"warm-up retry must eventually resolve; got {got}")
+        if calls["n"] != 3:
+            raise AssertionError(f"must retry until success (3 passes), did {calls['n']}")
+
+        # (3) Regression guard: retries=0 gives exactly ONE pass (the old bug that
+        # left Trojan on 'Ваш IP: —').
+        calls["n"] = 0
+        ipx._probe_with_fallback = lambda *a: None
+        one = ipx.fetch_public_ip(socks_proxy="127.0.0.1:2082", timeout=0.1,
+                                  retries=0, retry_delay=0.0)
+        if one is not None:
+            raise AssertionError("retries=0 must return None after a failed pass")
+    finally:
+        ipx._probe_with_fallback = _orig
+
+
+check("ip-probe: warm-up tolerant (retries) + fallback endpoint (v3.3.3)",
+      _v3_ip_probe_warmup_tolerant)
 check("ipv6: sing-box engine skips the netsh firewall block (v3.0.9)",
       _v3_singbox_skips_firewall_ipv6_block)
 check("firewall_sweep: matches KaproTUN-/KaproVPN- prefixes; win_job safe no-op (v3.0.9)",
