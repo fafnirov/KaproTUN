@@ -71,10 +71,10 @@ _SPECS = {
         DISCONNECTED, "cstate.disconnected", "TEXT_MUTED", "○",
         "home.connect", True, "idle", False),
     CONNECTING: StateSpec(
-        CONNECTING, "cstate.connecting", "ACCENT", "◌",
+        CONNECTING, "cstate.connecting", "TEXT_MUTED", "◌",
         "home.connecting", True, "connecting", False),
     CONNECTED: StateSpec(
-        CONNECTED, "cstate.connected", "SUCCESS", "●",
+        CONNECTED, "cstate.connected", "ACCENT", "●",
         "home.disconnect", True, "connected", False),
     RECONNECTING: StateSpec(
         RECONNECTING, "cstate.reconnecting", "ACCENT", "◌",

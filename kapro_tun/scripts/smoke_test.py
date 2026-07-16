@@ -1623,26 +1623,11 @@ def _connection_state_model() -> None:
         if not hasattr(_sty, cs.spec(s).accent):
             raise AssertionError(f"styles missing accent {cs.spec(s).accent}")
 
-    # v3.3.5 state-colour language: connected = GREEN (safe), connecting/
-    # reconnecting = amber (brand "working"), error/killswitch = red. The ring
-    # + status colour alone must tell you the state at a glance.
-    want = {
-        cs.DISCONNECTED: "TEXT_MUTED",
-        cs.CONNECTING: "ACCENT",
-        cs.CONNECTED: "SUCCESS",
-        cs.RECONNECTING: "ACCENT",
-        cs.ERROR: "DANGER",
-        cs.KILLSWITCH_ACTIVE: "DANGER",
-    }
-    for st, accent in want.items():
-        if cs.spec(st).accent != accent:
-            raise AssertionError(f"{st}: accent must be {accent}, got {cs.spec(st).accent}")
-    # The connected glow needs a brighter green than the base SUCCESS.
-    if not hasattr(_sty, "SUCCESS_HI"):
-        raise AssertionError("styles.SUCCESS_HI (connected glow) missing")
-    for pal in (_sty.DARK_PALETTE, _sty.LIGHT_PALETTE):
-        if not (pal.SUCCESS.startswith("#") and pal.SUCCESS_HI.startswith("#")):
-            raise AssertionError("both palettes need SUCCESS + SUCCESS_HI hex")
+    # Connect ring / connected state stays brand AMBER, not green (a green
+    # connected ring was tried in v3.3.5 and reverted in v3.3.6 — the user
+    # rejected it). Guard so it doesn't creep back.
+    if cs.spec(cs.CONNECTED).accent != "ACCENT":
+        raise AssertionError("connected must stay brand ACCENT (amber), not green")
 
 
 def _traffic_sparkline_richer() -> None:
@@ -1778,7 +1763,7 @@ def _window_presets() -> None:
         _teardown_window(comp)
 
 
-check("ui: connection-state model + state colours (connected=green, amber connecting) (v3.3.5)",
+check("ui: connection-state model; connected ring stays brand amber (v3.3.6)",
       _connection_state_model)
 check("ui: traffic sparkline smooth spline, never raises (v3.3.5)",
       _traffic_sparkline_richer)

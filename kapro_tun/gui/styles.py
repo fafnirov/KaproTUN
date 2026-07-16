@@ -31,7 +31,6 @@ class Palette:
     PRIMARY_TEXT: str     # text on primary (amber) buttons — same on both
     DANGER: str
     SUCCESS: str
-    SUCCESS_HI: str       # brighter green for the "connected" glow / breathing halo
     # Tray icon variant — system tray on light desktops needs a darker
     # icon for visibility; on dark desktops the standard one works.
     TRAY_PREFERS_LIGHT_ICON: bool
@@ -55,7 +54,6 @@ DARK_PALETTE = Palette(
     PRIMARY_TEXT="#1a1209",     # near-black on amber button
     DANGER="#ef4444",
     SUCCESS="#16a34a",
-    SUCCESS_HI="#22c55e",       # green-500 — brighter connected glow on dark
     TRAY_PREFERS_LIGHT_ICON=True,
 )
 
@@ -84,7 +82,6 @@ LIGHT_PALETTE = Palette(
     PRIMARY_TEXT="#1a1209",     # same near-black: dark text on amber works both
     DANGER="#dc2626",
     SUCCESS="#15803d",
-    SUCCESS_HI="#16a34a",       # green-600 — connected glow on light
     TRAY_PREFERS_LIGHT_ICON=False,
 )
 
@@ -280,20 +277,15 @@ QPushButton#circleBtn[state="connecting"] {{
     color: {p.ACCENT};
 }}
 
-/* Connected = calm GREEN (safe / protected), distinct from the amber
-   "connecting" state — the ring's colour alone tells you where you are. */
 QPushButton#circleBtn[state="connected"] {{
-    border-color: {p.SUCCESS};
-    color: {p.SUCCESS_HI};
+    border-color: {p.ACCENT};
+    color: {p.ACCENT};
 }}
 
-QPushButton#circleBtn[state="connecting"]:pressed {{
+QPushButton#circleBtn[state="connecting"]:pressed,
+QPushButton#circleBtn[state="connected"]:pressed {{
     border: 4px solid {p.ACCENT_HI};
     color: {p.ACCENT_HI};
-}}
-QPushButton#circleBtn[state="connected"]:pressed {{
-    border: 4px solid {p.SUCCESS_HI};
-    color: {p.SUCCESS_HI};
 }}
 
 /* --- icon buttons (nav bar, card chevron) --- */
@@ -581,8 +573,6 @@ ACCENT = DARK_PALETTE.ACCENT
 ACCENT_HI = DARK_PALETTE.ACCENT_HI
 ACCENT_DIM = DARK_PALETTE.ACCENT_DIM
 DANGER = DARK_PALETTE.DANGER
-SUCCESS = DARK_PALETTE.SUCCESS
-SUCCESS_HI = DARK_PALETTE.SUCCESS_HI
 
 
 def _detect_system_theme() -> str:

@@ -59,11 +59,6 @@ class CircleConnectButton(QPushButton):
     PULSE_LOW = 12.0
     PULSE_HIGH = 40.0
     CONNECTED_GLOW = 30.0
-    # Connected "breathing": a slow, gentle halo swell so a live tunnel reads as
-    # calmly alive (green) instead of a dead-steady ring. Subtle on purpose.
-    BREATHE_LOW = 22.0
-    BREATHE_HIGH = 36.0
-    BREATHE_DURATION_MS = 2800
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(tr("wid.connect"), parent)
@@ -85,15 +80,6 @@ class CircleConnectButton(QPushButton):
         self._pulse.setEndValue(self.PULSE_LOW)
         self._pulse.setEasingCurve(QEasingCurve.InOutSine)
         self._pulse.setLoopCount(-1)
-
-        # The slow gentle "breathing" used while "connected" (green halo).
-        self._breathe = QPropertyAnimation(self, b"glow_radius", self)
-        self._breathe.setDuration(self.BREATHE_DURATION_MS)
-        self._breathe.setStartValue(self.BREATHE_LOW)
-        self._breathe.setKeyValueAt(0.5, self.BREATHE_HIGH)
-        self._breathe.setEndValue(self.BREATHE_LOW)
-        self._breathe.setEasingCurve(QEasingCurve.InOutSine)
-        self._breathe.setLoopCount(-1)
 
         # One-shot burst played on every state change
         self._burst = QPropertyAnimation(self, b"glow_radius", self)
@@ -136,17 +122,12 @@ class CircleConnectButton(QPushButton):
 
         if vis == "connected":
             self.setProperty("state", "connected")
-            # Green halo that gently breathes — "you're protected", calmly alive.
-            self._glow.setColor(QColor(styles.SUCCESS_HI))
-            self._start_burst(settle_to=self.BREATHE_LOW, then=self._breathe.start)
+            self._start_burst(settle_to=self.CONNECTED_GLOW, then=None)
         elif vis == "connecting":
             self.setProperty("state", "connecting")
-            # Amber pulse — brand colour during the "working on it" moment.
-            self._glow.setColor(QColor(styles.ACCENT))
             self._start_burst(settle_to=self.PULSE_LOW, then=self._pulse.start)
         else:
             self.setProperty("state", "idle")
-            self._glow.setColor(QColor(styles.ACCENT))
             self._start_burst(settle_to=0.0, then=None)
 
         # Re-polish so QSS property selectors update (border colors, etc.)
@@ -168,7 +149,6 @@ class CircleConnectButton(QPushButton):
         settles, so the two animations don't fight over glow_radius.
         """
         self._pulse.stop()
-        self._breathe.stop()
         self._burst.stop()
         # Connect-once: hold a single chain handler in a slot so we can
         # disconnect cleanly without RuntimeWarnings about "no connection".
