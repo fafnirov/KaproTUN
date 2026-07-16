@@ -1767,6 +1767,87 @@ check("ui: connection-state model; connected ring stays brand amber (v3.3.6)",
       _connection_state_model)
 check("ui: traffic sparkline smooth spline, never raises (v3.3.5)",
       _traffic_sparkline_richer)
+
+
+def _v3_updater_dismiss_cancels_download() -> None:
+    """v3.3.7: dismissing the updater dialog MUST mean "don't update".
+
+    The bug: Esc/[X] mid-download only hid the dialog; the worker kept running
+    and _on_downloaded then Popen'd the installer + QApplication.quit() —
+    tearing down an active tunnel and reinstalling against an explicit "no"."""
+    import os as _os
+    import pathlib as _pl
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from kapro_tun.core import net_download as _nd
+    from kapro_tun.core.updater import UpdateInfo
+    from kapro_tun.gui import updater_dialog as ud
+    _app = QApplication.instance() or QApplication([])
+
+    # (1) Cancel MID-STREAM: the progress callback must raise _Cancelled, which
+    # aborts the download; the worker then stays silent (no finished_ok/failed)
+    # and must NOT fall through to the next mirror.
+    tried: list[str] = []
+    emitted: list[str] = []
+    w = ud._DownloadWorker(["https://a/x.exe", "https://b/x.exe"],
+                           _pl.Path("nonexistent.exe"))
+    w.finished_ok.connect(lambda p: emitted.append("ok"))
+    w.failed.connect(lambda m: emitted.append("failed"))
+
+    def _fake_download(url, dest, cap, progress=None, timeout=None):
+        tried.append(url)
+        w.cancel()                    # user dismisses while the stream runs
+        progress(1024, 100000)        # next chunk -> must raise _Cancelled
+        raise AssertionError("stream must abort via the progress callback")
+
+    _orig_fn = _nd.download_to_file
+    _nd.download_to_file = _fake_download
+    try:
+        w.run()                       # drive synchronously (no thread needed)
+    finally:
+        _nd.download_to_file = _orig_fn
+    if emitted:
+        raise AssertionError(f"cancelled worker must emit nothing, got {emitted}")
+    if tried != ["https://a/x.exe"]:
+        raise AssertionError(f"cancel must not fall through to the next mirror; tried={tried}")
+
+    # (2) The dialog's result slot is inert once dismissed: no installer launch,
+    # no app quit — even if a finished_ok signal was already queued.
+    launched: list = []
+    quit_called: list = []
+
+    class _FakeSub:
+        DETACHED_PROCESS = 0
+        CREATE_NEW_PROCESS_GROUP = 0
+
+        @staticmethod
+        def Popen(*a, **k):
+            launched.append(a)
+
+    class _FakeApp:
+        @staticmethod
+        def quit(*a, **k):
+            quit_called.append(1)
+
+    _o_sub, _o_app = ud.subprocess, ud.QApplication
+    ud.subprocess, ud.QApplication = _FakeSub, _FakeApp
+    try:
+        dlg = ud.UpdaterDialog(UpdateInfo(version="9.9.9", tag="v9.9.9",
+                                          url="https://example.invalid", notes="x"))
+        dlg.reject()                  # user dismisses (Later / Esc / [X])
+        if not dlg._cancelled:
+            raise AssertionError("reject() must mark the dialog cancelled")
+        dlg._on_downloaded("C:/nope/setup.exe")   # late/queued signal arrives
+    finally:
+        ud.subprocess, ud.QApplication = _o_sub, _o_app
+    if launched:
+        raise AssertionError("dismissed updater must NOT launch the installer")
+    if quit_called:
+        raise AssertionError("dismissed updater must NOT quit the app (kills the tunnel)")
+
+
+check("updater: dismissing cancels the download, never installs/quits (v3.3.7)",
+      _v3_updater_dismiss_cancels_download)
 check("ui: typography tokens present + letter-spacing 0", _typography_tokens_in_qss)
 check("ui: traffic legend keeps fixed-width values (no jitter)", _traffic_legend_fixed_width)
 check("ui: sparkline Y-scale eases (hysteresis, no snap)", _sparkline_scale_hysteresis)

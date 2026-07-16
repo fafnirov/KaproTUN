@@ -66,6 +66,14 @@ def _setup_sources(version: str) -> list[str]:
 
 # --- download worker ------------------------------------------------------
 
+class _Cancelled(Exception):
+    """Raised out of the progress callback to unwind an in-flight download.
+
+    net_download.download_to_file invokes `progress` on every chunk and removes
+    its .part file on ANY exception, so aborting this way stops the stream
+    promptly and leaves no partial installer behind."""
+
+
 class _DownloadWorker(QThread):
     progress = Signal(int, int)   # bytes_done, bytes_total
     finished_ok = Signal(str)     # path to downloaded file
@@ -75,6 +83,20 @@ class _DownloadWorker(QThread):
         super().__init__(parent)
         self._urls = urls
         self._dest = dest
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Ask the in-flight download to abort (v3.3.7).
+
+        Safe to call from the GUI thread: the flag is only *read* by the
+        worker's own progress callback, which raises _Cancelled to unwind the
+        stream. Takes effect on the next chunk."""
+        self._cancelled = True
+
+    def _on_chunk(self, done: int, total: int) -> None:
+        if self._cancelled:
+            raise _Cancelled()
+        self.progress.emit(done, total)
 
     def run(self) -> None:
         # Try each source in order (mirror, then GitHub). The first that
@@ -88,6 +110,8 @@ class _DownloadWorker(QThread):
         from ..core import net_download
         errors: list[str] = []
         for url in self._urls:
+            if self._cancelled:
+                return
             host = url.split("/")[2] if "//" in url else url
             try:
                 # Size-capped atomic download (.part -> replace). Rejects a
@@ -95,7 +119,7 @@ class _DownloadWorker(QThread):
                 # ceiling — a hostile mirror can't fill the disk.
                 net_download.download_to_file(
                     url, self._dest, net_download.MAX_SETUP_EXE,
-                    progress=lambda done, total: self.progress.emit(done, total),
+                    progress=self._on_chunk,
                     timeout=(15, 30),
                 )
                 # Guard: a mirror/CDN serving an HTML error page as 200
@@ -104,10 +128,18 @@ class _DownloadWorker(QThread):
                     raise RuntimeError(
                         tr("upd.file_too_small", size=self._dest.stat().st_size)
                     )
+                if self._cancelled:
+                    return
                 self.finished_ok.emit(str(self._dest))
+                return
+            except _Cancelled:
+                # Dismissed mid-download: stay silent. Don't fall through to the
+                # next mirror and don't report a failure — the user said "no".
                 return
             except Exception as e:
                 errors.append(f"{host}: {type(e).__name__}: {e}")
+        if self._cancelled:
+            return
         self.failed.emit(" | ".join(errors) if errors else "download failed")
 
 
@@ -121,6 +153,7 @@ class UpdaterDialog(QDialog):
         self._info = info
         self._download_worker: Optional[_DownloadWorker] = None
         self._setup_path: Optional[Path] = None
+        self._cancelled = False
 
         self.setWindowTitle(tr("upd.window_title"))
         self.resize(540, 480)
@@ -174,9 +207,33 @@ class UpdaterDialog(QDialog):
 
     # --- download flow ----------------------------------------------------
 
+    def _cancel_download(self) -> None:
+        """Abort any in-flight download and make the result slots inert.
+
+        Dismissing this dialog MUST mean "don't update". Before v3.3.7 the
+        worker kept running after Esc/[X]: when it finished, _on_downloaded
+        still Popen'd the installer and quit the app — tearing down the user's
+        active tunnel and silently reinstalling, against an explicit "no".
+
+        Idempotent and safe when no download is running. The worker is kept
+        referenced (and parented) so it is never destroyed while still running;
+        the bounded wait just gives its stream a moment to unwind."""
+        self._cancelled = True
+        worker = self._download_worker
+        if worker is not None and worker.isRunning():
+            worker.cancel()
+            worker.wait(3000)   # abort lands on the next chunk; bounded join
+
+    def reject(self) -> None:
+        # Covers every "no": the Later button, Esc, and the [X] (QDialog's
+        # default closeEvent calls reject()).
+        self._cancel_download()
+        super().reject()
+
     def _start_download(self) -> None:
         self.update_btn.setEnabled(False)
-        self.later_btn.setEnabled(False)
+        # Leave "Later" clickable: it's the explicit way to back out mid-
+        # download now that dismissing actually cancels (v3.3.7).
         self.status_label.setVisible(True)
         self.status_label.setText(
             tr("upd.downloading", filename=SETUP_FILENAME, version=self._info.version)
@@ -197,6 +254,8 @@ class UpdaterDialog(QDialog):
         self._download_worker.start()
 
     def _on_progress(self, done: int, total: int) -> None:
+        if self._cancelled:
+            return
         if total > 0:
             pct = int(done * 100 / total)
             self.progress_bar.setValue(pct)
@@ -210,6 +269,11 @@ class UpdaterDialog(QDialog):
             self.status_label.setText(tr("upd.progress_mb", mb=mb))
 
     def _on_downloaded(self, path: str) -> None:
+        # Hard gate: NEVER launch the installer + quit the app if the user
+        # dismissed the dialog. The worker already stays silent on cancel; this
+        # also catches a signal that was queued before the cancel landed.
+        if self._cancelled:
+            return
         self._setup_path = Path(path)
         self.status_label.setText(tr("upd.launching"))
         self.progress_bar.setRange(0, 0)  # indeterminate spinner
@@ -234,6 +298,8 @@ class UpdaterDialog(QDialog):
         QApplication.quit()
 
     def _on_failed(self, msg: str) -> None:
+        if self._cancelled:
+            return
         self.status_label.setText(
             f"<span style='color:#ef4444'>{tr('upd.error_prefix', msg=msg)}</span><br>"
             f"<a href='{self._info.url}' style='color:#f59e0b'>"
