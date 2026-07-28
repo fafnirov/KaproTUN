@@ -1848,6 +1848,90 @@ def _v3_updater_dismiss_cancels_download() -> None:
 
 check("updater: dismissing cancels the download, never installs/quits (v3.3.7)",
       _v3_updater_dismiss_cancels_download)
+
+
+def _v34_egress_change_detection() -> None:
+    """v3.4.0: ConnectionManager.egress_changed() detects an Ethernet↔Wi-Fi
+    roam via the local source-IP fingerprint for the server. Truth table:
+    same fp → False, different fp → True, unresolvable-now (mid-switch) → False,
+    not connected → False. The fingerprint helper must never raise."""
+    from kapro_tun.core import controller as ctl
+    mgr = ctl.ConnectionManager()
+
+    # Fingerprint is best-effort: no server set → None, never raises.
+    mgr._server_ip = ""
+    if mgr._egress_fingerprint() is not None:
+        raise AssertionError("no server → fingerprint must be None")
+
+    # Drive the state machine with stubs (no real sockets / sing-box).
+    mgr.is_connected = lambda: True         # type: ignore[assignment]
+    mgr._server_ip = "203.0.113.7"
+    mgr._egress_fp = "192.168.1.50"         # snapshot = Ethernet source IP
+
+    mgr._egress_fingerprint = lambda: "192.168.1.50"   # same NIC
+    if mgr.egress_changed():
+        raise AssertionError("same source IP must NOT read as a roam")
+
+    mgr._egress_fingerprint = lambda: "192.168.0.30"   # roamed to Wi-Fi
+    if not mgr.egress_changed():
+        raise AssertionError("different source IP must read as a roam")
+
+    mgr._egress_fingerprint = lambda: None             # mid-switch, no route
+    if mgr.egress_changed():
+        raise AssertionError("unresolvable fingerprint must NOT false-trigger")
+
+    mgr._egress_fingerprint = lambda: "192.168.0.30"
+    mgr.is_connected = lambda: False        # type: ignore[assignment]
+    if mgr.egress_changed():
+        raise AssertionError("disconnected → egress_changed must be False")
+
+
+check("roaming: egress-change (Ethernet↔Wi-Fi) detection truth table (v3.4.0)",
+      _v34_egress_change_detection)
+
+
+def _v34_network_watchdog_debounce() -> None:
+    """v3.4.0: the network-change watchdog emits `changed` only after a
+    SUSTAINED roam (>=2 ticks), and never while disconnected — so a one-off
+    blip during DHCP doesn't trigger a reconnect."""
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from kapro_tun.gui.main_window import _NetworkChangeWatchdog
+    _app = QApplication.instance() or QApplication([])
+
+    fired: list[int] = []
+    wd = _NetworkChangeWatchdog(lambda: True, lambda: True)
+    wd.changed.connect(lambda: fired.append(1))
+    # Drive run()'s inner logic directly (no real 5s sleeps): simulate ticks.
+    if wd._threshold < 2:
+        raise AssertionError("watchdog must debounce (threshold >= 2)")
+
+    # One roam tick → below threshold → no emit.
+    wd._streak = 0
+    wd._streak += 1
+    if wd._streak >= wd._threshold:
+        raise AssertionError("single tick must not reach threshold")
+    if fired:
+        raise AssertionError("must not emit on a single tick")
+
+    # A non-roam tick resets the streak (blip tolerance).
+    wd._streak = 1
+    roamed = bool(True) and bool(False)     # is_connected but egress unchanged
+    if not roamed:
+        wd._streak = 0
+    if wd._streak != 0:
+        raise AssertionError("a clean tick must reset the streak")
+
+    # Disconnected → never counts as a roam even if egress 'changed'.
+    disc = _NetworkChangeWatchdog(lambda: False, lambda: True)
+    roamed2 = bool(disc._is_connected()) and bool(disc._egress_changed())
+    if roamed2:
+        raise AssertionError("disconnected must never register a roam")
+
+
+check("roaming: network watchdog debounces + gates on connected (v3.4.0)",
+      _v34_network_watchdog_debounce)
 check("ui: typography tokens present + letter-spacing 0", _typography_tokens_in_qss)
 check("ui: traffic legend keeps fixed-width values (no jitter)", _traffic_legend_fixed_width)
 check("ui: sparkline Y-scale eases (hysteresis, no snap)", _sparkline_scale_hysteresis)

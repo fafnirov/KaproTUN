@@ -1031,6 +1031,59 @@ class _DnsWatchdog(QThread):
         self.wait(4000)
 
 
+class _NetworkChangeWatchdog(QThread):
+    """Detects a change of the physical egress interface (Ethernet ↔ Wi-Fi)
+    while connected (v3.4.0).
+
+    sing-box's auto_route is pinned to the interface that was default at
+    connect; on Windows it does NOT re-home on a full adapter swap, so after
+    unplugging Ethernet (or roaming to Wi-Fi) the tunnel silently leaks —
+    traffic egresses the new interface DIRECT — or dies, and a manual reconnect
+    on the stale routing table often lands in "no network". Catching the roam
+    and driving a clean reconnect on the new interface fixes both.
+
+    The check is cheap (a UDP-connect source-IP probe, no packets, no
+    subprocess), so we poll faster than the DNS watchdog — a roam should heal in
+    seconds. A 2-tick streak rides out the brief no-route moment mid-switch
+    (egress_changed() returns False on an unresolvable fingerprint, so a
+    transition never false-triggers)."""
+
+    changed = Signal()
+
+    def __init__(self, is_connected, egress_changed, parent=None):
+        super().__init__(parent)
+        self._is_connected = is_connected      # callable -> bool
+        self._egress_changed = egress_changed  # callable -> bool
+        self._stop = False
+        self._interval_s = 5
+        self._streak = 0
+        self._threshold = 2                    # ~10 s sustained → real roam
+
+    def run(self) -> None:
+        while not self._stop:
+            for _ in range(self._interval_s):
+                if self._stop:
+                    return
+                self.msleep(1000)
+            if self._stop:
+                return
+            try:
+                roamed = bool(self._is_connected()) and bool(self._egress_changed())
+            except Exception:
+                roamed = False
+            if not roamed:
+                self._streak = 0
+                continue
+            self._streak += 1
+            if self._streak >= self._threshold:
+                self._streak = 0
+                self.changed.emit()
+
+    def stop(self) -> None:
+        self._stop = True
+        self.wait(3000)
+
+
 class LogsPage(QWidget):
     """Read-only viewer for sing-box logs."""
 
@@ -1218,6 +1271,17 @@ class MainWindow(QMainWindow):
         )
         self._dns_watchdog.unhealthy.connect(self._on_dns_unhealthy)
         self._dns_watchdog.start()
+
+        # Network-change watchdog (v3.4.0): catch an Ethernet↔Wi-Fi roam and
+        # clean-reconnect on the new interface, so the tunnel doesn't silently
+        # leak (traffic egressing the new NIC direct) after the switch.
+        self._net_watchdog = _NetworkChangeWatchdog(
+            self.manager.is_connected,
+            self.manager.egress_changed,
+            parent=self,
+        )
+        self._net_watchdog.changed.connect(self._on_network_changed)
+        self._net_watchdog.start()
 
         # Runtime memory watchdog (v2.1.6): sample tun2socks/xray private memory
         # + handles every 10 s (cheap psutil reads, non-blocking → fine on the
@@ -2160,6 +2224,40 @@ class MainWindow(QMainWindow):
         self._connected_at = 0.0
         self._reconnect_timer.start(delay * 1000)
 
+    def _on_network_changed(self) -> None:
+        """The physical egress interface changed (Ethernet↔Wi-Fi) while we were
+        connected. sing-box's auto_route stayed pinned to the old interface, so
+        the tunnel is now leaking (traffic egressing the new NIC direct) or
+        dead. Drive a clean reconnect on the NEW interface using the same
+        proven tear-down-and-reconnect machinery as the crash/DNS paths.
+        """
+        # The worker emitted from another thread; the session may have changed.
+        if not self.manager.is_connected():
+            return
+        # Don't pile onto an in-flight connect or an already-scheduled reconnect.
+        if self._connecting or self._reconnect_timer.isActive():
+            return
+        # A roam is a fresh situation, not a failure streak — give it a full
+        # attempt budget on the new interface (v3.3.2 backoff re-arm handles any
+        # retries; the reconnect-storm cap in _arm_reconnect still applies).
+        self._reconnect_attempts = 0
+        delay = self._reconnect_backoff[self._reconnect_attempts]
+        self._reconnect_attempts += 1
+        if not self._arm_reconnect("network_change",
+                                   self._reconnect_attempts, self._reconnect_max):
+            return  # disabled / no-config / storm — _arm_reconnect handled it
+        self.logs_page.append(
+            "[!] Сменился сетевой интерфейс (Ethernet↔Wi-Fi) — переустанавливаю "
+            "туннель на новом подключении…"
+        )
+        show_toast(self, tr("mw.toast_network_changed"),
+                   kind="info", duration_ms=delay * 1000)
+        saved = self._active_config
+        self.manager.disconnect()
+        self._active_config = saved
+        self._connected_at = 0.0
+        self._reconnect_timer.start(delay * 1000)
+
     def _scan_log_line(self, line: str) -> None:
         """No-op since v3.1.0 — the tun2socks loopback SOCKS bridge (whose
         127.0.0.1 ephemeral-port exhaustion this watched) is gone with the legacy
@@ -2674,6 +2772,10 @@ class MainWindow(QMainWindow):
             self._dns_watchdog.stop()
         except Exception:
             pass
+        try:
+            self._net_watchdog.stop()
+        except Exception:
+            pass
         if self.manager.is_connected():
             self.manager.disconnect()
         self.tray.hide()
@@ -2780,6 +2882,10 @@ class MainWindow(QMainWindow):
         if self._really_quitting:
             try:
                 self._dns_watchdog.stop()
+            except Exception:
+                pass
+            try:
+                self._net_watchdog.stop()
             except Exception:
                 pass
             if self.manager.is_connected():

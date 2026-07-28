@@ -216,6 +216,13 @@ class ConnectionManager:
         self._active: Optional[ProxyConfig] = None
         # Which TUN engine the live session is using (None when disconnected).
         self._active_engine: Optional[str] = None
+        # Roaming detection (v3.4.0): the resolved server IP + the local source
+        # IP the OS uses to reach it, snapshotted at connect. sing-box's
+        # auto_route pins the tunnel to the interface that was default then; on a
+        # full adapter swap (Ethernet↔Wi-Fi) it doesn't re-home, so we watch this
+        # fingerprint and clean-reconnect when it changes. See egress_changed().
+        self._server_ip: str = ""
+        self._egress_fp: Optional[str] = None
         # Once-per-app-launch guard so the "ad-block is legacy-only" notice
         # isn't logged on every sing-box reconnect.
         self._singbox_adblock_noted = False
@@ -284,6 +291,47 @@ class ConnectionManager:
             self._log(f"[!] WebRTC-block: не удалось снять правило: {e}")
         self._active = None
         self._active_engine = None
+        self._server_ip = ""
+        self._egress_fp = None
+
+    def _egress_fingerprint(self) -> Optional[str]:
+        """Local source IP the OS would use to reach the VPN server RIGHT NOW.
+
+        Cheap and side-effect-free: a UDP `connect` sends no packet, it only
+        makes the kernel resolve the route and bind a source address. No admin,
+        no subprocess. In TUN mode the server IP is auto_route-bypassed to the
+        PHYSICAL NIC, so this is that NIC's address — it changes when the machine
+        roams Ethernet↔Wi-Fi (different adapter → different DHCP lease). Returns
+        None when unknown (no server / transient no-route); callers must treat
+        None as 'no signal', never as a change."""
+        ip = self._server_ip
+        if not ip:
+            return None
+        s = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((ip, 9))          # discard-protocol port; nothing is sent
+            return s.getsockname()[0]
+        except OSError:
+            return None
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
+    def egress_changed(self) -> bool:
+        """True when the physical egress interface changed since connect (e.g.
+        Ethernet unplugged → Wi-Fi). Best-effort: not connected, no snapshot, or
+        an unresolvable current fingerprint (mid-transition) all read as False,
+        so a brief no-route moment during the switch never false-triggers."""
+        if not self.is_connected() or not self._egress_fp:
+            return False
+        now = self._egress_fingerprint()
+        if not now:
+            return False
+        return now != self._egress_fp
 
     def is_connected(self) -> bool:
         return self.sing_box_process.is_running()
@@ -621,6 +669,10 @@ class ConnectionManager:
 
         self._active = config
         self._active_engine = ENGINE_SING_BOX
+        # Snapshot the egress fingerprint so the GUI's network-change watchdog
+        # can detect an Ethernet↔Wi-Fi roam and clean-reconnect (v3.4.0).
+        self._server_ip = server_ip
+        self._egress_fp = self._egress_fingerprint()
 
     def _tun_admin_message(self) -> str:
         """Per-OS 'TUN needs admin' message."""
