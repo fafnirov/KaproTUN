@@ -57,15 +57,34 @@ class _PingerThread(QThread):
         self._configs = configs
 
     def run(self) -> None:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
+        # Interruptible (v3.4.1): poll the futures in short slices and check
+        # isInterruptionRequested() between them, so requestInterruption()+wait()
+        # from the dialog returns within ~0.2 s. Without this the thread ran to
+        # completion (each TCP ping up to 3 s); if the dialog that PARENTS it was
+        # destroyed meanwhile — e.g. the user pings then picks a server — the
+        # running QThread was deleted and Qt aborted the whole app with
+        # "QThread: Destroyed while thread is still running".
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+        try:
             futures = {ex.submit(self._ping_one, c): c for c in self._configs}
-            for fut in concurrent.futures.as_completed(futures):
-                cfg = futures[fut]
-                try:
-                    ms = fut.result()
-                except Exception:
-                    ms = None
-                self.pinged.emit(cfg.name, ms)
+            pending = set(futures)
+            while pending and not self.isInterruptionRequested():
+                done, pending = concurrent.futures.wait(
+                    pending, timeout=0.2,
+                    return_when=concurrent.futures.FIRST_COMPLETED)
+                for fut in done:
+                    if self.isInterruptionRequested():
+                        return
+                    cfg = futures[fut]
+                    try:
+                        ms = fut.result()
+                    except Exception:
+                        ms = None
+                    self.pinged.emit(cfg.name, ms)
+        finally:
+            # Abandon in-flight connects instead of blocking the join on them
+            # (cancel_futures skips ones not yet started).
+            ex.shutdown(wait=False, cancel_futures=True)
 
     @staticmethod
     def _ping_one(cfg: ProxyConfig) -> Optional[int]:
@@ -112,6 +131,10 @@ class _SubsRefreshThread(QThread):
         ok = 0
         errors: list[tuple] = []  # (url, FetchError)
         for url in self._urls:
+            # Bail between URLs if the dialog is closing, so wait() doesn't hang
+            # on a fresh fetch (v3.4.1 — same QThread-destroy crash guard).
+            if self.isInterruptionRequested():
+                return
             try:
                 # DPI-blocked direct fetch auto-falls-back through the sing-box
                 # health-proxy (tunnels via the active VPN). v3.1.2.
@@ -471,6 +494,34 @@ class ConfigsPickerDialog(QDialog):
         # Re-order now that latencies are in (only affects the speed sort).
         if self._sort_mode == _SORT_SPEED:
             self._refresh()
+
+    # --- clean teardown ---------------------------------------------------
+
+    def _stop_threads(self) -> None:
+        """Stop + WAIT for the worker QThreads before this dialog (which PARENTS
+        them) is destroyed. A QThread destroyed while still running aborts the
+        whole app with a C++ qFatal ("QThread: Destroyed while thread is still
+        running") — the crash seen when pinging servers and then switching to
+        another. Idempotent; the interruptible run loops return within ~0.2 s."""
+        for t in (self._pinger, self._subs_refresher):
+            try:
+                if t is not None and t.isRunning():
+                    t.requestInterruption()
+                    t.quit()
+                    t.wait(4000)
+            except Exception:
+                pass
+
+    def done(self, result: int) -> None:
+        # accept() and reject() both funnel through done() — the single close
+        # chokepoint. Join workers here so picking a server can't crash the app.
+        self._stop_threads()
+        super().done(result)
+
+    def closeEvent(self, event) -> None:
+        # Covers the [X] / Alt+F4 paths that may not route through done().
+        self._stop_threads()
+        super().closeEvent(event)
 
     def _selected_cfg(self) -> Optional[ProxyConfig]:
         item = self.list_widget.currentItem()

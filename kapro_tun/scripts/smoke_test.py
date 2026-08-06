@@ -1932,6 +1932,67 @@ def _v34_network_watchdog_debounce() -> None:
 
 check("roaming: network watchdog debounces + gates on connected (v3.4.0)",
       _v34_network_watchdog_debounce)
+
+
+def _v341_picker_pinger_joined_on_close() -> None:
+    """v3.4.1: pinging servers then switching (closing the picker) must NOT
+    abort the app with 'QThread: Destroyed while thread is still running'. The
+    picker joins its worker threads in done()/closeEvent, and the pinger is
+    interruptible so the join returns fast. Regression guard for the reported
+    crash."""
+    import os as _os
+    import threading as _th
+    import time as _time
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from kapro_tun.core.parser import ProxyConfig
+    from kapro_tun.gui import configs_picker as cp
+    _app = QApplication.instance() or QApplication([])
+
+    # Make each ping BLOCK deterministically (no network needed): the executor
+    # workers wait on a gate, so the pinger stays "running" until we interrupt.
+    gate = _th.Event()
+
+    def _slow_ping(_cfg):
+        gate.wait(5)
+        return None
+
+    orig = cp._PingerThread.__dict__["_ping_one"]
+    cp._PingerThread._ping_one = staticmethod(_slow_ping)
+    cfgs = [ProxyConfig(name=f"s{i}", protocol="vless", raw_url="",
+                        outbound={"server": "x", "server_port": 443})
+            for i in range(6)]
+    try:
+        # (1) A running pinger stops within a fraction of a second of
+        # requestInterruption(), even though every _ping_one is blocked ~5s.
+        t = cp._PingerThread(cfgs)
+        t.start()
+        _time.sleep(0.15)
+        if not t.isRunning():
+            raise AssertionError("pinger should be running")
+        t.requestInterruption()
+        if not t.wait(2000):
+            raise AssertionError("interruptible pinger must stop well under 5s")
+
+        # (2) Closing the picker while a ping is in flight must JOIN the thread —
+        # done() (accept/reject) is the crash chokepoint. After it, the worker
+        # must no longer be running (so its C++ object is safe to destroy).
+        dlg = cp.ConfigsPickerDialog(cfgs, current_name="s0")
+        dlg._start_pings()
+        _time.sleep(0.15)
+        if not (dlg._pinger and dlg._pinger.isRunning()):
+            raise AssertionError("picker ping should be running before close")
+        pinger = dlg._pinger
+        dlg.done(0)                  # user picks / cancels → dialog closes
+        if pinger.isRunning():
+            raise AssertionError("done() must join the pinger (else qFatal on destroy)")
+    finally:
+        gate.set()                   # release the blocked executor workers
+        cp._PingerThread._ping_one = orig
+
+
+check("crash: picker joins ping thread on close, no QThread-destroy abort (v3.4.1)",
+      _v341_picker_pinger_joined_on_close)
 check("ui: typography tokens present + letter-spacing 0", _typography_tokens_in_qss)
 check("ui: traffic legend keeps fixed-width values (no jitter)", _traffic_legend_fixed_width)
 check("ui: sparkline Y-scale eases (hysteresis, no snap)", _sparkline_scale_hysteresis)

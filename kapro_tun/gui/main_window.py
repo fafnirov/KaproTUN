@@ -2758,6 +2758,26 @@ class MainWindow(QMainWindow):
             # No tray support — fall back to real quit so user isn't stranded.
             self._on_quit_for_real()
 
+    def _join_workers(self) -> None:
+        """Stop + join every owned worker QThread before teardown.
+
+        A QThread destroyed while still running aborts the whole process with a
+        C++ qFatal ("QThread: Destroyed while thread is still running"). On quit
+        the app-lifetime workers below (ping / probe / connect / update) may
+        still be mid-run; requestInterruption()+quit()+wait() each so none is
+        deleted while running. Best-effort + bounded — never let cleanup raise."""
+        for name in ("_connect_worker", "_ip_probe", "_tray_pinger",
+                     "_autopick_pinger", "_update_worker"):
+            w = getattr(self, name, None)
+            try:
+                if w is not None and w.isRunning():
+                    if hasattr(w, "requestInterruption"):
+                        w.requestInterruption()
+                    w.quit()
+                    w.wait(4000)
+            except Exception:
+                pass
+
     def _on_quit_for_real(self) -> None:
         """Disconnect, tear down tray, terminate the QApplication event loop.
 
@@ -2776,6 +2796,7 @@ class MainWindow(QMainWindow):
             self._net_watchdog.stop()
         except Exception:
             pass
+        self._join_workers()
         if self.manager.is_connected():
             self.manager.disconnect()
         self.tray.hide()
@@ -2888,6 +2909,7 @@ class MainWindow(QMainWindow):
                 self._net_watchdog.stop()
             except Exception:
                 pass
+            self._join_workers()
             if self.manager.is_connected():
                 self.manager.disconnect()
             event.accept()
