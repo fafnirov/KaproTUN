@@ -110,6 +110,21 @@ _ALWAYS_PROXY_SUFFIXES = [
     "ytimg.com",            # i.ytimg.com thumbnails
     "ggpht.com",            # YouTube avatars/thumbs
     "youtubei.googleapis.com",
+    # WhatsApp + Meta (v3.4.2) — DPI-blocked in RU (ERR_CONNECTION_CLOSED = a
+    # TLS-SNI reset on the DIRECT path). Meta operates RU edge PoPs whose IPs can
+    # land in geoip:ru, so "RU IP → direct" would push these OUT the real
+    # interface straight into the block. Force them through the tunnel (encrypted
+    # SNI) like YouTube. whatsapp.net covers the media/websocket backend
+    # (*.whatsapp.net); the others cover Meta's family which is blocked too.
+    "whatsapp.com",         # web.whatsapp.com + *.whatsapp.com
+    "whatsapp.net",         # g/mmg/media *.whatsapp.net (chat + media transport)
+    "wa.me",
+    "facebook.com",
+    "fbcdn.net",            # Meta CDN (also serves WhatsApp/Instagram assets)
+    "facebook.net",
+    "fb.com",
+    "instagram.com",
+    "cdninstagram.com",
 ]
 
 

@@ -5737,6 +5737,43 @@ check("config: QUIC (udp/443) rejected on gvisor, kept on Turbo (v3.3.2)",
       _v3_quic_reject_on_gvisor_only)
 
 
+def _v342_whatsapp_meta_forced_through_vpn() -> None:
+    """v3.4.2: WhatsApp/Meta are DPI-blocked in RU; their edge IPs can land in
+    geoip:ru, so "RU IP → direct" would leak them onto the physical NIC straight
+    into the block (ERR_CONNECTION_CLOSED). They must be force-proxied BEFORE the
+    geoip:ru direct rule, exactly like YouTube."""
+    from kapro_tun.core import sing_box_config as sb
+    need = {"whatsapp.com", "whatsapp.net", "wa.me", "facebook.com",
+            "instagram.com"}
+    missing = need - set(sb._ALWAYS_PROXY_SUFFIXES)
+    if missing:
+        raise AssertionError(f"WhatsApp/Meta must be force-proxied; missing {missing}")
+
+    _o_ru, _o_linux = sb._ru_cidrs, sb._IS_LINUX
+    sb._ru_cidrs = lambda: [f"10.{i // 256}.{i % 256}.0/24" for i in range(2000)]
+    sb._IS_LINUX = False
+    try:
+        c = sb.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                            route_ru_direct=True)
+    finally:
+        sb._ru_cidrs, sb._IS_LINUX = _o_ru, _o_linux
+    rules = c["route"]["rules"]
+    i_forced = next((i for i, r in enumerate(rules)
+                     if r.get("outbound") == "proxy"
+                     and "whatsapp.com" in (r.get("domain_suffix") or [])), None)
+    i_geoip = next((i for i, r in enumerate(rules)
+                    if r.get("outbound") == "direct"
+                    and isinstance(r.get("ip_cidr"), list) and len(r["ip_cidr"]) > 1000), None)
+    if i_forced is None:
+        raise AssertionError("whatsapp.com must be in the force-proxy domain rule")
+    if i_geoip is not None and i_forced >= i_geoip:
+        raise AssertionError("WhatsApp force-proxy must precede the geoip:ru direct rule")
+
+
+check("routing: WhatsApp/Meta forced through VPN before geoip:ru (v3.4.2)",
+      _v342_whatsapp_meta_forced_through_vpn)
+
+
 def _v3_app_log_utf8_bom() -> None:
     """v3.3.2: app.log is written with a leading UTF-8 BOM so Windows
     PowerShell 5.1 Get-Content / Notepad auto-detect UTF-8 (no Cyrillic
