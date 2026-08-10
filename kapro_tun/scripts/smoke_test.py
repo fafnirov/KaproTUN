@@ -4673,18 +4673,44 @@ def _v3_dns_hijack_and_leak() -> None:
                for r in c["route"]["rules"]):
         raise AssertionError("missing DNS hijack rule (protocol:dns → hijack-dns)")
     servers = c["dns"]["servers"]
+    # v3.4.3: the DEFAULT resolver is still the system one (final=local) — general
+    # traffic must never ride DoH, which is what v3.1.1 removed (DPI-throttled DoH
+    # black-holed DNS and false-failed the connect gate). The ONLY addition
+    # allowed is a DoH resolver detoured through the proxy, used exclusively for
+    # the force-proxied (RKN-poisoned) domains via a dns rule.
+    if c["dns"].get("final") != "local":
+        raise AssertionError(f"default resolver must stay the system one, got final={c['dns'].get('final')}")
+    by_tag = {s.get("tag"): s for s in servers}
+    sys_srv = by_tag.get("local")
+    if sys_srv is None:
+        raise AssertionError(f"missing the system resolver (tag=local), got {servers}")
     if _sb_v3._IS_LINUX:
         # v3.1.6: Linux resolves via an explicit udp upstream (type:local would
         # loop through systemd-resolved + hijack-dns).
-        if not (len(servers) == 1 and servers[0].get("type") == "udp"):
-            raise AssertionError(f"Linux DNS must be a single udp upstream, got {servers}")
-    elif servers != [{"type": "local", "tag": "local"}]:
-        raise AssertionError(f"DNS must be a single system (type:local) server, got {servers}")
+        if sys_srv.get("type") != "udp":
+            raise AssertionError(f"Linux system resolver must be udp, got {sys_srv}")
+    elif sys_srv != {"type": "local", "tag": "local"}:
+        raise AssertionError(f"system resolver must be type:local, got {sys_srv}")
+    for s in servers:
+        if s.get("tag") == "local":
+            continue
+        if s.get("detour") != "proxy":
+            raise AssertionError(
+                f"a non-system resolver is only allowed through the proxy, got {s}")
+        used = [r for r in c["dns"].get("rules", [])
+                if r.get("server") == s.get("tag") and r.get("domain_suffix")]
+        if not used:
+            raise AssertionError(
+                f"proxy resolver {s.get('tag')} must be scoped to a domain rule")
     if c["dns"].get("strategy") != "ipv4_only":
         raise AssertionError("DNS strategy must be ipv4_only (matches 2000::/3 reject)")
-    # No DoH and no resolver-IP carve-out route rule may survive.
-    if any(s.get("type") == "https" for s in servers):
-        raise AssertionError("custom DoH must be gone — DNS is system only")
+    # No DIRECT-path DoH may survive: that's what v3.1.1 removed (a DoH exchange
+    # over the physical NIC is DPI-throttled on RU networks → black-holed DNS +
+    # false connect-gate failures). DoH is allowed ONLY detoured through the
+    # proxy (v3.4.3), where it rides the live tunnel and DPI can't see it.
+    if any(s.get("type") == "https" and s.get("detour") != "proxy" for s in servers):
+        raise AssertionError("DoH on the direct path must be gone (proxy-detoured only)")
+    # No resolver-IP carve-out route rule may survive.
     if any(r.get("outbound") == "direct" and r.get("port") in ([443], [53])
            for r in c["route"]["rules"]):
         raise AssertionError("resolver-IP carve-out rule must be gone (type:local self-egresses)")
@@ -5131,11 +5157,26 @@ def _v3_dns_and_split_routing() -> None:
     # --- DNS is system in every mode, the leak kwarg is ignored ---
     c_dns, rules_dns = build(True, True)
     _dns_servers = c_dns["dns"]["servers"]
+    # v3.4.3: system resolver stays the DEFAULT; the only extra server allowed is
+    # the DoH-through-proxy one scoped to the force-proxied (poisoned) domains.
+    if c_dns["dns"].get("final") != "local":
+        raise AssertionError("default resolver must stay the system one (final=local)")
+    _sys_srv = next((s for s in _dns_servers if s.get("tag") == "local"), None)
+    if _sys_srv is None:
+        raise AssertionError("missing the system resolver (tag=local)")
     if sys.platform.startswith("linux"):
-        if not (len(_dns_servers) == 1 and _dns_servers[0].get("type") == "udp"):
-            raise AssertionError("Linux DNS must be a single udp upstream")
-    elif _dns_servers != [{"type": "local", "tag": "local"}]:
-        raise AssertionError("DNS must be a single system (type:local) server")
+        if _sys_srv.get("type") != "udp":
+            raise AssertionError("Linux system resolver must be a udp upstream")
+    elif _sys_srv != {"type": "local", "tag": "local"}:
+        raise AssertionError("system resolver must be type:local")
+    if any(s.get("tag") != "local" and s.get("detour") != "proxy" for s in _dns_servers):
+        raise AssertionError("any non-system resolver must be detoured through the proxy")
+    # WhatsApp/Meta (RKN-poisoned) must resolve through the proxy resolver, not
+    # the poisoned system one — that's what fixes ERR_CONNECTION_CLOSED.
+    _poisoned = [r for r in c_dns["dns"].get("rules", [])
+                 if "whatsapp.com" in (r.get("domain_suffix") or [])]
+    if not _poisoned or not _poisoned[0].get("server"):
+        raise AssertionError("WhatsApp must be resolved by the proxy DoH resolver")
     if not any(r.get("action") == "hijack-dns" for r in rules_dns):
         raise AssertionError("app :53 must still be hijacked into the system resolver")
     if any(r.get("outbound") == "direct" and r.get("port") in ([443], [53])

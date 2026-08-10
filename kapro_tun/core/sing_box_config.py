@@ -224,6 +224,19 @@ def _dns_block() -> dict[str, Any]:
     (auto_detect_interface). On Windows that means the stub at 127.0.0.1:53 and
     any upstream it forwards to leave via the real NIC, NOT back through the TUN,
     so the hijacked-:53 → local-resolve path can't re-capture itself."""
+    # Clean resolver for BLOCKED / geo-restricted domains (v3.4.3). RKN poisons
+    # the physical-NIC system resolver for blocked hosts — web.whatsapp.com comes
+    # back as a fake ULA (fdfe:dcba:9876::2) and/or a tampered A record, so the
+    # browser connects into a black hole → ERR_CONNECTION_CLOSED, even though the
+    # domain is force-proxied. A DoH resolver dialed THROUGH the proxy resolves
+    # server-side, past the poisoning. This is NOT the direct-DoH removed in
+    # v3.1.1 (that was DPI-throttled on the physical NIC): it rides the already-up
+    # tunnel, invisible to client-side DPI, and is used ONLY for the force-proxied
+    # domains — everything else keeps the fast, reliable system resolver.
+    proxy_dns = {"type": "https", "server": "1.1.1.1", "detour": "proxy",
+                 "tag": "proxy-dns"}
+    poison_rule = {"domain_suffix": list(_ALWAYS_PROXY_SUFFIXES),
+                   "server": "proxy-dns"}
     if _IS_LINUX:
         # On Linux the OS resolver is systemd-resolved (127.0.0.53). A `type:
         # local` server would ask IT, but systemd-resolved forwards back through
@@ -234,13 +247,20 @@ def _dns_block() -> dict[str, Any]:
         # with route.default_mark set, so the query leaves via the physical NIC,
         # not back into the tunnel.
         return {
-            "servers": [{"type": "udp", "server": _linux_upstream_dns(),
-                         "tag": "local"}],
+            "servers": [
+                {"type": "udp", "server": _linux_upstream_dns(), "tag": "local"},
+                proxy_dns,
+            ],
+            "rules": [poison_rule],
             "final": "local",
             "strategy": "ipv4_only",
         }
     return {
-        "servers": [{"type": "local", "tag": "local"}],
+        "servers": [
+            {"type": "local", "tag": "local"},
+            proxy_dns,
+        ],
+        "rules": [poison_rule],
         "final": "local",
         "strategy": "ipv4_only",
     }
