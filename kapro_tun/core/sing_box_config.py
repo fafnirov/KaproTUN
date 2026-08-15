@@ -201,6 +201,62 @@ def ensure_transport_supported(proxy) -> None:
         f"Возьми сервер на обычном TCP / WS / gRPC.")
 
 
+# --- games bypass (v3.5.0) -------------------------------------------------
+# Games have no reason to ride the tunnel here: they aren't geo-blocked, and a
+# proxied hop only adds latency + jitter, which is exactly what matters in a
+# match. Domain rules DON'T work for this: gameplay is UDP straight to raw IPs
+# (Valve's SDR relays, Riot Direct), with no DNS lookup in the hot path.
+#
+# So we match by PROCESS, which sing-box resolves per-connection on Windows —
+# that catches every packet a game emits regardless of protocol, port or IP.
+_GAME_PROCESS_NAMES = [
+    # Steam client + its helpers (store, downloads, friends overlay)
+    "steam.exe", "steamwebhelper.exe", "steamservice.exe", "steamerrorreporter.exe",
+    # Riot client stack
+    "riotclientservices.exe", "riotclientux.exe", "riotclientcrashhandler.exe",
+    # League of Legends
+    "leagueclient.exe", "leagueclientux.exe", "league of legends.exe",
+    # VALORANT
+    "valorant.exe", "valorant-win64-shipping.exe",
+]
+
+# Every game INSTALLED under these paths, without enumerating each .exe: Steam
+# puts games in <library>/steamapps/common/<Game>/…, Riot under …/Riot Games/….
+# Go RE2, case-insensitive; the class matches either slash flavour.
+_GAME_PATH_REGEXPS = [
+    r"(?i)[\\/]steamapps[\\/]common[\\/]",
+    r"(?i)[\\/]riot games[\\/]",
+]
+
+# Store / CDN / auth hosts — these DO resolve, and sending downloads + login
+# direct keeps patch speed at line rate instead of the proxy's.
+_GAME_DIRECT_SUFFIXES = [
+    # Valve / Steam
+    "steampowered.com", "steamcommunity.com", "steamcontent.com",
+    "steamstatic.com", "steamusercontent.com", "steamgames.com",
+    "steamserver.net", "valvesoftware.com", "valve.net",
+    # Riot
+    "riotgames.com", "riotcdn.net", "leagueoflegends.com",
+    "playvalorant.com", "valorant.com",
+]
+
+
+def _games_direct_rules() -> list[dict[str, Any]]:
+    """Route rules that send Steam/Riot traffic out the real NIC.
+
+    Deliberately emitted BEFORE the QUIC reject: some titles speak QUIC/UDP 443,
+    and the reject rule would otherwise kill those flows before this rule is
+    reached (first match wins)."""
+    return [
+        {"process_name": list(_GAME_PROCESS_NAMES),
+         "action": "route", "outbound": "direct"},
+        {"process_path_regex": list(_GAME_PATH_REGEXPS),
+         "action": "route", "outbound": "direct"},
+        {"domain_suffix": list(_GAME_DIRECT_SUFFIXES),
+         "action": "route", "outbound": "direct"},
+    ]
+
+
 def _dns_block() -> dict[str, Any]:
     """DNS is ALWAYS the system resolver (v3.1.1).
 
@@ -293,6 +349,7 @@ def build_config(
     block_ads: bool = False,
     route_ru_direct: bool = False,
     high_speed: bool = False,
+    games_direct: bool = False,
     log_level: str = "warn",
     on_log=None,
 ) -> dict[str, Any]:
@@ -348,6 +405,10 @@ def build_config(
     # v6 never egresses the physical NIC (no leak). LAN-direct MUST precede reject.
     rules.append({"ip_cidr": list(PRIVATE_CIDRS6), "action": "route", "outbound": "direct"})
     rules.append({"ip_cidr": ["2000::/3"], "action": "reject", "method": "default"})
+    # Games bypass (v3.5.0) — MUST precede the QUIC reject below, or a title
+    # speaking QUIC/UDP 443 would be rejected before it can be sent direct.
+    if games_direct:
+        rules.extend(_games_direct_rules())
     # QUIC / HTTP-3 (UDP :443) reject on the gvisor stack (v3.3.2). The
     # userspace gvisor UDP path does NOT carry QUIC-over-VLESS/Trojan
     # reliably: a foreign site loads fine over TCP at first, then the browser
@@ -455,6 +516,7 @@ def write_config(
     block_ads: bool = False,
     route_ru_direct: bool = False,
     high_speed: bool = False,
+    games_direct: bool = False,
     on_log=None,
 ) -> str:
     """Build + atomically write the runtime config (user-only perms; it carries
@@ -464,7 +526,8 @@ def write_config(
         proxy, direct_domains,
         server_ip=server_ip, dns_option=dns_option,
         dns_leak_protection=dns_leak_protection, block_ads=block_ads,
-        route_ru_direct=route_ru_direct, high_speed=high_speed, on_log=on_log,
+        route_ru_direct=route_ru_direct, high_speed=high_speed,
+        games_direct=games_direct, on_log=on_log,
     )
     target = paths.write_secure_text(
         paths.sing_box_runtime_config_file(),

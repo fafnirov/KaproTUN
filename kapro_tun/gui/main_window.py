@@ -526,6 +526,17 @@ class SettingsPage(QWidget):
         ru_direct_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(ru_direct_hint)
 
+        # --- Games bypass the VPN — v3.5.0 ---
+        self.games_check = QCheckBox(tr("mw.games_check"))
+        self.games_check.setChecked(bool(manager.settings.get("games_direct", True)))
+        self.games_check.toggled.connect(self._on_games_direct_changed)
+        outer.addWidget(self.games_check)
+        games_hint = QLabel(tr("mw.games_hint"))
+        games_hint.setObjectName("dim")
+        games_hint.setWordWrap(True)
+        games_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(games_hint)
+
         # --- Turbo (kernel TUN stack) — v3.3.0 ---
         self.turbo_check = QCheckBox(tr("mw.turbo_check"))
         self.turbo_check.setChecked(bool(manager.settings.get("high_speed", False)))
@@ -738,6 +749,9 @@ class SettingsPage(QWidget):
     def _on_webrtc_leak_changed(self, checked: bool) -> None:
         self._manager.update_settings(webrtc_leak_protection=checked)
         self.settings_changed.emit()
+
+    def _on_games_direct_changed(self, checked: bool) -> None:
+        self._manager.update_settings(games_direct=checked)
 
     def _on_route_ru_direct_changed(self, checked: bool) -> None:
         self._manager.update_settings(route_ru_direct=checked)

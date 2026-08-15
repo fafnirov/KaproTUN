@@ -573,6 +573,8 @@ class ConnectionManager:
         # (Turbo kernel stack) defaults OFF.
         route_ru_direct = bool(self.settings.get("route_ru_direct", True))
         high_speed = bool(self.settings.get("high_speed", False))
+        # v3.5.0: Steam/Riot games bypass the tunnel (matched by process).
+        games_direct = bool(self.settings.get("games_direct", True))
 
         # Honest ONE-TIME notice (not on every reconnect) that ad-block is
         # legacy-only — see _note_singbox_adblock_once().
@@ -584,9 +586,24 @@ class ConnectionManager:
         cfg_path = sing_box_config.write_config(
             config, direct_domains, server_ip=server_ip,
             block_ads=block_ads, route_ru_direct=route_ru_direct,
-            high_speed=high_speed, on_log=self._log,
+            high_speed=high_speed, games_direct=games_direct, on_log=self._log,
         )
         ok, msg = sing_box_config.check_config(cfg_path)
+        if not ok and games_direct:
+            # Safety net (v3.5.0): the games bypass uses process-based rules
+            # (process_name / process_path_regex). If the installed engine build
+            # doesn't accept them, a rejected config would mean the user simply
+            # CAN'T CONNECT — a far worse outcome than routing games through the
+            # tunnel. So drop the games rules and try once more instead.
+            self._log("[!] Движок отверг конфиг с правилами для игр — "
+                      "пересобираю без них (игры пойдут через VPN).")
+            app_log.log(f"[games-direct] config rejected, retrying without it: {msg}")
+            cfg_path = sing_box_config.write_config(
+                config, direct_domains, server_ip=server_ip,
+                block_ads=block_ads, route_ru_direct=route_ru_direct,
+                high_speed=high_speed, games_direct=False, on_log=self._log,
+            )
+            ok, msg = sing_box_config.check_config(cfg_path)
         if not ok:
             paths.remove_runtime_configs()
             raise ConnectionError(tr("err.singbox_rejected_config", msg=msg))

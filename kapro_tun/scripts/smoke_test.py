@@ -5815,6 +5815,63 @@ check("routing: WhatsApp/Meta forced through VPN before geoip:ru (v3.4.2)",
       _v342_whatsapp_meta_forced_through_vpn)
 
 
+def _v35_games_direct() -> None:
+    """v3.5.0: Steam/Riot bypass the tunnel, matched BY PROCESS (gameplay is UDP
+    to raw IPs — domain rules can't see it). Critical ordering: the games rules
+    must precede the QUIC (udp/443) reject, or a title speaking QUIC would be
+    rejected before it can be routed direct."""
+    from kapro_tun.core import sing_box_config as sb
+    from kapro_tun.core import storage as _st
+
+    if _st.DEFAULT_SETTINGS.get("games_direct") is not True:
+        raise AssertionError("games_direct must default to True")
+
+    _o_linux = sb._IS_LINUX
+    sb._IS_LINUX = False
+    try:
+        on = sb.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                             games_direct=True, high_speed=False)
+        off = sb.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                              games_direct=False, high_speed=False)
+    finally:
+        sb._IS_LINUX = _o_linux
+
+    def _idx(rules, pred):
+        return next((i for i, r in enumerate(rules) if pred(r)), None)
+
+    rules = on["route"]["rules"]
+    i_proc = _idx(rules, lambda r: "steam.exe" in (r.get("process_name") or []))
+    i_path = _idx(rules, lambda r: any("steamapps" in p
+                                       for p in (r.get("process_path_regex") or [])))
+    i_dom = _idx(rules, lambda r: "riotgames.com" in (r.get("domain_suffix") or [])
+                 and r.get("outbound") == "direct")
+    i_quic = _idx(rules, lambda r: r.get("action") == "reject"
+                  and r.get("network") == "udp" and r.get("port") == 443)
+    if i_proc is None:
+        raise AssertionError("games_direct must add a process_name rule (steam.exe)")
+    if i_path is None:
+        raise AssertionError("games_direct must add a steamapps process_path_regex rule")
+    if i_dom is None:
+        raise AssertionError("games_direct must send Riot/Steam domains direct")
+    for name, i in (("process", i_proc), ("path", i_path)):
+        if on["route"]["rules"][i].get("outbound") != "direct":
+            raise AssertionError(f"{name} rule must route to direct")
+    if i_quic is not None and not (i_proc < i_quic and i_path < i_quic):
+        raise AssertionError("games rules MUST precede the QUIC reject (else UDP/443 games die)")
+    # Riot's whole install tree is covered without enumerating each title.
+    if not any("riot games" in p.lower()
+               for r in rules for p in (r.get("process_path_regex") or [])):
+        raise AssertionError("Riot install path must be covered by a regex rule")
+    # Off = no games rules at all.
+    if _idx(off["route"]["rules"],
+            lambda r: r.get("process_name") or r.get("process_path_regex")) is not None:
+        raise AssertionError("games_direct=False must emit no process rules")
+
+
+check("routing: Steam/Riot games bypass VPN by process, before QUIC reject (v3.5.0)",
+      _v35_games_direct)
+
+
 def _v3_app_log_utf8_bom() -> None:
     """v3.3.2: app.log is written with a leading UTF-8 BOM so Windows
     PowerShell 5.1 Get-Content / Notepad auto-detect UTF-8 (no Cyrillic
