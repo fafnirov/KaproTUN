@@ -2060,6 +2060,52 @@ check("bypass: user apps go direct via the generic process rule (v3.5.2)",
       _v352_bypass_apps_generic_mechanism)
 
 
+def _v360_game_kernel_bypass() -> None:
+    """v3.6.0: game servers must leave the TUN at the ROUTE level, not just via
+    a `direct` rule.
+
+    Measured on a live session: traffic matched by a sing-box `direct` rule
+    STILL moved the KaproTun interface counters, i.e. it crossed the gVisor
+    userspace stack before reaching the physical NIC. That userspace tax is what
+    added multi-second stalls to League while the client ran — the process rules
+    changed the destination, not the path. route_exclude_address keeps those
+    destinations out of the tunnel entirely."""
+    from kapro_tun.core import sing_box_config as sb
+    _o_linux = sb._IS_LINUX
+    sb._IS_LINUX = False
+    try:
+        on = sb.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                             games_direct=True)
+        off = sb.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                              games_direct=False)
+    finally:
+        sb._IS_LINUX = _o_linux
+    excl = on["inbounds"][0].get("route_exclude_address")
+    if not excl:
+        raise AssertionError(
+            "games_direct must exclude game networks from the TUN at route level "
+            "(a `direct` rule alone still pays the userspace-stack cost)")
+    if "route_exclude_address" in off["inbounds"][0]:
+        raise AssertionError("no route exclusions when the games toggle is off")
+    # Riot Direct and Valve ranges must be there; Cloudflare must NOT (excluding
+    # it would punch a hole through the tunnel for unrelated traffic).
+    if not any(c.startswith("104.160.128.") for c in excl):
+        raise AssertionError("Riot Direct range missing from the exclusions")
+    if not any(c.startswith("155.133.224.") for c in excl):
+        raise AssertionError("Valve range missing from the exclusions")
+    for bad in ("172.64.0.0/13", "104.16.0.0/13", "0.0.0.0/0"):
+        if bad in excl:
+            raise AssertionError(f"{bad} must never be excluded — it would bypass the VPN broadly")
+    # The process rules stay as well: they still catch game traffic to any IP
+    # outside these ranges.
+    if not any(r.get("process_name") for r in on["route"]["rules"]):
+        raise AssertionError("process-based game rules must remain alongside the exclusions")
+
+
+check("games: server networks leave the TUN at route level, not just `direct` (v3.6.0)",
+      _v360_game_kernel_bypass)
+
+
 def _v352_net_diag_snapshot_and_report() -> None:
     """v3.5.2: the diagnostics collector never raises, and the report never
     claims a probe FAILED when it was never run (quick mode) — a false FAIL is

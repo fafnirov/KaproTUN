@@ -241,6 +241,40 @@ _GAME_DIRECT_SUFFIXES = [
 ]
 
 
+# Game-server networks excluded from the TUN at the ROUTE level (v3.6.0).
+#
+# This is the difference between "direct" and actually fast. A sing-box `direct`
+# rule still makes the packet travel: app -> TUN device -> gVisor USERSPACE
+# stack -> sing-box -> physical NIC. Measured on a live session: traffic matched
+# by the geoip:ru direct rule still moved the KaproTun interface counters. So a
+# latency-sensitive game paid the full userspace tax even while "bypassing" the
+# VPN, which is why the process rules alone never fixed the in-game stalls.
+#
+# route_exclude_address tells auto_route not to capture these destinations at
+# all, so Windows routes them straight out the physical NIC — the same path the
+# packets take with the VPN switched off. Kernel bypass, zero userspace cost.
+#
+# Ranges: Riot Direct (AS6507) and Valve/Steam game networks — the published
+# game-server blocks, NOT their web/CDN frontends (those live on Cloudflare and
+# excluding them would punch a hole through the tunnel for unrelated traffic).
+_GAME_DIRECT_CIDRS = [
+    # Riot Direct — League of Legends / Valorant game servers
+    "104.160.128.0/22",
+    "162.249.72.0/21",
+    "185.40.64.0/22",
+    "192.64.168.0/21",
+    "203.29.184.0/21",
+    "216.133.224.0/19",
+    # Valve / Steam game + content servers
+    "155.133.224.0/19",
+    "162.254.192.0/21",
+    "185.25.180.0/22",
+    "205.196.6.0/24",
+    "208.64.200.0/22",
+    "208.78.164.0/22",
+]
+
+
 def _games_direct_rules() -> list[dict[str, Any]]:
     """Route rules that send Steam/Riot traffic out the real NIC.
 
@@ -481,6 +515,12 @@ def build_config(
         # manually-routed TUN at all.
         "endpoint_independent_nat": True,
     }
+    # True kernel bypass for game servers (v3.6.0) — see _GAME_DIRECT_CIDRS.
+    # Without this the game's packets still cross the userspace stack even when
+    # a rule sends them `direct`, which is what made the tunnel add multi-second
+    # stalls to League while the client was running.
+    if games_direct and not _IS_LINUX:
+        tun_inbound["route_exclude_address"] = list(_GAME_DIRECT_CIDRS)
     route_block: dict[str, Any] = {
         "rules": rules,
         "final": "proxy",
