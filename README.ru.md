@@ -1,142 +1,158 @@
-# KaproVPN
+# KaproTUN
 
-[![Релиз](https://img.shields.io/github/v/release/fafnirov/KaproVPN?style=flat-square&color=f59e0b&label=latest)](https://github.com/fafnirov/KaproVPN/releases/latest)
-[![Лицензия](https://img.shields.io/github/license/fafnirov/KaproVPN?style=flat-square&color=blue)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/fafnirov/KaproTUN?style=flat-square&color=f59e0b&label=latest)](https://github.com/fafnirov/KaproTUN/releases/latest)
+[![License](https://img.shields.io/github/license/fafnirov/KaproTUN?style=flat-square&color=blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square)](https://www.python.org/)
-[![Сборка](https://img.shields.io/github/actions/workflow/status/fafnirov/KaproVPN/release.yml?style=flat-square&label=build)](https://github.com/fafnirov/KaproVPN/actions/workflows/release.yml)
+[![Build](https://img.shields.io/github/actions/workflow/status/fafnirov/KaproTUN/release.yml?style=flat-square&label=build)](https://github.com/fafnirov/KaproTUN/actions/workflows/release.yml)
 
 [English](README.md) · [Русский](README.ru.md)
 
-Кросс-платформенный proxy-клиент (Windows / macOS / Linux) со
-встроенным **split-routing'ом по настраиваемому списку прямых сайтов**.
-Построен поверх [Xray-core](https://github.com/XTLS/Xray-core).
-Бесплатный и open-source — GPL v3, без платных уровней, без телеметрии.
+Десктопный VPN-клиент (Windows / macOS / Linux) на движке **sing-box с
+нативным TUN** и **раздельной маршрутизацией**: российские сайты и игры ходят в
+интернет напрямую по твоему реальному соединению, всё остальное — через
+туннель. Свободный и открытый навсегда: GPL v3, без платных тарифов и
+телеметрии.
 
 <p align="center">
-  <img src="docs/screenshots/main-window.png" alt="Главное окно KaproVPN — тёмная тема, одно-экранный layout" width="640">
+  <img src="docs/screenshots/main-window.png" alt="Главное окно KaproTUN — тёмная тема, один экран" width="640">
 </p>
 
 ---
 
 ### ⬇️ Скачать
 
-Последний стабильный релиз — выбери файл под свою систему:
+Последний стабильный релиз — выбери файл под свою ОС:
 
-| OS | Файл | Заметки |
-|----|------|---------|
-| **Windows 10 / 11 (x64)** | [`KaproVPN-Setup.exe`](https://github.com/fafnirov/KaproVPN/releases/latest) | Per-user установка, админа не нужно |
-| **macOS (Apple Silicon)** | [`KaproVPN-macOS-arm64.dmg`](https://github.com/fafnirov/KaproVPN/releases/latest) | Перетащить в Applications |
-| **Linux (x64)** | [`KaproVPN-Linux-x64.AppImage`](https://github.com/fafnirov/KaproVPN/releases/latest) | `chmod +x` и запустить |
+| ОС | Файл | Примечание |
+|----|------|------------|
+| **Windows 10 / 11 (x64)** | [`KaproTUN-Setup.exe`](https://github.com/fafnirov/KaproTUN/releases/latest) | Установка для текущего пользователя, права админа не нужны |
+| **macOS (Apple Silicon)** | [`KaproTUN-macOS-arm64.dmg`](https://github.com/fafnirov/KaproTUN/releases/latest) | Перетащить в Applications |
+| **Linux (x64)** | [`KaproTUN-Linux-x64.AppImage`](https://github.com/fafnirov/KaproTUN/releases/latest) | `chmod +x` и запустить |
 
-TUN-режим (туннелировать все приложения системно — Telegram, Steam, игры)
-требует прав администратора/root. HTTP-прокси режим работает без админа
-и туннелирует трафик браузера.
+Для Windows также публикуется портативный `KaproTUN.exe`, если ставить не хочется.
 
-#### ⚠️ Windows SmartScreen ругается при первом запуске
+**Для подключения нужны права администратора.** KaproTUN работает только в
+режиме TUN: он создаёт виртуальный сетевой адаптер и туннелирует все
+приложения разом (браузеры, игры, Telegram), а создание такого адаптера требует
+повышения прав. Клиент запросит их при подключении.
 
-Когда запускаешь `KaproVPN-Setup.exe`, Windows Defender SmartScreen
-может выдать **«Система Windows защитила ваш компьютер»** и не дать
-запустить. Это потому что мы **не платим Microsoft $300/год** за
-EV code-signing сертификат — это бесплатный OSS-проект, не коммерческий.
-Чтобы продолжить:
+#### ⚠️ Предупреждение SmartScreen при первом запуске
 
-1. На окне SmartScreen нажми **«Подробнее»**
-2. Нажми **«Выполнить в любом случае»**
+При запуске `KaproTUN-Setup.exe` Windows Defender SmartScreen может показать
+**«Система Windows защитила ваш компьютер»** и отказаться запускать. Причина —
+у нас нет EV-сертификата для подписи кода за $300/год: это свободный
+open-source проект, а не коммерческий продукт. Что делать:
 
-Делать это нужно один раз на каждый релиз. На macOS аналогичное
-окно **«разработчик не идентифицирован»** — правый клик по `.dmg` →
-**Открыть** → **Открыть** (тоже одноразово).
+1. Нажать **«Подробнее»** в окне SmartScreen
+2. Нажать **«Выполнить в любом случае»**
+
+Это делается один раз на релиз. macOS может показать похожее окно
+**«неизвестный разработчик»** — правый клик по `.dmg` → **Открыть** →
+**Открыть** (тоже разово).
 
 ---
 
-## Что делает
+## Что это
 
-GUI для proxy/VPN-соединений (Trojan, VLESS с REALITY и XHTTP, VMess,
-Shadowsocks, Hysteria2) с одной важной фичей: домены из настраиваемого
-списка идут **в обход прокси**, через ваш реальный IP. Всё остальное
-маршрутизируется через прокси-сервер.
+Графический клиент для прокси-протоколов (VLESS в том числе с REALITY, Trojan,
+VMess, Shadowsocks, Hysteria2), который поднимает их как **системный туннель**,
+плюс правила маршрутизации, решающие — по адресу назначения и по конкретному
+приложению — что через этот туннель идти **не должно**.
 
 ## Зачем
 
-Когда вы подключаетесь через иностранный прокси, часть сервисов
-отказывается работать — у них geofence по конкретной стране (банки,
-госпорталы, маркетплейсы). Выключать VPN каждый раз, когда нужно к ним
-обратиться, неудобно. KaproVPN держит прокси включённым для открытого
-интернета, а сайты из вашего списка прямого подключения видят ваш
-реальный адрес.
+Заграничный IP ломает то, что тебе всё ещё нужно: банки, госуслуги и
+маркетплейсы отсекают доступ не из России, а онлайн-игры получают лишние 100+ мс
+задержки из-за маршрута через другой континент. Выключать VPN каждый раз —
+неудобно. KaproTUN оставляет туннель включённым для открытого интернета, а всё
+перечисленное продолжает ходить по твоему реальному соединению.
+
+## Как маршрутизируется трафик
+
+Правила проверяются по порядку — срабатывает первое совпадение:
+
+| № | Трафик | Куда |
+|---|--------|------|
+| 1 | Локальная сеть / Docker / link-local | **напрямую** |
+| 2 | Игры — Steam, Riot (League of Legends, Valorant) и твой список приложений | **напрямую** |
+| 3 | Заблокированные и гео-ограниченные сервисы (YouTube, OpenAI, WhatsApp / Meta) | **через туннель** |
+| 4 | Твой редактируемый список «всегда напрямую» (168 доменов по умолчанию) | **напрямую** |
+| 5 | Любой российский IP (`geoip:ru`) | **напрямую** |
+| 6 | Всё остальное | **через туннель** |
+
+Правило 3 стоит выше «российских» намеренно: у этих сервисов есть узлы, чьи IP
+попадают в `geoip:ru`, и без него они утекли бы на реальный интерфейс — прямо в
+ту блокировку, ради обхода которой их и туннелируют.
 
 ## Возможности
 
-- 🔌 **Все основные форматы share-URL** — `vless://` (включая REALITY
-  и XHTTP), `trojan://`, `vmess://`, `ss://`, `hysteria2://`
-- 📥 **Импорт subscription-URL** — вставляешь один URL, получаешь все
-  конфиги от провайдера. Фоновый авто-рефреш раз в 12 часов
-  (additive-only — рабочие конфиги никогда не удаляются).
-- 🛡 **Реальный firewall kill-switch** — если туннель умрёт, Windows
-  Firewall заблокирует весь outbound кроме процесса активного движка:
-  `sing-box.exe` для движка sing-box TUN, либо `xray.exe` (+ `hysteria.exe`
-  для Hysteria2) для legacy-движка и HTTP-режима. Никаких тихих утечек
-  реального IP.
-- 🔁 **Auto-reconnect** — прозрачно переподключает до 3 раз с backoff
-  если активный движок упал посреди сессии.
-- 🔒 **Конфиги шифруются на диске** — Windows DPAPI (тот же механизм
-  которым Chrome шифрует сохранённые пароли). Старые plaintext-конфиги
-  автоматом перешифровываются при первом запуске.
-- 🌐 **Два режима подключения** —
-  - **HTTP-прокси** (без админа) — браузер + приложения, которые умеют
-    системный прокси, через Xray
-  - **TUN** (нужны админ/root) — туннелирует все приложения, включая игры
-    и Telegram. Движок по умолчанию — **sing-box native TUN**: один процесс
-    владеет TUN-устройством и сам роутит, без локального SOCKS-моста
-    (`127.0.0.1:2081`) и без отдельного tun2socks. **Legacy-движок
-    Xray + tun2socks** остаётся ручным fallback'ом в Настройках → Движок TUN.
-- ✏️ **Редактируемый список «всегда напрямую»** доменов — 108 разумных
-  дефолтов (банки, госуслуги, маркетплейсы, медиа).
-- 📡 **Tray quick-connect** — топ-3 самых быстрых конфига по пингу в
-  меню трея, один клик = переключение.
-- 🌍 **EN / RU локализация** — автоопределение из системной локали,
-  переключение в Settings.
-- 📊 **Живая статистика трафика + пинг на каждый конфиг** в UI.
-- 🔄 **In-app auto-update** — проверяет GitHub Releases, скачивает,
-  ставит.
+- 🔌 **Все основные форматы ссылок** — `vless://` (в т.ч. REALITY), `trojan://`,
+  `vmess://`, `ss://`, `hysteria2://`
+- 🎮 **Игры мимо VPN** — сопоставление по *процессу*, а не по доменам, поэтому у
+  игры остаётся настоящий пинг, пока браузер идёт через туннель. Встроенный
+  список для Steam и Riot; любой свой `.exe` добавляется в настройках.
+- 🇷🇺 **Российские сайты напрямую по умолчанию** — `geoip:ru` → реальный IP,
+  всё прочее → туннель.
+- 📥 **Импорт по ссылке-подписке** — одна ссылка, и все конфиги провайдера уже
+  в клиенте. Фоновое обновление раз в 12 ч (только добавляет, никогда не удаляет
+  рабочие конфиги).
+- 🛡 **Настоящий kill-switch на файрволе** — если туннель умирает, Windows
+  Firewall блокирует весь исходящий трафик кроме `sing-box.exe`. Реальный IP не
+  утечёт незаметно.
+- 🔁 **Самовосстановление** — авто-переподключение с нарастающей паузой, если
+  движок упал, и чистый реконнект при переходе **Ethernet ↔ Wi-Fi** (туннель
+  привязан к интерфейсу, на котором создан, и иначе начал бы течь или зависать).
+- 🩺 **Сетевая диагностика** — адаптеры, маршруты, MTU, маршрут до сервера и
+  реальные тесты TCP/UDP/прокси в одном отчёте, который копируется одной
+  кнопкой. Плюс включаемый **режим сетевой отладки** с логом до миллисекунд,
+  чтобы поймать редкую проблему.
+- 🔒 **Шифрование конфигов на диске** — Windows DPAPI (тот же механизм, которым
+  Chrome защищает сохранённые пароли). Старые открытые конфиги обновляются при
+  первом запуске.
+- 🚫 **Защита от утечек** — IPv6 отклоняется внутри туннеля (без побочного
+  `ERR_NETWORK_ACCESS_DENIED`), WebRTC/STUN блокируются, DNS перехватывается в
+  резолвер туннеля.
+- 📡 **Быстрое подключение из трея** — три самых быстрых по пингу конфига, смена
+  в один клик.
+- 🌍 **Локализация EN / RU**, светлая и тёмная темы, живой график трафика, пинг
+  по каждому конфигу.
+- 🔄 **Автообновление** — проверяет GitHub Releases, скачивает, устанавливает.
 
 ## Приватность
 
-Коротко: **мы не собираем ничего.** Никакой аналитики, никакой
-телеметрии, никакого удалённого логирования. Конфиги шифруются на
-диске на Windows. Access-log Xray явно отключён в нашем конфиге
-(никаких per-domain логов на твоём диске). Опциональный mirror
-для скачивания `kaprovpn.pro/files` хранит nginx access-логи 7 дней,
-потом удаляет; fallback на GitHub доступен всегда.
+Коротко: **мы ничего не собираем.** Никакой аналитики, телеметрии и удалённого
+логирования. Конфиги на Windows шифруются на диске. В журнал пишутся только
+события жизненного цикла, и каждая строка проходит через редактор, вырезающий
+ссылки-конфиги и UUID; содержимое трафика не записывается никогда.
+Необязательное зеркало загрузок на `kaprovpn.pro/files` хранит логи nginx 7
+дней и удаляет их; GitHub как источник доступен всегда.
 
-Полные детали в [SECURITY.md](SECURITY.md), включая адрес для
-responsible disclosure.
+Подробности — в [SECURITY.md](SECURITY.md), включая адрес для ответственного
+раскрытия уязвимостей.
 
 ## Требования
 
-| OS | Минимум |
+| ОС | Минимум |
 |----|---------|
 | Windows | 10 / 11 (x64) |
 | macOS | 12+ (Apple Silicon) |
-| Linux | glibc 2.31+ (Ubuntu 20.04+ и эквиваленты) |
+| Linux | glibc 2.31+ (Ubuntu 20.04+ и аналоги) |
 
-Диск: ~95 МБ в сумме (~57 МБ приложение + ~35 МБ для sing-box + Xray +
-tun2socks + WinTUN, скачиваются при первом подключении — sing-box для
-основного TUN-движка, Xray для HTTP-режима и legacy-движка).
+Место на диске: ~90 МБ (≈57 МБ приложение + ≈33 МБ движок sing-box и, на
+Windows, драйвер WinTUN — скачиваются при первом подключении).
 
 ## Установка и запуск
 
-### Вариант 1 — установщик (рекомендую)
+### Вариант 1 — установщик (рекомендуется)
 
-Скачай нужный файл под свою OS со страницы
-[Releases](https://github.com/fafnirov/KaproVPN/releases/latest)
-и запусти.
+Скачай файл под свою ОС со страницы
+[Releases](https://github.com/fafnirov/KaproTUN/releases/latest) и запусти.
 
-### Вариант 2 — из исходников (для разработки / contributions)
+### Вариант 2 — из исходников (разработка / доработка)
 
 ```bash
-git clone https://github.com/fafnirov/KaproVPN.git
-cd KaproVPN
+git clone https://github.com/fafnirov/KaproTUN.git
+cd KaproTUN
 pip install -r requirements.txt
 python run.py
 ```
@@ -145,127 +161,114 @@ python run.py
 
 ```bash
 pip install -r requirements-build.txt
-pyinstaller KaproVPN.spec          # → dist/KaproVPN.exe (портативная, встраивается в установщик)
-pyinstaller KaproVPN-Setup.spec    # → dist/KaproVPN-Setup.exe (Windows-установщик)
+pyinstaller KaproTUN.spec          # → dist/KaproTUN.exe (портативный, встраивается в установщик)
+pyinstaller KaproTUN-Setup.spec    # → dist/KaproTUN-Setup.exe (установщик для Windows)
 ```
 
-При первом запуске / первом подключении приложение скачает бинарники в
-`%LOCALAPPDATA%\KaproVPN\` (Windows) или `~/.local/share/KaproVPN/`
-(macOS / Linux): **sing-box** (`sing-box/`, основной TUN-движок),
-**Xray-core** (`xray/`, HTTP-режим + legacy-движок) и на Windows
-**tun2socks + wintun.dll** (`tun/`, для legacy-движка и общий WinTUN-драйвер).
+При первом подключении клиент скачивает движок в `%LOCALAPPDATA%\KaproTUN\`
+(Windows) или `~/.local/share/KaproTUN/` (macOS / Linux): **sing-box**
+(`sing-box/`) и, на Windows, драйвер **WinTUN** (`tun/`).
+
+> Версия sing-box намеренно **закреплена на линии 1.12.x**. Линия 1.13 сломала
+> data-plane VLESS на Windows: туннель поднимается, рукопожатие проходит, но
+> байты полезной нагрузки не идут. `sing-box check` это не ловит — ошибка
+> проявляется в рантайме, а не в конфиге. Уже установленная 1.13.x
+> распознаётся и заменяется автоматически.
 
 ## Как это работает
 
-1. Вы вставляете share-URL (например, `vless://…`) или subscription URL.
-   Приложение разбирает его в proxy-outbound и применяет правила
-   split-routing'а:
-   - домены из «direct»-списка → напрямую (ваш реальный IP)
-   - приватные / LAN / Docker диапазоны → всегда напрямую, мимо туннеля
-   - всё остальное → proxy-outbound (разобранный URL)
-   - DNS идёт через туннель при включённой защите от утечек, иначе напрямую
+Ты вставляешь ссылку-конфиг (`vless://…`) или ссылку-подписку. Клиент разбирает
+её в прокси-аутбаунд, генерирует конфиг sing-box с таблицей маршрутизации выше
+и запускает один процесс.
 
-Дальше — в зависимости от режима/движка:
+Единственный `sing-box.exe` владеет TUN-устройством,управляет маршрутами
+(`auto_route` + `auto_detect_interface`), резолвит DNS и сам дозванивается до
+прокси-сервера — **никакого локального SOCKS-моста и никакого tun2socks**.
+Поэтому исчерпание эфемерных портов на loopback, которое подвешивало старый
+движок, здесь невозможно, а `direct`-трафик выходит через физический адаптер
+(петли маршрутизации нет).
 
-- **HTTP-режим** — `xray.exe` слушает на `127.0.0.1:2080` (HTTP) / `:2081`
-  (SOCKS5); системный прокси OS указывается на порт 2080.
-- **TUN-режим · sing-box (по умолчанию)** — один `sing-box.exe` владеет
-  TUN-устройством, сам управляет маршрутами (`auto_route` +
-  `auto_detect_interface`), резолвит DNS и дозванивается до прокси. **Нет
-  моста `127.0.0.1:2081` и нет tun2socks** — поэтому исчерпание эфемерных
-  портов loopback невозможно, а «прямой» трафик уходит через физическую
-  сетевую карту (нет петли маршрутов).
-- **TUN-режим · legacy (ручной fallback)** — `tun2socks.exe` создаёт
-  виртуальный адаптер и форвардит каждый пакет через `127.0.0.1:2081` в
-  `xray.exe`, который роутит по правилам. Выбирается в Настройках для
-  конфигов, которые sing-box пока не умеет (например, транспорт XHTTP).
+**DNS** по умолчанию системный — и это осознанно: DoH-запрос по физическому
+интерфейсу режется DPI во многих российских сетях, что полностью
+черно-дырит резолвинг имён. Исключение — заблокированные и гео-ограниченные
+домены из правила 3: они резолвятся через DoH-резолвер **внутри туннеля**, где
+DPI запрос не видит.
 
-Если активный движок умер не по нашей команде — auto-reconnect переподключает
-**тем же** движком. При включённом firewall kill-switch трафик остаётся
-заблокированным до переподключения или явного дисконнекта — никаких тихих
-утечек.
+**MTU равен 1400** — намеренно консервативно. При большем MTU мелкие пробы
+проходили, а крупные TLS/видео-потоки вставали на маршрутах, где отфильтрован
+PMTUD или фрагментация; 1400 оставляет запас под инкапсуляцию REALITY/VLESS и
+не зависит от ICMP-обратной связи.
+
+> **`ping` и `tracert` непригодны для диагностики при включённом VPN.**
+> Стандартный TUN-стек (gVisor) работает в пространстве пользователя и отвечает
+> на ICMP-echo **локально** — `ping 8.8.8.8` показывает <1 мс и TTL=64, а
+> `tracert` — один хоп. Это ожидаемое поведение стека, а не подмена трафика:
+> реальные TCP и UDP идут через туннель как обычно. Используй
+> **Настройки → Сетевая диагностика**, где выполняются настоящие тесты TCP/UDP.
 
 ## Структура проекта
 
 ```
-kapro_vpn/
+kapro_tun/
 ├── core/
-│   ├── parser.py             # парсеры share-URL (vless / vmess / trojan / ss / hy2)
-│   ├── xray_config.py        # генератор JSON Xray-core со split-routing + DNS-leak hardening
-│   ├── xray_installer.py     # загрузка Xray-core (с mirror-fallback)
-│   ├── xray_process.py       # управление xray-подпроцессом + log rotation
-│   ├── sing_box_config.py    # генератор JSON sing-box (основной TUN-движок) + гейт транспортов
-│   ├── sing_box_installer.py # загрузка sing-box (с mirror-fallback)
-│   ├── sing_box_process.py   # sing-box-подпроцесс + классификатор шумных per-connection логов
-│   ├── tun2socks_installer.py  # legacy-движок
-│   ├── tun2socks_process.py    # legacy-движок
-│   ├── network_routes.py     # роуты/DNS для legacy TUN-движка на Windows
-│   ├── network_routes_unix.py # эквивалент для macOS/Linux
-│   ├── admin.py              # UAC / sudo хелперы
-│   ├── system_proxy.py       # OS HTTP-proxy контроллер (3 платформы)
-│   ├── storage.py            # JSON-персист, прозрачно через DPAPI на Win
-│   ├── secrets_store.py      # обёртка над Windows DPAPI (Chrome-style шифрование на диске)
-│   ├── killswitch.py         # правила Windows Firewall для реального kill-switch
-│   ├── controller.py         # оркестрация connect/disconnect + auto-reconnect
-│   ├── subscription.py       # импорт subscription-URL + 12 ч фоновый refresh
-│   ├── i18n.py               # EN/RU translation tables
+│   ├── parser.py             # разбор ссылок-конфигов (vless / vmess / trojan / ss / hy2)
+│   ├── sing_box_config.py    # генерация JSON для sing-box: маршрутизация, DNS, TUN, проверка транспорта
+│   ├── sing_box_installer.py # скачивание sing-box (зеркало → GitHub), контроль пина 1.12.x
+│   ├── sing_box_process.py   # процесс sing-box + классификатор шума в логах
+│   ├── controller.py         # жизненный цикл подключения, вердикт здоровья, детект смены сети
+│   ├── net_diag.py           # снимок для «Сетевой диагностики» + пробы TCP/UDP
+│   ├── dns_health.py         # ограниченные по времени пробы DNS и транспорта туннеля
+│   ├── network_routes.py     # запросы маршрутов и интерфейсов в Windows
+│   ├── network_routes_unix.py, linux_tun_route.py   # аналоги для macOS / Linux
+│   ├── killswitch.py, ipv6_block.py, webrtc_block.py  # защита от утечек через файрвол
+│   ├── storage.py, secrets_store.py  # хранение настроек, шифрование DPAPI на Windows
+│   ├── subscription.py       # импорт подписок + фоновое обновление
+│   ├── net_conflicts.py      # детект приложений, перехватывающих сеть (напр. Meta Horizon Link)
+│   ├── runtime_guard.py      # не даёт приложению упасть от необработанного исключения в слоте
+│   ├── app_log.py            # журнал с редактированием секретов + режим сетевой отладки
+│   ├── i18n.py               # таблицы переводов EN/RU
 │   └── paths.py
 ├── gui/
-│   ├── main_window.py
-│   ├── tray.py               # системный трей с топ-3 quick-connect
-│   ├── onboarding.py         # первый запуск — 3-карточный welcome
-│   ├── subscription_dialog.py
-│   ├── sites_dialog.py
-│   ├── configs_picker.py
-│   ├── widgets.py
-│   └── styles.py
+│   ├── main_window.py        # главный экран / настройки / логи, сторожа, поток подключения
+│   ├── diagnostics_dialog.py # экран «Сетевая диагностика»
+│   ├── bypass_apps_dialog.py # свои приложения мимо VPN
+│   ├── configs_picker.py, subscription_dialog.py, sites_dialog.py
+│   ├── tray.py               # трей с быстрым подключением к трём лучшим
+│   └── widgets.py, styles.py
 ├── scripts/
-│   └── smoke_test.py         # CI-gate — imports + parser + xray-config + installer-flow
+│   └── smoke_test.py         # проверка в CI — парсеры, генерация конфига, маршрутизация, сторожа
 ├── data/
-│   └── default_sites.json
+│   └── default_sites.json    # список из 168 доменов «напрямую»
 └── main.py
 
-installer/                    # standalone PyInstaller-сборка для KaproVPN-Setup.exe
-├── gui.py                    # Welcome / Maintenance (Reinstall+Uninstall) / Installing
-├── operations.py             # download + copy + ярлыки + Programs & Features
-├── paths.py
-└── main.py
+installer/                    # отдельная сборка PyInstaller для KaproTUN-Setup.exe
 ```
 
-Пользовательские данные (конфиги, список сайтов, настройки, логи) живут в:
-- Windows: `%LOCALAPPDATA%\KaproVPN\`
-- macOS: `~/Library/Application Support/KaproVPN/`
-- Linux: `~/.local/share/KaproVPN/`
+Пользовательские данные (сохранённые конфиги, изменённый список сайтов,
+настройки, логи) лежат в:
+- Windows: `%LOCALAPPDATA%\KaproTUN\`
+- macOS: `~/Library/Application Support/KaproTUN/`
+- Linux: `~/.local/share/KaproTUN/`
 
-## Контрибьюты
+## Как помочь проекту
 
-PR'ы приветствуются. Самые полезные направления сейчас:
+PR приветствуются. Что сейчас полезнее всего:
 
-- **Подписание на macOS** — если у тебя есть платный Apple Developer
-  account, патч в GitHub Actions, который добавит codesigning +
-  notarytool, позволит маковским юзерам не видеть «разработчик не
-  идентифицирован» Gatekeeper-prompt.
-- **Android-клиент** — переехал в отдельный репозиторий:
-  [fafnirov/KaproVPN-Android](https://github.com/fafnirov/KaproVPN-Android)
-  (Kotlin + Compose, v0.1.0 готов). С этим репо синхронизируется только
-  `kapro_vpn/data/default_sites.json` — общий список RU-сайтов для
-  split-routing.
-- **IPv6 в TUN-режиме** — сейчас только IPv4; IPv6-трафик может уходить
-  мимо туннеля.
-- **Больше языков** — `kapro_vpn/core/i18n.py` основан на dict'ах,
-  добавить новый язык — пара часов.
-- **Linux Wayland** — работает на X11/XWayland; нативный Wayland
-  требует доработки PySide6 platform-plugin.
+- **Подпись кода на macOS** — если у тебя есть платный аккаунт Apple Developer,
+  патч, добавляющий codesign + notarytool в сборку GitHub Actions, избавит
+  пользователей macOS от окна Gatekeeper.
+- **Android-клиент** — живёт в отдельном репозитории:
+  [fafnirov/KaproTUN-Android](https://github.com/fafnirov/KaproTUN-Android)
+  (Kotlin + Compose). Список РФ-доменов синхронизируется с этим репозиторием
+  через `kapro_tun/data/default_sites.json`.
+- **Больше языков** — `kapro_tun/core/i18n.py` устроен как словарь, дополнить
+  просто.
+- **Поддержка Wayland на Linux** — сейчас работает через X11/XWayland, для
+  нативного Wayland нужны правки плагина платформы PySide6.
 
-## Roadmap
-
-- Crash-report opt-in (юзер сам отправляет лог, авто-сбор не делаем)
-- Public-IP / индикатор страны после connect (чтобы видеть пруф что
-  туннель работает)
-- macOS Keychain / Linux libsecret эквивалент DPAPI для конфигов
+См. [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Лицензия
 
-[GNU GPL v3](LICENSE). Любая производная работа также должна быть
-GPL v3 — это сознательное решение, чтобы проект не мог быть тихо
-поглощён закрытым коммерческим продуктом.
+[GNU GPL v3](LICENSE). Любая производная работа тоже обязана быть под GPL v3 —
+это сделано намеренно, чтобы проект нельзя было тихо забрать в закрытый продукт.
