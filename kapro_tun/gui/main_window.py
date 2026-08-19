@@ -317,6 +317,8 @@ class SettingsPage(QWidget):
 
     sites_clicked = Signal()
     logs_clicked = Signal()
+    diagnostics_clicked = Signal()
+    bypass_apps_clicked = Signal()
     subscription_clicked = Signal()
     check_updates_requested = Signal()
     settings_changed = Signal()
@@ -551,6 +553,37 @@ class SettingsPage(QWidget):
         turbo_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(turbo_hint)
 
+        # --- Apps that bypass the VPN (v3.5.2) — the generic mechanism the
+        # built-in games list is a preset of. ---
+        bypass_row = QHBoxLayout()
+        bypass_row.setContentsMargins(28, 6, 0, 0)
+        self.bypass_apps_btn = QPushButton(tr("mw.bypass_apps_btn"))
+        self.bypass_apps_btn.clicked.connect(self.bypass_apps_clicked)
+        bypass_row.addWidget(self.bypass_apps_btn)
+        bypass_row.addStretch(1)
+        outer.addLayout(bypass_row)
+
+        # --- Network diagnostics (v3.5.2) ---
+        diag_row = QHBoxLayout()
+        diag_row.setContentsMargins(28, 6, 0, 0)
+        self.diagnostics_btn = QPushButton(tr("mw.diagnostics_btn"))
+        self.diagnostics_btn.clicked.connect(self.diagnostics_clicked)
+        diag_row.addWidget(self.diagnostics_btn)
+        diag_row.addStretch(1)
+        outer.addLayout(diag_row)
+
+        # --- Network debug mode (v3.5.2) ---
+        self.netdebug_check = QCheckBox(tr("mw.netdebug_check"))
+        self.netdebug_check.setChecked(
+            bool(manager.settings.get("network_debug", False)))
+        self.netdebug_check.toggled.connect(self._on_network_debug_changed)
+        outer.addWidget(self.netdebug_check)
+        netdebug_hint = QLabel(tr("mw.netdebug_hint"))
+        netdebug_hint.setObjectName("dim")
+        netdebug_hint.setWordWrap(True)
+        netdebug_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(netdebug_hint)
+
 
         # --- Language toggle ---
         # Lives in Security section because it's the only other "global
@@ -755,6 +788,13 @@ class SettingsPage(QWidget):
 
     def _on_games_direct_changed(self, checked: bool) -> None:
         self._manager.update_settings(games_direct=checked)
+
+    def _on_network_debug_changed(self, checked: bool) -> None:
+        # Takes effect immediately (no reconnect): the flag only gates whether
+        # app_log.net() writes, so the user can arm it and reproduce right away.
+        self._manager.update_settings(network_debug=checked)
+        app_log.set_net_debug(checked)
+        app_log.log(f"[net-debug] {'enabled' if checked else 'disabled'} by user")
 
     def _on_route_ru_direct_changed(self, checked: bool) -> None:
         self._manager.update_settings(route_ru_direct=checked)
@@ -1467,6 +1507,8 @@ class MainWindow(QMainWindow):
         self.home_page.card_clicked.connect(self._on_open_picker)
         self.settings_page.sites_clicked.connect(self._on_edit_sites)
         self.settings_page.logs_clicked.connect(lambda: self._goto("logs"))
+        self.settings_page.diagnostics_clicked.connect(self._on_open_diagnostics)
+        self.settings_page.bypass_apps_clicked.connect(self._on_edit_bypass_apps)
         self.settings_page.subscription_clicked.connect(self._on_import_subscription)
         self.home_page.banner_clicked.connect(self._on_import_subscription)
         # v1.14.0: nudge custom-painted widgets to repaint after any
@@ -2772,6 +2814,23 @@ class MainWindow(QMainWindow):
         self.home_page.world_map.update()
         self.home_page.sparkline.update()
         self.home_page.circle.update()
+
+    def _on_open_diagnostics(self) -> None:
+        """Network Diagnostics — adapters, routes, MTU, server, TCP/UDP tests."""
+        from .diagnostics_dialog import DiagnosticsDialog
+        DiagnosticsDialog(self.manager, self).exec()
+
+    def _on_edit_bypass_apps(self) -> None:
+        """Edit the user's list of apps that skip the VPN."""
+        from .bypass_apps_dialog import BypassAppsDialog
+        dlg = BypassAppsDialog(self.manager, self)
+        if dlg.exec() and self.manager.is_connected():
+            # Routing rules are baked into the config at connect time, so an
+            # edit mid-session only lands on the next connection — say so
+            # instead of letting the user think it took effect now.
+            self.logs_page.append(tr("mw.bypass_apps_applied"))
+            show_toast(self, tr("mw.bypass_apps_applied"), kind="info",
+                       duration_ms=6000)
 
     def _on_edit_sites(self) -> None:
         dlg = SitesDialog(self)

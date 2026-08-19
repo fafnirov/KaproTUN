@@ -636,6 +636,7 @@ class ConnectionManager:
         high_speed = bool(self.settings.get("high_speed", False))
         # v3.5.0: Steam/Riot games bypass the tunnel (matched by process).
         games_direct = bool(self.settings.get("games_direct", True))
+        bypass_apps = list(self.settings.get("bypass_apps", []) or [])
 
         # Honest ONE-TIME notice (not on every reconnect) that ad-block is
         # legacy-only — see _note_singbox_adblock_once().
@@ -647,7 +648,8 @@ class ConnectionManager:
         cfg_path = sing_box_config.write_config(
             config, direct_domains, server_ip=server_ip,
             block_ads=block_ads, route_ru_direct=route_ru_direct,
-            high_speed=high_speed, games_direct=games_direct, on_log=self._log,
+            high_speed=high_speed, games_direct=games_direct,
+            bypass_apps=bypass_apps, on_log=self._log,
         )
         ok, msg = sing_box_config.check_config(cfg_path)
         if not ok and games_direct:
@@ -662,7 +664,8 @@ class ConnectionManager:
             cfg_path = sing_box_config.write_config(
                 config, direct_domains, server_ip=server_ip,
                 block_ads=block_ads, route_ru_direct=route_ru_direct,
-                high_speed=high_speed, games_direct=False, on_log=self._log,
+                high_speed=high_speed, games_direct=False,
+                bypass_apps=bypass_apps, on_log=self._log,
             )
             ok, msg = sing_box_config.check_config(cfg_path)
         if not ok:

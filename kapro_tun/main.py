@@ -9,7 +9,7 @@ import sys
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
-from .core import (autostart, firewall_sweep, i18n, ipv6_block, killswitch,
+from .core import (app_log, autostart, firewall_sweep, i18n, ipv6_block, killswitch,
                    linux_tun_route, storage, system_proxy, tun_recovery,
                    webrtc_block)
 from .gui import icons
@@ -294,6 +294,12 @@ def _run_app() -> int:
     # main()'s crash dialog by normal stack unwinding — sys.excepthook only
     # governs the event-loop phase.
     from .core import runtime_guard
+    # Restore Network Debug Mode from settings before anything can log,
+    # so a problem reproduced right after launch is already traced.
+    try:
+        app_log.set_net_debug(bool(storage.load_settings().get("network_debug", False)))
+    except Exception:
+        pass
     runtime_guard.install()
 
     return app.exec()

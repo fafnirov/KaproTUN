@@ -2002,6 +2002,119 @@ check("watchdog: degraded never heals, dead still does (v3.5.1)",
       _v351_watchdog_degraded_never_reconnects)
 
 
+def _v352_bypass_apps_generic_mechanism() -> None:
+    """v3.5.2: user-listed apps bypass the VPN through the SAME process_name
+    mechanism as the built-in games list — no per-app special casing. The rule
+    must outrank the QUIC reject and geoip:ru, or a bypassed app speaking UDP
+    443 would be killed before it could go direct."""
+    from kapro_tun.core import sing_box_config as sb
+    from kapro_tun.gui.bypass_apps_dialog import normalize
+
+    # Input normalisation: real-world paste — a full path, quotes, mixed
+    # case, a blank line, a comment, and a name with no .exe suffix.
+    raw = "\n".join([
+        '  C:\\Games\\Dota\\dota2.exe  ',
+        '"Discord.EXE"',
+        '',
+        '#note',
+        'valorant',
+    ])
+    got = normalize(raw)
+    if got != ["discord.exe", "dota2.exe", "valorant.exe"]:
+        raise AssertionError(f"normalize() mishandled real-world input: {got}")
+    _o_ru, _o_linux = sb._ru_cidrs, sb._IS_LINUX
+    sb._ru_cidrs = lambda: [f"10.{i // 256}.{i % 256}.0/24" for i in range(2000)]
+    sb._IS_LINUX = False
+    try:
+        c = sb.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                            route_ru_direct=True, games_direct=True,
+                            bypass_apps=["Dota2.exe"])
+        rules = c["route"]["rules"]
+        idx_user = next((i for i, r in enumerate(rules)
+                         if "dota2.exe" in (r.get("process_name") or [])), None)
+        if idx_user is None:
+            raise AssertionError("user bypass app missing from the route rules")
+        if rules[idx_user].get("outbound") != "direct":
+            raise AssertionError("bypass app must route to direct")
+        idx_quic = next((i for i, r in enumerate(rules)
+                         if r.get("action") == "reject" and r.get("port") == 443), None)
+        if idx_quic is not None and idx_user > idx_quic:
+            raise AssertionError("bypass rule must precede the QUIC reject")
+        idx_geoip = next((i for i, r in enumerate(rules)
+                          if r.get("outbound") == "direct"
+                          and isinstance(r.get("ip_cidr"), list)
+                          and len(r["ip_cidr"]) > 1000), None)
+        if idx_geoip is not None and idx_user > idx_geoip:
+            raise AssertionError("bypass rule must precede the geoip:ru rule")
+        # Empty/whitespace lists must not emit a rule at all.
+        c2 = sb.build_config(parsed["vless"], [], server_ip="1.2.3.4",
+                             bypass_apps=["", "   "])
+        if any("process_name" in r and not r.get("ip_cidr")
+               and r.get("process_name") == [] for r in c2["route"]["rules"]):
+            raise AssertionError("empty bypass list must not emit an empty rule")
+    finally:
+        sb._ru_cidrs, sb._IS_LINUX = _o_ru, _o_linux
+
+
+check("bypass: user apps go direct via the generic process rule (v3.5.2)",
+      _v352_bypass_apps_generic_mechanism)
+
+
+def _v352_net_diag_snapshot_and_report() -> None:
+    """v3.5.2: the diagnostics collector never raises, and the report never
+    claims a probe FAILED when it was never run (quick mode) — a false FAIL is
+    a lie the user would act on. It must also document the ICMP caveat."""
+    from kapro_tun.core import net_diag
+
+    snap = net_diag.collect(quick=True)          # no network, must not raise
+    report = net_diag.format_report(snap)
+    if "FAIL" in report:
+        raise AssertionError("quick mode must not report FAIL for probes it skipped")
+    for section in ("Физический адаптер", "TUN-адаптер", "Маршруты",
+                    "VPN-сервер", "Движок", "Тесты канала", "ICMP"):
+        if section not in report:
+            raise AssertionError(f"report missing section: {section}")
+    if "ping" not in net_diag.ICMP_NOTE.lower():
+        raise AssertionError("the ICMP caveat must explain the ping/tracert trap")
+    # Probe helpers must degrade, never raise, when the network refuses.
+    # Stubbed rather than aimed at a real address: the sandbox/CI answer even
+    # TEST-NET-1, so a live assertion here would be environment-flaky.
+    import socket as _sock
+    _o_conn, _o_socket = _sock.create_connection, _sock.socket
+    _sock.create_connection = lambda *a, **k: (_ for _ in ()).throw(OSError("refused"))
+    try:
+        r = net_diag.tcp_probe("example.invalid", 443, timeout=0.3)
+    finally:
+        _sock.create_connection = _o_conn
+    if r.ok or not r.detail:
+        raise AssertionError("tcp_probe must fail gracefully with a reason")
+
+    class _DeadSock:
+        def __init__(self, *a, **k): pass
+        def settimeout(self, *a): pass
+        def sendto(self, *a): raise OSError("no route")
+        def recvfrom(self, *a): raise OSError("no route")
+        def close(self): pass
+    _sock.socket = _DeadSock
+    try:
+        r = net_diag.udp_probe("example.invalid", 53, timeout=0.3)
+    finally:
+        _sock.socket = _o_socket
+    if r.ok:
+        raise AssertionError("udp_probe must not claim success when sending fails")
+    # A populated snapshot renders every field without blowing up.
+    snap.physical = net_diag.IfaceInfo(name="Wi-Fi", index=16, ipv4="192.168.1.24",
+                                       gateway="192.168.1.1", metric=55, mtu=1500)
+    snap.probes_ran = True
+    snap.udp = net_diag.ProbeResult(True, 12.3, "8.8.8.8:53")
+    if "OK" not in net_diag.format_report(snap):
+        raise AssertionError("a successful probe must render as OK")
+
+
+check("diagnostics: snapshot never raises, never fakes a FAIL (v3.5.2)",
+      _v352_net_diag_snapshot_and_report)
+
+
 def _v34_network_watchdog_debounce() -> None:
     """v3.4.0: the network-change watchdog emits `changed` only after a
     SUSTAINED roam (>=2 ticks), and never while disconnected — so a one-off

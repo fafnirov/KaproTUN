@@ -317,7 +317,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "hysteria_down_mbps": 0,  # downlink Mbps for hy2 brutal CC — auto-measured (auto mode) or manual; 0 = BBR
     "block_ads": False,  # drop geosite:category-ads-all at the xray routing layer (any DNS) — v1.19.0
     "route_ru_direct": True,  # v3.3.0: ALL geoip:ru IPs bypass the VPN by default (RU IP → real IP, else → VPN). Was False (curated list only), which left non-listed RU sites tunnelled through the foreign exit → geo-blocked. Toggle off for the Telegram/CDN split-brain edge case.
-    "games_direct": True,  # v3.5.0: Steam / Riot games bypass the VPN (matched by PROCESS, so raw-IP UDP game traffic is caught too). Games through a tunnel = added latency for zero benefit; they aren't geo-blocked here. Off = everything tunnels as before.
+    "games_direct": True,
+    # v3.5.2: user-defined apps that bypass the VPN, on top of the built-in
+    # games list. Plain executable names ("game.exe"), matched case-insensitively
+    # by sing-box's process_name rule.
+    "bypass_apps": [],
+    # v3.5.2: Network Debug Mode — millisecond event trace in app.log. Off by
+    # default (chatty); switched on to catch an intermittent problem in the act.
+    "network_debug": False,  # v3.5.0: Steam / Riot games bypass the VPN (matched by PROCESS, so raw-IP UDP game traffic is caught too). Games through a tunnel = added latency for zero benefit; they aren't geo-blocked here. Off = everything tunnels as before.
     "high_speed": False,  # v3.3.0: TUN network stack. False = gvisor (userspace, universally works). True = mixed (kernel TCP, much faster) — but carries NO traffic on some Windows setups (WinTUN + AV/NIC filters), so it's opt-in "Turbo".
     "performance_preset": "balanced",  # v2.1.6: tun2socks TCP buffer ceiling — economy(512k)/balanced(1m, default)/speed(4m). Caps per-flow memory; default is NOT the old 4m blow-up
     "theme": "auto",  # "auto" (follow OS) / "dark" / "light" — see gui/styles.py

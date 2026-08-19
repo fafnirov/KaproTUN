@@ -350,6 +350,7 @@ def build_config(
     route_ru_direct: bool = False,
     high_speed: bool = False,
     games_direct: bool = False,
+    bypass_apps: list | None = None,
     log_level: str = "warn",
     on_log=None,
 ) -> dict[str, Any]:
@@ -409,6 +410,16 @@ def build_config(
     # speaking QUIC/UDP 443 would be rejected before it can be sent direct.
     if games_direct:
         rules.extend(_games_direct_rules())
+    # User-defined bypass apps (v3.5.2) — the generic mechanism behind the
+    # built-in games list: any .exe the user adds here leaves the VPN by the
+    # same process_name match. Applied even when the games toggle is off, since
+    # it is an explicit per-app choice, and at the same precedence so a bypassed
+    # app is never stolen by the QUIC reject or the geoip:ru rule below.
+    user_apps = sorted({str(a).strip().lower()
+                        for a in (bypass_apps or []) if str(a).strip()})
+    if user_apps:
+        rules.append({"process_name": user_apps, "action": "route",
+                      "outbound": "direct"})
     # QUIC / HTTP-3 (UDP :443) reject on the gvisor stack (v3.3.2). The
     # userspace gvisor UDP path does NOT carry QUIC-over-VLESS/Trojan
     # reliably: a foreign site loads fine over TCP at first, then the browser
@@ -517,6 +528,7 @@ def write_config(
     route_ru_direct: bool = False,
     high_speed: bool = False,
     games_direct: bool = False,
+    bypass_apps: list | None = None,
     on_log=None,
 ) -> str:
     """Build + atomically write the runtime config (user-only perms; it carries
@@ -527,7 +539,7 @@ def write_config(
         server_ip=server_ip, dns_option=dns_option,
         dns_leak_protection=dns_leak_protection, block_ads=block_ads,
         route_ru_direct=route_ru_direct, high_speed=high_speed,
-        games_direct=games_direct, on_log=on_log,
+        games_direct=games_direct, bypass_apps=bypass_apps, on_log=on_log,
     )
     target = paths.write_secure_text(
         paths.sing_box_runtime_config_file(),
