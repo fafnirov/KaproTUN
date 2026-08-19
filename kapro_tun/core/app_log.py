@@ -118,6 +118,43 @@ def log(msg: str) -> None:
         pass
 
 
+# --- Network Debug Mode (v3.5.1) ------------------------------------------
+# Opt-in, millisecond-resolution trace of the connection lifecycle: health
+# probes and their verdicts, reconnect decisions and WHY, interface/route
+# changes, sing-box lifecycle. Off by default (it is chatty); the user turns it
+# on to catch an intermittent problem in the act — e.g. a mid-game freeze.
+# Never logs user traffic contents: only event names + numeric/technical fields,
+# and every line still goes through redact().
+_net_debug = False
+
+
+def set_net_debug(enabled: bool) -> None:
+    """Enable/disable Network Debug Mode. Cheap: net() is a no-op when off."""
+    global _net_debug
+    _net_debug = bool(enabled)
+
+
+def net_debug_enabled() -> bool:
+    return _net_debug
+
+
+def net(event: str, **fields) -> None:
+    """One millisecond-stamped diagnostic event. No-op unless debug is on.
+
+    The normal app.log formatter only has second resolution, which is useless
+    for correlating a 5-8 s freeze with what the client was doing — so the
+    millisecond stamp is rendered into the message itself."""
+    if not _net_debug:
+        return
+    try:
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        tail = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
+        log(f"[net] {ts} {event}{(' ' + tail) if tail else ''}")
+    except Exception:
+        pass
+
+
 def _reset_for_test() -> None:
     """Test hook: drop the cached logger + close handlers so a test can point
     app_log at a fresh file via a monkeypatched paths.app_log_file()."""

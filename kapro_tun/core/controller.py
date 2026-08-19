@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 from . import (
     admin, app_log, dns_health, ipv6_block, killswitch, linux_tun_route,
-    paths, proc_stats, storage, tun_recovery, webrtc_block,
+    paths, proc_stats, storage, tun_recovery, webrtc_block, xray_stats,
 )
 from .i18n import tr
 from .parser import ProxyConfig
@@ -223,6 +223,8 @@ class ConnectionManager:
         # fingerprint and clean-reconnect when it changes. See egress_changed().
         self._server_ip: str = ""
         self._egress_fp: Optional[str] = None
+        # Baseline for the health check's 'is the tunnel moving bytes?' test.
+        self._health_traffic = None
         # Once-per-app-launch guard so the "ad-block is legacy-only" notice
         # isn't logged on every sing-box reconnect.
         self._singbox_adblock_noted = False
@@ -353,24 +355,83 @@ class ConnectionManager:
         means a broken tunnel the runtime watchdog should heal."""
         return self.is_connected()
 
-    def tun_runtime_healthy(self) -> bool:
-        """Real data-plane health: DNS resolves AND the sing-box proxy outbound
-        actually carries HTTP. We test the outbound via the loopback health-probe
-        inbound (pinned to outbound=proxy) — a 2xx/3xx there proves the VPN
-        transport is alive. (v3.1.1: dropped the strict proxy==system egress-IP
-        match — with native sing-box auto_route owning the TUN, a live proxy
-        already implies captured system traffic, and the double cdn-cgi/trace was
-        a frequent false-negative that flapped the watchdog.)"""
-        if not self.tun_dns_guarded():
-            return True
+    # --- runtime health verdict (v3.5.1) ----------------------------------
+    # Three states instead of a bool. The old bool made "probe failed" mean
+    # "tunnel is dead", and the watchdog answered with a FULL reconnect — a
+    # multi-second, whole-network outage. Under load (a game saturating the
+    # userspace gvisor stack) the 2.5 s probes fail while the tunnel is
+    # perfectly alive, so the cure fired on healthy sessions and looked like a
+    # 5-8 s freeze mid-game. Now only a tunnel proven DEAD is reconnected;
+    # "slow / probe starved" is DEGRADED and merely logged.
+    HEALTH_OK = "ok"
+    HEALTH_DEGRADED = "degraded"
+    HEALTH_DEAD = "dead"
+
+    def _tun_traffic_moved(self) -> bool:
+        """True if the TUN interface moved bytes since the previous call.
+
+        Kernel byte counters on our own TUN device (psutil) — the same source
+        the UI graph uses. If packets are still flowing through the tunnel, the
+        data path is alive by definition, whatever a timed-out HTTP probe says.
+        First call after connect has no baseline and returns False."""
         try:
-            if not dns_health.probe(timeout=2.5, attempts=2):
-                return False
-            return dns_health.singbox_outbound_probe(
-                self._singbox_health_proxy_url(), timeout=2.5)
+            sample = xray_stats.query_tun_iface_stats(
+                sing_box_config.TUN_DEVICE_NAME)
+        except Exception:
+            return False
+        if sample is None:
+            return False
+        prev, self._health_traffic = self._health_traffic, sample
+        if prev is None:
+            return False
+        return (sample.uplink_bytes > prev.uplink_bytes
+                or sample.downlink_bytes > prev.downlink_bytes)
+
+    def tun_runtime_health(self, timeout: float = 5.0) -> str:
+        """HEALTH_OK / HEALTH_DEGRADED / HEALTH_DEAD for the live TUN session.
+
+        Order matters. The transport probe (HTTP through the loopback health
+        inbound, pinned to outbound=proxy) is the authoritative tunnel test and
+        needs no local DNS, so it runs first; a DNS-only failure can then be
+        reported as DEGRADED instead of being mistaken for a dead tunnel.
+
+        `timeout` is deliberately generous (5 s, was 2.5): the probe competes
+        for CPU with the userspace network stack under load."""
+        if not self.tun_dns_guarded():
+            return self.HEALTH_OK
+        # Cheapest and most definitive signal: the engine itself is gone.
+        if not self.sing_box_process.is_running():
+            app_log.net("health", verdict="dead", reason="process_not_running")
+            return self.HEALTH_DEAD
+        try:
+            transport_ok = dns_health.singbox_outbound_probe(
+                self._singbox_health_proxy_url(), timeout=timeout)
+            if transport_ok:
+                dns_ok = dns_health.probe(timeout=timeout, attempts=1)
+                verdict = self.HEALTH_OK if dns_ok else self.HEALTH_DEGRADED
+                app_log.net("health", verdict=verdict, transport="ok",
+                            dns=("ok" if dns_ok else "fail"))
+                return verdict
+            # Transport probe failed — but is the tunnel actually carrying
+            # packets? If yes it is busy/starved, NOT dead: reconnecting would
+            # be a self-inflicted outage.
+            moved = self._tun_traffic_moved()
+            verdict = self.HEALTH_DEGRADED if moved else self.HEALTH_DEAD
+            app_log.net("health", verdict=verdict, transport="fail",
+                        tun_traffic=("moving" if moved else "idle"))
+            return verdict
         except Exception as exc:
             self._log(f"[watchdog] health probe failed: {type(exc).__name__}: {exc}")
-            return False
+            app_log.net("health", verdict="degraded", error=type(exc).__name__)
+            # An error in OUR probe is not evidence the tunnel died.
+            return self.HEALTH_DEGRADED
+
+    def tun_runtime_healthy(self) -> bool:
+        """Legacy boolean view of tun_runtime_health() — True only when fully
+        OK. Kept for callers/tests that predate the three-state verdict; the
+        probe logic lives in ONE place (tun_runtime_health) so the two can
+        never drift apart."""
+        return self.tun_runtime_health() == self.HEALTH_OK
 
     @staticmethod
     def _singbox_health_proxy_url() -> str:

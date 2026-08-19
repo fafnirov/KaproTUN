@@ -43,6 +43,9 @@ from ..core import (
 )
 from ..core import controller as _controller
 from ..core.controller import MODE_TUN
+from ..core.controller import ConnectionManager as _CM
+_HEALTH_OK, _HEALTH_DEGRADED, _HEALTH_DEAD = (
+    _CM.HEALTH_OK, _CM.HEALTH_DEGRADED, _CM.HEALTH_DEAD)
 from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
 from ..core.parser import ProxyConfig
@@ -990,11 +993,20 @@ class _DnsWatchdog(QThread):
         self._is_guarded = is_guarded   # callable -> bool (manager.tun_dns_guarded)
         self._probe_health = probe_health
         self._stop = False
-        self._fail_streak = 0
-        self._interval_s = 20           # gap between probes while connected
-        # Require about one minute of sustained failure. This is responsive to
-        # a dead transport without reconnecting on one transient network error.
-        self._fail_threshold = 3        # sustained failure, not a transient blip
+        self._fail_streak = 0           # consecutive DEAD verdicts
+        self._degraded_streak = 0       # consecutive DEGRADED verdicts
+        # v3.5.1: 20 s -> 30 s. The probe competes for CPU with the userspace
+        # network stack; polling it less often removes a chunk of the load that
+        # made the probe fail in the first place.
+        self._interval_s = 30
+        # Only a tunnel proven DEAD is healed, and only after a sustained
+        # streak (3 x 30 s = 90 s).
+        self._fail_threshold = 3
+        # DEGRADED (probes failing but the tunnel is still moving packets) is
+        # NOT healed — that was the self-inflicted mid-game outage. It is only
+        # escalated if it never clears: 20 x 30 s = 10 min of continuous
+        # degradation means something really is wrong, so heal once.
+        self._degraded_max = 20
 
     def run(self) -> None:
         from ..core import dns_health
@@ -1010,21 +1022,39 @@ class _DnsWatchdog(QThread):
             if not self._guarded():
                 self._fail_streak = 0
                 continue
-            ok = self._healthy(dns_health)
+            verdict = self._verdict(dns_health)
             if self._stop:
                 return
-            # A disconnect may have landed while we were resolving — never heal
+            # A disconnect may have landed while we were probing — never heal
             # a session that's already gone.
             if not self._guarded():
-                self._fail_streak = 0
+                self._fail_streak = self._degraded_streak = 0
                 continue
-            if ok:
+            if verdict == _HEALTH_OK:
+                self._fail_streak = self._degraded_streak = 0
+                continue
+            if verdict == _HEALTH_DEGRADED:
+                # Alive but slow / probe starved (typical while a game saturates
+                # the stack). Do NOT reconnect: that outage is worse than the
+                # symptom. Only escalate if it never clears.
                 self._fail_streak = 0
-            else:
-                self._fail_streak += 1
-                if self._fail_streak >= self._fail_threshold:
-                    self._fail_streak = 0
+                self._degraded_streak += 1
+                app_log.net("watchdog", verdict="degraded",
+                            streak=self._degraded_streak, max=self._degraded_max)
+                if self._degraded_streak >= self._degraded_max:
+                    self._degraded_streak = 0
+                    app_log.net("watchdog", action="heal", cause="degraded_timeout")
                     self.unhealthy.emit()
+                continue
+            # DEAD
+            self._degraded_streak = 0
+            self._fail_streak += 1
+            app_log.net("watchdog", verdict="dead",
+                        streak=self._fail_streak, threshold=self._fail_threshold)
+            if self._fail_streak >= self._fail_threshold:
+                self._fail_streak = 0
+                app_log.net("watchdog", action="heal", cause="tunnel_dead")
+                self.unhealthy.emit()
 
     def _guarded(self) -> bool:
         try:
@@ -1032,13 +1062,23 @@ class _DnsWatchdog(QThread):
         except Exception:
             return False
 
-    def _healthy(self, dns_health) -> bool:
+    def _verdict(self, dns_health) -> str:
+        """Normalised health verdict for one tick.
+
+        Accepts either the modern three-state probe (controller
+        .tun_runtime_health) or a legacy bool callable — True -> OK,
+        False -> DEAD — so older callers/tests keep their semantics."""
         try:
             if self._probe_health is not None:
-                return bool(self._probe_health())
-            return bool(dns_health.probe(timeout=2.5, attempts=2))
+                raw = self._probe_health()
+            else:
+                raw = bool(dns_health.probe(timeout=5.0, attempts=2))
         except Exception:
-            return False
+            # Our own probe blowing up is not evidence the tunnel died.
+            return _HEALTH_DEGRADED
+        if isinstance(raw, str):
+            return raw if raw in (_HEALTH_OK, _HEALTH_DEGRADED, _HEALTH_DEAD) else _HEALTH_OK
+        return _HEALTH_OK if raw else _HEALTH_DEAD
 
     def stop(self) -> None:
         self._stop = True
@@ -1280,7 +1320,7 @@ class MainWindow(QMainWindow):
         # app's lifetime; stopped on quit.
         self._dns_watchdog = _DnsWatchdog(
             self.manager.tun_dns_guarded,
-            self.manager.tun_runtime_healthy,
+            self.manager.tun_runtime_health,
             parent=self,
         )
         self._dns_watchdog.unhealthy.connect(self._on_dns_unhealthy)

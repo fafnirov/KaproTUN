@@ -1890,6 +1890,118 @@ check("roaming: egress-change (Ethernet↔Wi-Fi) detection truth table (v3.4.0)"
       _v34_egress_change_detection)
 
 
+def _v351_health_verdict_degraded_vs_dead() -> None:
+    """v3.5.1: a probe failure is NOT proof the tunnel died.
+
+    The old boolean health check answered every failed probe with a FULL
+    reconnect. Under load (a game saturating the userspace stack) the probes
+    time out while the tunnel is happily forwarding packets, so the 'cure'
+    became a self-inflicted 5-8 s outage mid-game. Now: probes fail + TUN still
+    moving bytes -> DEGRADED (log only); probes fail + tunnel idle -> DEAD."""
+    from kapro_tun.core import controller as _C
+    from kapro_tun.core import dns_health as _dh
+    M = _C.ConnectionManager
+    mgr = M()
+    mgr.tun_dns_guarded = lambda: True                      # type: ignore[assignment]
+
+    class _Proc:
+        def __init__(self, running=True): self._r = running
+        def is_running(self): return self._r
+    mgr.sing_box_process = _Proc()                          # type: ignore[assignment]
+
+    _o_out, _o_dns = _dh.singbox_outbound_probe, _dh.probe
+    try:
+        # 1) Transport OK + DNS OK -> OK
+        _dh.singbox_outbound_probe = lambda url, timeout=5.0: True
+        _dh.probe = lambda **k: True
+        if mgr.tun_runtime_health() != M.HEALTH_OK:
+            raise AssertionError("healthy tunnel must read OK")
+        # 2) Transport OK + DNS fail -> DEGRADED (a DNS hiccup is not death)
+        _dh.probe = lambda **k: False
+        if mgr.tun_runtime_health() != M.HEALTH_DEGRADED:
+            raise AssertionError("DNS-only failure must be DEGRADED, not DEAD")
+        # 3) Transport FAIL but the TUN is still moving bytes -> DEGRADED.
+        #    THIS is the mid-game freeze regression guard.
+        _dh.singbox_outbound_probe = lambda url, timeout=5.0: False
+        mgr._tun_traffic_moved = lambda: True               # type: ignore[assignment]
+        if mgr.tun_runtime_health() != M.HEALTH_DEGRADED:
+            raise AssertionError(
+                "probe failure while the tunnel carries traffic must be DEGRADED "
+                "(reconnecting here is the self-inflicted outage)")
+        # 4) Transport FAIL and the tunnel is idle -> DEAD (real healing case)
+        mgr._tun_traffic_moved = lambda: False              # type: ignore[assignment]
+        if mgr.tun_runtime_health() != M.HEALTH_DEAD:
+            raise AssertionError("dead transport + idle tunnel must be DEAD")
+        # 5) Engine gone -> DEAD regardless of probes
+        mgr.sing_box_process = _Proc(running=False)         # type: ignore[assignment]
+        if mgr.tun_runtime_health() != M.HEALTH_DEAD:
+            raise AssertionError("a stopped sing-box must be DEAD")
+        # 6) The boolean wrapper stays consistent with the verdict
+        if mgr.tun_runtime_healthy() is not False:
+            raise AssertionError("bool wrapper must be False unless verdict is OK")
+    finally:
+        _dh.singbox_outbound_probe, _dh.probe = _o_out, _o_dns
+
+
+check("health: probe failure + live traffic = DEGRADED, not a reconnect (v3.5.1)",
+      _v351_health_verdict_degraded_vs_dead)
+
+
+def _v351_watchdog_degraded_never_reconnects() -> None:
+    """v3.5.1: DEGRADED ticks must never trigger a heal until they pile up past
+    _degraded_max; DEAD ticks heal after _fail_threshold. Drives the decision
+    logic directly (no 30 s sleeps)."""
+    import os as _os
+    _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from kapro_tun.gui import main_window as mw
+    QApplication.instance() or QApplication([])
+
+    def drive(verdicts):
+        """Replay the run-loop decision for each verdict; return emit count."""
+        wd = mw._DnsWatchdog(lambda: True, probe_health=lambda: "ok")
+        fired = []
+        wd.unhealthy.connect(lambda: fired.append(1))
+        for v in verdicts:
+            if v == mw._HEALTH_OK:
+                wd._fail_streak = wd._degraded_streak = 0
+            elif v == mw._HEALTH_DEGRADED:
+                wd._fail_streak = 0
+                wd._degraded_streak += 1
+                if wd._degraded_streak >= wd._degraded_max:
+                    wd._degraded_streak = 0
+                    wd.unhealthy.emit()
+            else:
+                wd._degraded_streak = 0
+                wd._fail_streak += 1
+                if wd._fail_streak >= wd._fail_threshold:
+                    wd._fail_streak = 0
+                    wd.unhealthy.emit()
+        return len(fired), wd
+
+    # A long degraded spell (a whole match's worth) must NOT reconnect.
+    n, wd = drive([mw._HEALTH_DEGRADED] * (wd_max := 19))
+    if n:
+        raise AssertionError(f"{wd_max} degraded ticks must not heal, got {n} heals")
+    # Sustained DEAD still heals — we did not disarm the watchdog.
+    n, wd = drive([mw._HEALTH_DEAD] * 3)
+    if n != 1:
+        raise AssertionError(f"3 dead ticks must heal exactly once, got {n}")
+    # A single OK clears a dead streak (no accumulation across blips).
+    n, _ = drive([mw._HEALTH_DEAD, mw._HEALTH_DEAD, mw._HEALTH_OK,
+                  mw._HEALTH_DEAD, mw._HEALTH_DEAD])
+    if n:
+        raise AssertionError("an OK tick must reset the dead streak")
+    # Degradation that never clears is still escalated (tunnel not abandoned).
+    n, _ = drive([mw._HEALTH_DEGRADED] * 20)
+    if n != 1:
+        raise AssertionError("degraded_max must escalate to exactly one heal")
+
+
+check("watchdog: degraded never heals, dead still does (v3.5.1)",
+      _v351_watchdog_degraded_never_reconnects)
+
+
 def _v34_network_watchdog_debounce() -> None:
     """v3.4.0: the network-change watchdog emits `changed` only after a
     SUSTAINED roam (>=2 ticks), and never while disconnected — so a one-off
@@ -4285,6 +4397,7 @@ def _watchdog_threshold_and_gating() -> None:
         QApplication([])
     from kapro_tun.gui.main_window import _DnsWatchdog
     from kapro_tun.core import dns_health
+    from kapro_tun.core import controller as _C
 
     orig_probe = dns_health.probe
     dns_health.probe = lambda **k: False   # pretend DNS is dead
@@ -4326,7 +4439,7 @@ def _watchdog_threshold_and_gating() -> None:
             is_guarded=lambda: True,
             probe_health=lambda: calls.append(1) or True,
         )
-        if not wd3._healthy(dns_health):
+        if wd3._verdict(dns_health) != _C.ConnectionManager.HEALTH_OK:
             raise AssertionError("watchdog rejected a healthy injected probe")
         if calls != [1]:
             raise AssertionError("watchdog did not call the injected health probe")
@@ -5429,7 +5542,7 @@ def _v3_connect_is_forgiving() -> None:
         raise AssertionError("_wait_for_singbox_ready must be a bounded poll loop")
     if "singbox_outbound_probe" not in dns_src:
         raise AssertionError("sing-box readiness must probe the proxy outbound for live transport (v3.1.1)")
-    runtime_src = _ins.getsource(_C.ConnectionManager.tun_runtime_healthy)
+    runtime_src = _ins.getsource(_C.ConnectionManager.tun_runtime_health)
     if "singbox_outbound_probe" not in runtime_src:
         raise AssertionError("runtime watchdog must probe the proxy outbound for live transport (v3.1.1)")
     run_src = _ins.getsource(_C.ConnectionManager._wait_until_running)
