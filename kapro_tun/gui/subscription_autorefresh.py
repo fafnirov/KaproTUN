@@ -139,6 +139,16 @@ class SubscriptionAutoRefresh(QObject):
         """End of initial 90 s delay — fire first refresh + start the
         recurring 12 h interval.
         """
+        # Privacy mode (v3.6.x): a background fetch every 12 h is a clean heartbeat
+        # telling the provider this device is alive, and how many devices a
+        # subscription has. When the user opts into minimal metadata we simply do
+        # not schedule it — the subscription is refreshed only when they ask.
+        try:
+            from ..core import storage as _st
+            if bool(_st.load_settings().get("minimal_metadata", False)):
+                return
+        except Exception:
+            pass
         self._timer.start(REFRESH_INTERVAL_MS)
         self._tick()
 

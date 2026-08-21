@@ -182,6 +182,8 @@ _RU: dict[str, str] = {
     'mw.net_conflict_warn': '⚠ «{app}» перехватывает сеть — VPN может не пропускать трафик. Закрой это приложение, если сайты не грузятся.',
     # --- v3.5.2: diagnostics, bypass apps, network debug ---
     'mw.diagnostics_btn': 'Сетевая диагностика',
+    'mw.minmeta_check': 'Не отдавать метаданные провайдеру подписки',
+    'mw.minmeta_hint': 'Убирает из запроса к подписке версию клиента и ОС (остаётся обезличенный идентификатор — без него провайдеры отдают заглушку) и отключает фоновое обновление раз в 12 ч, тот самый ровный «пульс», по которому считают устройства. Обновлять подписку придётся вручную. Важно и честно: это НЕ делает тебя анонимным для VPN-провайдера — твой трафик идёт через его сервер, поэтому он в любом случае видит твой IP, время и объём. Галочка убирает только лишние метаданные с эндпоинта подписки.',
     'mw.bypass_apps_applied': '[*] Список приложений сохранён — применится при следующем подключении.',
     'mw.bypass_apps_btn': 'Приложения мимо VPN…',
     'mw.netdebug_check': 'Режим сетевой отладки',
@@ -610,6 +612,8 @@ _EN: dict[str, str] = {
     'mw.net_conflict_warn': '⚠ "{app}" is intercepting the network — the VPN may carry no traffic. Close that app if sites do not load.',
     # --- v3.5.2: diagnostics, bypass apps, network debug ---
     'mw.diagnostics_btn': 'Network diagnostics',
+    'mw.minmeta_check': 'Withhold metadata from the subscription provider',
+    'mw.minmeta_hint': 'Strips the client version and OS from the subscription request (an anonymous token remains — without it providers return a stub) and disables the 12-hour background refresh, the steady heartbeat used to count devices. You will refresh the subscription manually. Important and honest: this does NOT make you anonymous to the VPN provider — your traffic goes through their server, so they always see your IP, timing and volume. It only removes surplus metadata from the subscription endpoint.',
     'mw.bypass_apps_applied': '[*] App list saved — it applies on the next connection.',
     'mw.bypass_apps_btn': 'Apps that bypass the VPN…',
     'mw.netdebug_check': 'Network debug mode',

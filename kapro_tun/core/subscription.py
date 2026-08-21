@@ -57,6 +57,21 @@ from .sing_box_config import HEALTH_PROXY_PORT
 # (Format still follows the `Name/Version (Platform; +URL)` convention.)
 USER_AGENT = f"KaproVPN/{__version__} (Windows; +https://github.com/fafnirov/KaproTUN)"
 
+# Privacy mode UA (v3.6.x). Keeps the `KaproVPN/` prefix the providers gate on
+# (see the block above — dropping it turns real configs into stubs), but strips
+# the two fields that actually fingerprint the machine: the exact client version
+# and the OS. Every user in this mode looks identical on the wire, so the
+# subscription endpoint can no longer tell devices apart by their UA or watch a
+# version roll out across a fleet.
+USER_AGENT_MINIMAL = "KaproVPN/1.0"
+
+
+def user_agent(minimal: bool = False) -> str:
+    """UA for subscription fetches. `minimal` trades the version/OS fields for
+    unlinkability; the provider-gating prefix is preserved either way."""
+    return USER_AGENT_MINIMAL if minimal else USER_AGENT
+
+
 SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://",
                      "hysteria2://", "hy2://")
 
@@ -385,7 +400,9 @@ def parse_subscription_body(body: str) -> list[str]:
 
 
 def _fetch(url: str, timeout: tuple[float, float],
-           proxy_url: Optional[str] = None) -> tuple[str, Optional[SubscriptionInfo]]:
+           proxy_url: Optional[str] = None,
+           minimal_metadata: Optional[bool] = None,
+           ) -> tuple[str, Optional[SubscriptionInfo]]:
     """One requests.get call; optionally routed through proxy_url.
 
     Returns (body, userinfo) — userinfo parsed from the provider's
@@ -396,8 +413,15 @@ def _fetch(url: str, timeout: tuple[float, float],
         # xray's mixed inbound speaks both HTTP and SOCKS on the same port,
         # so a single http://127.0.0.1:port URL handles http+https requests.
         proxies = {"http": proxy_url, "https": proxy_url}
+    if minimal_metadata is None:
+        try:
+            from . import storage
+            minimal_metadata = bool(
+                storage.load_settings().get("minimal_metadata", False))
+        except Exception:
+            minimal_metadata = False
     response = requests.get(url, timeout=timeout, proxies=proxies, headers={
-        "User-Agent": USER_AGENT,
+        "User-Agent": user_agent(minimal_metadata),
     })
     response.raise_for_status()
     userinfo = parse_userinfo(response.headers.get("Subscription-Userinfo", ""))

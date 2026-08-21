@@ -2060,6 +2060,51 @@ check("bypass: user apps go direct via the generic process rule (v3.5.2)",
       _v352_bypass_apps_generic_mechanism)
 
 
+def _v36_minimal_metadata_ua() -> None:
+    """v3.6.x: the privacy toggle must strip the fingerprinting fields from the
+    subscription User-Agent WITHOUT losing the prefix providers gate on.
+
+    The gate is measured, not guessed (see subscription.py): a UA that does not
+    start with exactly `KaproVPN/` makes several providers return a dead stub
+    instead of real configs, so a naive "send no UA" privacy mode would silently
+    break paid subscriptions."""
+    from kapro_tun.core import subscription as sub
+
+    normal = sub.user_agent(False)
+    minimal = sub.user_agent(True)
+    if not minimal.startswith("KaproVPN/"):
+        raise AssertionError(
+            "minimal UA must keep the provider-gating `KaproVPN/` prefix")
+    # The two fingerprinting fields must be gone.
+    from kapro_tun import __version__
+    if __version__ in minimal:
+        raise AssertionError("minimal UA must not leak the client version")
+    for leak in ("Windows", "Linux", "Darwin", "macOS"):
+        if leak in minimal:
+            raise AssertionError(f"minimal UA must not leak the OS ({leak})")
+    if minimal == normal:
+        raise AssertionError("privacy mode must actually change the UA")
+    # It must be a CONSTANT — two users on different versions look identical.
+    if sub.user_agent(True) != sub.USER_AGENT_MINIMAL:
+        raise AssertionError("minimal UA must be a fixed constant")
+    # Default stays off (opt-in: it disables background refresh).
+    from kapro_tun.core import storage
+    if storage.DEFAULT_SETTINGS.get("minimal_metadata") is not False:
+        raise AssertionError("minimal_metadata must be opt-in")
+    # And the honest wording must not promise anonymity from the VPN provider.
+    from kapro_tun.core import i18n
+    for table in (i18n._RU, i18n._EN):
+        hint = table["mw.minmeta_hint"]
+        if "NOT" not in hint and "НЕ делает" not in hint:
+            raise AssertionError(
+                "the hint must state plainly that this does not anonymise you "
+                "to the VPN provider — a false privacy promise is worse than none")
+
+
+check("privacy: minimal-metadata UA drops version/OS, keeps provider prefix (v3.6.x)",
+      _v36_minimal_metadata_ua)
+
+
 def _v360_game_kernel_bypass() -> None:
     """v3.6.0: game servers must leave the TUN at the ROUTE level, not just via
     a `direct` rule.

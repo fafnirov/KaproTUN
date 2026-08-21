@@ -584,6 +584,18 @@ class SettingsPage(QWidget):
         netdebug_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(netdebug_hint)
 
+        # --- Minimal metadata for the subscription provider (v3.6.x) ---
+        self.minmeta_check = QCheckBox(tr("mw.minmeta_check"))
+        self.minmeta_check.setChecked(
+            bool(manager.settings.get("minimal_metadata", False)))
+        self.minmeta_check.toggled.connect(self._on_minimal_metadata_changed)
+        outer.addWidget(self.minmeta_check)
+        minmeta_hint = QLabel(tr("mw.minmeta_hint"))
+        minmeta_hint.setObjectName("dim")
+        minmeta_hint.setWordWrap(True)
+        minmeta_hint.setContentsMargins(28, 0, 0, 0)
+        outer.addWidget(minmeta_hint)
+
 
         # --- Language toggle ---
         # Lives in Security section because it's the only other "global
@@ -788,6 +800,11 @@ class SettingsPage(QWidget):
 
     def _on_games_direct_changed(self, checked: bool) -> None:
         self._manager.update_settings(games_direct=checked)
+
+    def _on_minimal_metadata_changed(self, checked: bool) -> None:
+        # Takes effect on the next subscription fetch; the auto-refresh timer is
+        # re-evaluated on the next app start (or when the user refreshes).
+        self._manager.update_settings(minimal_metadata=checked)
 
     def _on_network_debug_changed(self, checked: bool) -> None:
         # Takes effect immediately (no reconnect): the flag only gates whether
