@@ -63,7 +63,15 @@ USER_AGENT = f"KaproVPN/{__version__} (Windows; +https://github.com/fafnirov/Kap
 # and the OS. Every user in this mode looks identical on the wire, so the
 # subscription endpoint can no longer tell devices apart by their UA or watch a
 # version roll out across a fleet.
-USER_AGENT_MINIMAL = "KaproVPN/1.0"
+# Same SHAPE as the accepted UA (`Name/Version (Platform; +URL)`) with every
+# field frozen. The measurement in the block above shows providers match more
+# than a bare prefix — a stripped-down "KaproVPN/1.0" was rejected in the field
+# while the full-shape string works. Frozen values still deliver the privacy
+# goal: the string is IDENTICAL for every user and every release, so it carries
+# nothing about this particular device (the "Windows" token is a constant, not
+# a report of the real OS).
+USER_AGENT_MINIMAL = ("KaproVPN/1.0.0 (Windows; "
+                      "+https://github.com/fafnirov/KaproTUN)")
 
 
 def user_agent(minimal: bool = False) -> str:
@@ -490,6 +498,7 @@ def import_subscription(
     url: str,
     timeout: tuple[float, float] = (10, 20),
     proxy_url: Optional[str] = None,
+    minimal_metadata: Optional[bool] = None,
 ) -> SubscriptionResult:
     """Download a subscription and parse every contained share-URL.
 
@@ -498,7 +507,8 @@ def import_subscription(
     "http://127.0.0.1:2082" to go via the active sing-box VPN tunnel).
     Raises requests.RequestException on network failure.
     """
-    body, userinfo = _fetch(url, timeout, proxy_url=proxy_url)
+    body, userinfo = _fetch(url, timeout, proxy_url=proxy_url,
+                            minimal_metadata=minimal_metadata)
     result = result_from_body(body, via_proxy=bool(proxy_url))
     result.userinfo = userinfo
     return result
@@ -538,14 +548,29 @@ def import_with_dpi_fallback(
         _minimal = bool(_storage.load_settings().get("minimal_metadata", False))
     except Exception:
         _minimal = False
-    if _minimal and _probe_local_proxy(local_proxy_host, local_proxy_port):
-        proxy_url = f"http://{local_proxy_host}:{local_proxy_port}"
+    if _minimal:
+        # Privacy mode must never cost the user their subscription. Some
+        # providers accept only their own idea of a known client, so if the
+        # anonymised identity comes back with nothing usable we retry once with
+        # the normal one and say so, instead of leaving an empty server list.
+        proxy_url = (f"http://{local_proxy_host}:{local_proxy_port}"
+                     if _probe_local_proxy(local_proxy_host, local_proxy_port)
+                     else None)
         try:
-            return import_subscription(url, timeout=timeout, proxy_url=proxy_url)
+            res = import_subscription(url, timeout=timeout, proxy_url=proxy_url,
+                                      minimal_metadata=True)
+            if res.configs:
+                return res
         except requests.RequestException:
-            # Tunnel route failed — fall through to the normal direct path
-            # rather than leaving the user unable to refresh at all.
+            pass          # fall through to the normal identity below
+        try:
+            from . import app_log
+            app_log.log("[subscription] приватный режим не дал конфигов — "
+                        "повтор с обычным идентификатором клиента")
+        except Exception:
             pass
+        return import_subscription(url, timeout=timeout,
+                                   minimal_metadata=False)
     try:
         return import_subscription(url, timeout=timeout)
     except requests.RequestException as direct_err:

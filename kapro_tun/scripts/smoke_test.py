@@ -2075,13 +2075,23 @@ def _v36_minimal_metadata_ua() -> None:
     if not minimal.startswith("KaproVPN/"):
         raise AssertionError(
             "minimal UA must keep the provider-gating `KaproVPN/` prefix")
-    # The two fingerprinting fields must be gone.
+    # The privacy property is CONSTANCY, not the absence of any platform word:
+    # the string must be identical for every user, every release and every OS,
+    # so it says nothing about this particular device. The platform token inside
+    # it is a frozen literal (providers reject the stripped-down form), not a
+    # report of the real system.
     from kapro_tun import __version__
     if __version__ in minimal:
-        raise AssertionError("minimal UA must not leak the client version")
-    for leak in ("Windows", "Linux", "Darwin", "macOS"):
-        if leak in minimal:
-            raise AssertionError(f"minimal UA must not leak the OS ({leak})")
+        raise AssertionError("minimal UA must not leak the real client version")
+    import sys as _sys
+    real_os = {"win32": "Windows", "darwin": "macOS", "linux": "Linux"}.get(
+        _sys.platform, "")
+    if real_os and real_os in minimal and real_os != "Windows":
+        raise AssertionError(
+            f"minimal UA must not track the real OS ({real_os}) — it is frozen")
+    src_line = sub.USER_AGENT_MINIMAL
+    if "{" in src_line or "%s" in src_line:
+        raise AssertionError("minimal UA must be a literal, never interpolated")
     if minimal == normal:
         raise AssertionError("privacy mode must actually change the UA")
     # It must be a CONSTANT — two users on different versions look identical.
@@ -2098,6 +2108,23 @@ def _v36_minimal_metadata_ua() -> None:
     if "_minimal" not in src or "_probe_local_proxy" not in src:
         raise AssertionError(
             "privacy mode must fetch through the tunnel when it is available")
+
+    # The minimal UA must keep the SHAPE providers accept, not just the prefix:
+    # a stripped "KaproVPN/1.0" was rejected in the field while the full
+    # `Name/Version (Platform; +URL)` form works.
+    m = sub.user_agent(True)
+    if "(" not in m or "+http" not in m:
+        raise AssertionError(
+            "minimal UA must keep the accepted Name/Version (Platform; +URL) shape")
+    if len(m.split("/")[1].split(" ")[0].split(".")) < 3:
+        raise AssertionError("minimal UA version must have the usual 3 parts")
+
+    # Privacy mode must NEVER cost the user their subscription: if the
+    # anonymised identity returns nothing usable, it retries with the normal one.
+    if "res.configs" not in src or "minimal_metadata=False" not in src:
+        raise AssertionError(
+            "privacy mode must fall back to the normal identity when it yields "
+            "no configs — a privacy switch may not break the subscription")
 
     # The wording must keep BOTH honest caveats: it does not anonymise you to
     # the VPN provider, and it does not remove the device entry from the panel
