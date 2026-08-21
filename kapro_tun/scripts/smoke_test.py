@@ -2091,7 +2091,18 @@ def _v36_minimal_metadata_ua() -> None:
     from kapro_tun.core import storage
     if storage.DEFAULT_SETTINGS.get("minimal_metadata") is not False:
         raise AssertionError("minimal_metadata must be opt-in")
-    # And the honest wording must not promise anonymity from the VPN provider.
+    # Privacy mode must prefer the tunnel for the fetch, so the subscription
+    # endpoint sees the VPN exit IP instead of the user's home address.
+    import inspect
+    src = inspect.getsource(sub.import_with_dpi_fallback)
+    if "_minimal" not in src or "_probe_local_proxy" not in src:
+        raise AssertionError(
+            "privacy mode must fetch through the tunnel when it is available")
+
+    # The wording must keep BOTH honest caveats: it does not anonymise you to
+    # the VPN provider, and it does not remove the device entry from the panel
+    # (the gating identifier has to stay in the request). A privacy switch that
+    # implies more than it delivers is worse than no switch at all.
     from kapro_tun.core import i18n
     for table in (i18n._RU, i18n._EN):
         hint = table["mw.minmeta_hint"]
@@ -2099,6 +2110,9 @@ def _v36_minimal_metadata_ua() -> None:
             raise AssertionError(
                 "the hint must state plainly that this does not anonymise you "
                 "to the VPN provider — a false privacy promise is worse than none")
+        if "KaproVPN" not in hint:
+            raise AssertionError(
+                "the hint must admit the device entry stays visible in the panel")
 
 
 check("privacy: minimal-metadata UA drops version/OS, keeps provider prefix (v3.6.x)",

@@ -183,7 +183,7 @@ _RU: dict[str, str] = {
     # --- v3.5.2: diagnostics, bypass apps, network debug ---
     'mw.diagnostics_btn': 'Сетевая диагностика',
     'mw.minmeta_check': 'Не отдавать метаданные провайдеру подписки',
-    'mw.minmeta_hint': 'Убирает из запроса к подписке версию клиента и ОС (остаётся обезличенный идентификатор — без него провайдеры отдают заглушку) и отключает фоновое обновление раз в 12 ч, тот самый ровный «пульс», по которому считают устройства. Обновлять подписку придётся вручную. Важно и честно: это НЕ делает тебя анонимным для VPN-провайдера — твой трафик идёт через его сервер, поэтому он в любом случае видит твой IP, время и объём. Галочка убирает только лишние метаданные с эндпоинта подписки.',
+    'mw.minmeta_hint': 'Три меры против учёта провайдером: 1) из запроса убираются версия клиента и ОС — все пользователи выглядят одинаково, и несколько твоих установок считаются одним устройством, а не разными; 2) отключается фоновое обновление раз в 12 ч — тот ровный «пульс», по которому видно активное устройство (обновлять подписку придётся вручную); 3) при поднятом туннеле подписка запрашивается через него, поэтому эндпоинт видит IP VPN-узла, а не твой домашний. Чего это НЕ делает: устройство «KaproVPN» из панели не исчезнет — обезличенный идентификатор в запросе обязателен, без него провайдеры отдают заглушку вместо конфигов. И это не делает тебя анонимным для самого VPN-провайдера: твой трафик идёт через его сервер, поэтому IP, время и объём он видит в любом случае.',
     'mw.bypass_apps_applied': '[*] Список приложений сохранён — применится при следующем подключении.',
     'mw.bypass_apps_btn': 'Приложения мимо VPN…',
     'mw.netdebug_check': 'Режим сетевой отладки',
@@ -613,7 +613,7 @@ _EN: dict[str, str] = {
     # --- v3.5.2: diagnostics, bypass apps, network debug ---
     'mw.diagnostics_btn': 'Network diagnostics',
     'mw.minmeta_check': 'Withhold metadata from the subscription provider',
-    'mw.minmeta_hint': 'Strips the client version and OS from the subscription request (an anonymous token remains — without it providers return a stub) and disables the 12-hour background refresh, the steady heartbeat used to count devices. You will refresh the subscription manually. Important and honest: this does NOT make you anonymous to the VPN provider — your traffic goes through their server, so they always see your IP, timing and volume. It only removes surplus metadata from the subscription endpoint.',
+    'mw.minmeta_hint': 'Three measures against provider-side accounting: 1) the client version and OS are stripped from the request — every user looks identical, and several of your installs count as one device rather than many; 2) the 12-hour background refresh is disabled, removing the steady heartbeat that marks a device active (you refresh manually); 3) while the tunnel is up the subscription is fetched through it, so the endpoint sees the VPN exit IP, not your home address. What it does NOT do: the device entry named KaproVPN will not disappear from the panel — an anonymous identifier must stay in the request, or providers return a stub instead of configs. And it does not make you anonymous to the VPN provider itself: your traffic transits their server, so IP, timing and volume are visible regardless.',
     'mw.bypass_apps_applied': '[*] App list saved — it applies on the next connection.',
     'mw.bypass_apps_btn': 'Apps that bypass the VPN…',
     'mw.netdebug_check': 'Network debug mode',

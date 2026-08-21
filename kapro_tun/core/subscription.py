@@ -526,7 +526,26 @@ def import_with_dpi_fallback(
       3. Otherwise (VPN down → nothing to tunnel through) re-raise the original
          error untouched, so the caller's "подключись и попробуй снова" hint
          makes sense.
+    Privacy mode (minimal_metadata) changes step 1: when the tunnel is already
+    up we fetch THROUGH it by preference, so the subscription endpoint sees the
+    VPN exit IP instead of the user's home address. Panels that register a
+    "device" per subscription fetch then key it to the exit, not to the home
+    connection — and the user's real IP/location never reaches that endpoint at
+    all. Falls back to a direct fetch when the tunnel is down.
     """
+    try:
+        from . import storage as _storage
+        _minimal = bool(_storage.load_settings().get("minimal_metadata", False))
+    except Exception:
+        _minimal = False
+    if _minimal and _probe_local_proxy(local_proxy_host, local_proxy_port):
+        proxy_url = f"http://{local_proxy_host}:{local_proxy_port}"
+        try:
+            return import_subscription(url, timeout=timeout, proxy_url=proxy_url)
+        except requests.RequestException:
+            # Tunnel route failed — fall through to the normal direct path
+            # rather than leaving the user unable to refresh at all.
+            pass
     try:
         return import_subscription(url, timeout=timeout)
     except requests.RequestException as direct_err:
