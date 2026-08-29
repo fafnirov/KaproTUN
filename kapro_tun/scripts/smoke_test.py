@@ -2146,6 +2146,99 @@ check("privacy: minimal-metadata UA drops version/OS, keeps provider prefix (v3.
       _v36_minimal_metadata_ua)
 
 
+def _v36_v2ray_json_subscription() -> None:
+    """v3.6.x: support the `v2ray-json` subscription format.
+
+    Some panels stop serving share-URLs and return an ARRAY OF WHOLE XRAY
+    CONFIGS instead. Seen live: a provider switched formats and KaproTUN
+    imported 0 servers from a perfectly valid 21 KB payload, so the user simply
+    "could not connect" with nothing in the UI explaining why."""
+    import json as _json
+    from kapro_tun.core import subscription as sub
+    from kapro_tun.core import v2ray_json as v2j
+
+    body = _json.dumps([
+        {   # balancer entry: repeats servers that also appear on their own
+            "remarks": "auto | fastest",
+            "outbounds": [
+                {"tag": "a", "protocol": "trojan",
+                 "settings": {"servers": [{"address": "1.2.3.4", "port": 443,
+                                           "password": "pw"}]},
+                 "streamSettings": {"network": "tcp", "security": "reality",
+                                    "realitySettings": {"serverName": "x.com",
+                                                        "publicKey": "PK",
+                                                        "shortId": "ab",
+                                                        "fingerprint": "firefox"}}},
+                {"tag": "b", "protocol": "vless",
+                 "settings": {"vnext": [{"address": "5.6.7.8", "port": 8443,
+                                         "users": [{"id": "u-1", "flow": "xtls-rprx-vision"}]}]},
+                 "streamSettings": {"network": "tcp", "security": "reality",
+                                    "realitySettings": {"publicKey": "PK2"}}},
+                {"tag": "direct", "protocol": "freedom"},
+                {"tag": "block", "protocol": "blackhole"},
+            ]},
+        {   # the same server, but named — this name must win the dedupe
+            "remarks": "Netherlands",
+            "outbounds": [
+                {"tag": "proxy", "protocol": "trojan",
+                 "settings": {"servers": [{"address": "1.2.3.4", "port": 443,
+                                           "password": "pw"}]},
+                 "streamSettings": {"network": "ws", "security": "tls",
+                                    "tlsSettings": {"serverName": "y.com"},
+                                    "wsSettings": {"path": "/p",
+                                                   "headers": {"Host": "h.com"}}}},
+                {"tag": "direct", "protocol": "freedom"},
+            ]},
+        {"remarks": "broken", "outbounds": [
+            {"tag": "proxy", "protocol": "trojan", "settings": {"servers": []}}]},
+    ], ensure_ascii=False)
+
+    if not v2j.looks_like_v2ray_json(body):
+        raise AssertionError("v2ray-json body must be recognised")
+    if v2j.looks_like_v2ray_json("vless://x" + chr(10) + "vless://y"):
+        raise AssertionError("a share-URL list must NOT be taken for v2ray-json")
+
+    res = sub.result_from_body(body)
+    names = [c.name for c in res.configs]
+    if "Netherlands" not in names:
+        raise AssertionError(
+            f"a named entry must survive dedupe against the balancer; got {names}")
+    if "auto | fastest" in names:
+        raise AssertionError("the balancer duplicate must be dropped, not the real name")
+    hosts = {(c.outbound["server"], c.outbound["server_port"]) for c in res.configs}
+    if ("1.2.3.4", 443) not in hosts or ("5.6.7.8", 8443) not in hosts:
+        raise AssertionError(f"both distinct servers must be imported; got {hosts}")
+    if len(res.configs) != 2:
+        raise AssertionError(f"expected 2 deduped servers, got {len(res.configs)}")
+    # A broken entry costs only itself.
+    if not res.errors:
+        raise AssertionError("the malformed entry must be reported, not silently dropped")
+
+    # Field mapping: REALITY, uTLS and the ws transport must survive.
+    nl = next(c for c in res.configs if c.name == "Netherlands")
+    tls = nl.outbound.get("tls", {})
+    if tls.get("server_name") != "y.com":
+        raise AssertionError("TLS SNI lost in conversion")
+    if nl.outbound.get("transport", {}).get("type") != "ws":
+        raise AssertionError("ws transport lost in conversion")
+    other = next(c for c in res.configs if c.outbound["server"] == "5.6.7.8")
+    rt = other.outbound.get("tls", {}).get("reality", {})
+    if not rt.get("enabled") or rt.get("public_key") != "PK2":
+        raise AssertionError("REALITY public key lost in conversion")
+    if other.outbound.get("flow") != "xtls-rprx-vision":
+        raise AssertionError("vless flow lost in conversion")
+
+    # The provider's own routing/DNS must NOT leak into our config: we apply
+    # the user's split-routing policy, not theirs.
+    for c in res.configs:
+        if "routing" in c.outbound or "dns" in c.outbound:
+            raise AssertionError("provider routing/DNS must be discarded")
+
+
+check("subscription: v2ray-json format (array of Xray configs) imports (v3.6.x)",
+      _v36_v2ray_json_subscription)
+
+
 def _v360_game_kernel_bypass() -> None:
     """v3.6.0: game servers must leave the TUN at the ROUTE level, not just via
     a `direct` rule.

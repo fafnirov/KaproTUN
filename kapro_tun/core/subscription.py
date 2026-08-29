@@ -473,6 +473,19 @@ def result_from_body(body: str, via_proxy: bool = False) -> SubscriptionResult:
     UI, so a body the user copied from their browser parses identically
     to one we downloaded ourselves.
     """
+    # Some panels serve `v2ray-json` — an array of whole Xray configs — instead
+    # of share-URLs. Seen live when a provider switched formats and we imported
+    # zero servers from a perfectly valid 21 KB payload.
+    from . import v2ray_json as _v2j
+    if _v2j.looks_like_v2ray_json(body):
+        cfgs, errs = _v2j.parse_v2ray_json(body)
+        return SubscriptionResult(
+            configs=[c for c in cfgs if not is_placeholder_config(c)],
+            errors=errs,
+            raw_lines=len(cfgs),
+            via_proxy=via_proxy,
+            placeholders=[c.name for c in cfgs if is_placeholder_config(c)],
+        )
     share_urls = parse_subscription_body(body)
     configs: list[ProxyConfig] = []
     errors: list[str] = []
