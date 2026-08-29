@@ -40,6 +40,31 @@ class _Utf8BomRotatingFileHandler(RotatingFileHandler):
     file also starts with a BOM; on append to an existing file, none is added.
     """
 
+    # A rollover can lose a race on Windows: another instance of the app (or a
+    # tail/editor) holds the file open and the rename fails. The stock handler
+    # then leaves the stream closed and every later record is dropped — which is
+    # exactly how app.log went silent for ten days while the app kept running.
+    # An oversized log is vastly better than no log, so a failed rotation is
+    # swallowed, the stream reopened, and the next attempt is delayed a little
+    # instead of being retried on every single record.
+    _ROLLOVER_RETRY_S = 30.0
+
+    def doRollover(self):
+        import time
+        now = time.monotonic()
+        if now < getattr(self, "_rollover_blocked_until", 0.0):
+            return
+        try:
+            super().doRollover()
+            self._rollover_blocked_until = 0.0
+        except Exception:
+            self._rollover_blocked_until = now + self._ROLLOVER_RETRY_S
+            try:
+                if self.stream is None:
+                    self.stream = self._open()
+            except Exception:
+                pass
+
     def _open(self):
         fresh = True
         try:
@@ -84,23 +109,46 @@ def redact(msg: str) -> str:
         return "[redaction-error]"
 
 
+# How long to wait before retrying a failed logger setup. Without a retry a
+# single transient failure (the log file momentarily held by another instance)
+# silently disabled logging for the WHOLE process lifetime — the app ran for
+# days afterwards writing nothing, leaving later problems undiagnosable.
+_INIT_RETRY_S = 20.0
+_next_init_attempt = 0.0
+
+
+def _build_handler(path) -> logging.Handler:
+    handler = _Utf8BomRotatingFileHandler(
+        str(path), maxBytes=_MAX_BYTES, backupCount=_BACKUPS, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    return handler
+
+
 def _get_logger() -> Optional[logging.Logger]:
-    global _logger, _init_done
-    if _init_done:
+    global _logger, _init_done, _next_init_attempt
+    if _logger is not None:
         return _logger
+    import time
+    now = time.monotonic()
+    if _init_done and now < _next_init_attempt:
+        return None            # backing off, don't hammer a locked file
     _init_done = True
+    _next_init_attempt = now + _INIT_RETRY_S
     try:
         lg = logging.getLogger("kaprotun.app")
         lg.setLevel(logging.INFO)
         lg.propagate = False  # don't leak into the root logger / console
+        for stale in list(lg.handlers):    # a retry must not stack handlers
+            lg.removeHandler(stale)
         path = paths.app_log_file()
         path.parent.mkdir(parents=True, exist_ok=True)
-        handler = _Utf8BomRotatingFileHandler(
-            str(path), maxBytes=_MAX_BYTES, backupCount=_BACKUPS,
-            encoding="utf-8",
-        )
-        handler.setFormatter(logging.Formatter(
-            "%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+        try:
+            handler = _build_handler(path)
+        except OSError:
+            # The shared file is unusable (locked by another instance). Fall
+            # back to a private per-process log rather than losing the trail.
+            handler = _build_handler(path.with_name(f"{path.stem}-{os.getpid()}{path.suffix}"))
         lg.addHandler(handler)
         _logger = lg
     except Exception:
@@ -169,5 +217,7 @@ def _reset_for_test() -> None:
                 _logger.removeHandler(h)
     except Exception:
         pass
+    global _next_init_attempt
     _logger = None
     _init_done = False
+    _next_init_attempt = 0.0

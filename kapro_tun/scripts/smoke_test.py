@@ -6446,6 +6446,77 @@ check("logs: app.log written UTF-8 with a single leading BOM (v3.3.2)",
       _v3_app_log_utf8_bom)
 
 
+def _v36_logging_survives_failures() -> None:
+    """Logging must never die permanently from a transient file lock.
+
+    Field evidence: app.log stopped being written for ten days while the app
+    kept running and even crashing. _get_logger() cached its first failure
+    forever (`_init_done`), so one moment of contention — another instance or a
+    tail holding the file on Windows — silently disabled the whole diagnostic
+    trail for the rest of the process. Every later problem then had to be
+    debugged blind."""
+    import logging.handlers as _H
+    import pathlib as _pl
+    import tempfile as _tf
+    from kapro_tun.core import app_log as _al
+    from kapro_tun.core import paths as _p
+
+    _orig_path = _p.app_log_file
+
+    def _fresh():
+        f = _pl.Path(_tf.mkdtemp()) / "app.log"
+        _p.app_log_file = lambda: f
+        _al._reset_for_test()
+        _al._next_init_attempt = 0.0
+        return f
+
+    try:
+        # 1) A failed init must be retried, not cached forever.
+        f = _fresh()
+        _o_open = _H.RotatingFileHandler._open
+        _H.RotatingFileHandler._open = (
+            lambda self: (_ for _ in ()).throw(PermissionError("locked")))
+        try:
+            _al.log("during the lock")
+        finally:
+            _H.RotatingFileHandler._open = _o_open
+        _al._next_init_attempt = 0.0          # pretend the backoff elapsed
+        _al.log("after the lock cleared")
+        _al._reset_for_test()
+        text = f.read_text(encoding="utf-8-sig") if f.exists() else ""
+        if "after the lock cleared" not in text:
+            raise AssertionError(
+                "logging must recover once the file is free again — caching the "
+                "first failure is what blinded us for ten days")
+
+        # 2) A failed ROLLOVER must not drop every later record either.
+        f = _fresh()
+        _al.log("seed")
+        handler = _al._get_logger().handlers[0]
+        handler.maxBytes = 200
+        _o_roll = _H.RotatingFileHandler.doRollover
+        _H.RotatingFileHandler.doRollover = (
+            lambda self: (_ for _ in ()).throw(PermissionError("locked")))
+        try:
+            _al.log("z" * 300)                 # forces a rollover attempt
+        finally:
+            _H.RotatingFileHandler.doRollover = _o_roll
+        _al.log("after the failed rotation")
+        _al._reset_for_test()
+        text = f.read_text(encoding="utf-8-sig", errors="replace") if f.exists() else ""
+        if "after the failed rotation" not in text:
+            raise AssertionError(
+                "a rotation that loses the race must not disable logging — an "
+                "oversized log beats no log")
+    finally:
+        _p.app_log_file = _orig_path
+        _al._reset_for_test()
+
+
+check("logs: survive a locked file and a failed rotation (v3.6.1)",
+      _v36_logging_survives_failures)
+
+
 def _v3_self_heal_rearms_backoff() -> None:
     """v3.3.2 (#8): a failed auto-reconnect attempt must re-arm the timer with
     the NEXT backoff step (walking to _reconnect_max), not stop after attempt

@@ -3,7 +3,8 @@
 The automated smoke suite is the gate for *publishing* a build; this checklist
 is the human soak test you run on the resulting build before calling a version
 **stable**. The default TUN engine is **sing-box native TUN**; the legacy
-Xray + tun2socks engine is a manual fallback.
+sing-box is the only engine since v3.1.0 — there is no legacy fallback and
+no HTTP-proxy mode.
 
 > Manual steps are Windows-first (the primary platform). Adapt the commands for
 > macOS / Linux where noted.
@@ -36,7 +37,7 @@ whether any runtime config (with secrets) is lingering on disk, and the tail of
 Quick process check on its own (non-destructive):
 
 ```powershell
-Get-Process sing-box,xray,tun2socks,hysteria -ErrorAction SilentlyContinue |
+Get-Process sing-box -ErrorAction SilentlyContinue |
   Select-Object Name,Id,StartTime
 ```
 
@@ -45,15 +46,20 @@ Get-Process sing-box,xray,tun2socks,hysteria -ErrorAction SilentlyContinue |
 Settings → **Движок TUN = «Основной: sing-box»**, mode = **TUN**, run as
 Administrator. Connect to a representative server, then:
 
-- [ ] **Processes.** `sing-box.exe` is running; **`xray.exe` and
-      `tun2socks.exe` are NOT** (a sing-box session uses neither). Verify with
+- [ ] **Processes.** `sing-box.exe` is running and is the ONLY engine process.
+      Verify with
       the process check above or `collect_diagnostics`.
 - [ ] **UI status** shows **`TUN · sing-box`**.
-- [ ] **`app.log`** has `[connect] mode=TUN engine=sing_box_tun` and — crucially
-      — **no `Xray-core упал`** after a healthy connect (that was the v3.0.2
-      false-crash bug). Benign per-connection sing-box noise ("forcibly closed",
-      "i/o timeout", "connection download closed") must **not** spam the Logs
-      page (kept in diagnostics only).
+- [ ] **`app.log` is actually being written** — it must contain a fresh
+      `[connect] mode=TUN engine=sing_box_tun` line with today's timestamp.
+      (v3.6.1: a single locked-file moment used to disable logging for the whole
+      process lifetime, so an empty-looking log is a real regression signal, not
+      a quiet session.)
+- [ ] **No self-inflicted reconnects** on a healthy session: no
+      `reason=dns_watchdog` / `reason=network_change` in `app.log` while the
+      tunnel is carrying traffic. Benign per-connection sing-box noise
+      ("forcibly closed", "i/o timeout", "connection download closed") must
+      **not** spam the Logs page (kept in diagnostics only).
 - [ ] **Real traffic.** Browser loads pages; run a Speedtest; **Telegram**
       connects and sends/receives (UDP path); a download sustains for several
       minutes without the tunnel dropping.
@@ -63,7 +69,6 @@ Administrator. Connect to a representative server, then:
       reconnects without leaking and without engine fallback.
 - [ ] **10 reconnects in a row.** Disconnect/connect (or let auto-reconnect fire)
       ~10 times. No reconnect storm, no creeping memory/handles, no silent
-      switch to `classic_xray_tun2socks` in `app.log`.
 - [ ] **DNS leak — protection ON.** With leak protection on, run a DNS-leak test
       (e.g. browserleaks.com/dns) — resolvers should be the tunnel's, not your
       ISP's. Confirm no IPv4 / IPv6 / WebRTC leak.
@@ -76,18 +81,11 @@ Administrator. Connect to a representative server, then:
 - [ ] **Runtime cleanup.** Disconnect cleanly, then check **no** runtime config
       remains on disk (they carry the server UUID/password):
       `collect_diagnostics` should report `sing-box-runtime.json`,
-      `xray-runtime.json`, `hysteria-client.yaml` all **absent ✓**.
+      `sing-box-runtime.json` **absent ✓** (it holds credentials and is deleted on
+      disconnect).
 
 ## 3. Legacy engine spot-check
 
-Settings → **Движок TUN = «Legacy: Xray + tun2socks»**, reconnect.
-
-- [ ] `xray.exe` + `tun2socks.exe` run; `sing-box.exe` does not.
-- [ ] UI shows **`TUN · legacy`**.
-- [ ] Ad-block checkbox is **enabled** again (it's an Xray feature; it's
-      disabled with a "legacy only" note under sing-box).
-- [ ] A config sing-box can't reproduce (e.g. **VLESS XHTTP / Reality**) fails on
-      sing-box with a clear "switch to legacy" message and **works** on legacy.
 
 ## 4. Sign-off
 
