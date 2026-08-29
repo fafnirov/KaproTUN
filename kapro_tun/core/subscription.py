@@ -70,6 +70,10 @@ USER_AGENT = f"KaproVPN/{__version__} (Windows; +https://github.com/fafnirov/Kap
 # goal: the string is IDENTICAL for every user and every release, so it carries
 # nothing about this particular device (the "Windows" token is a constant, not
 # a report of the real OS).
+# Headers from the most recent fetch that carry the provider's own
+# guidance (support contact, account page, announcement).
+_last_headers: dict = {}
+
 USER_AGENT_MINIMAL = ("KaproVPN/1.0.0 (Windows; "
                       "+https://github.com/fafnirov/KaproTUN)")
 
@@ -258,6 +262,13 @@ class SubscriptionResult:
     # gmailvpn's `vless://…@0.0.0.0:1 #App not supported`) — filtered out
     # of `configs` so a dead placeholder is never imported as a server.
     placeholders: list[str] = field(default_factory=list)
+    # What the PROVIDER itself says when it refuses to serve us. Panels put
+    # the reason in the stub's own config names ("App not supported",
+    # "Happ, v2RayTun or Incy") and their contacts in response headers. Passing
+    # these through turns a dead-end error into something the user can act on.
+    provider_note: str = ""
+    support_url: str = ""
+    account_url: str = ""
 
 
 @dataclass
@@ -433,6 +444,11 @@ def _fetch(url: str, timeout: tuple[float, float],
     })
     response.raise_for_status()
     userinfo = parse_userinfo(response.headers.get("Subscription-Userinfo", ""))
+    _last_headers.clear()
+    for key in ("Support-Url", "Profile-Web-Page-Url", "Profile-Title", "Announce"):
+        value = response.headers.get(key)
+        if value:
+            _last_headers[key] = value
     return response.text, userinfo
 
 
@@ -522,8 +538,17 @@ def import_subscription(
     """
     body, userinfo = _fetch(url, timeout, proxy_url=proxy_url,
                             minimal_metadata=minimal_metadata)
+    headers = dict(_last_headers)
     result = result_from_body(body, via_proxy=bool(proxy_url))
     result.userinfo = userinfo
+    result.support_url = str(headers.get("Support-Url", "") or "")
+    result.account_url = str(headers.get("Profile-Web-Page-Url", "") or "")
+    # The stub's own config names ARE the provider's message ("App not
+    # supported", "Happ, v2RayTun or Incy") — the most direct explanation the
+    # user can get, straight from the panel that refused us.
+    note = " · ".join(dict.fromkeys(
+        n.strip() for n in result.placeholders if n and n.strip()))
+    result.provider_note = note[:200]
     return result
 
 

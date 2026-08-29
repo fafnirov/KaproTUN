@@ -368,9 +368,17 @@ class SubscriptionDialog(QDialog):
             # Parsed fine, but every entry was a provider stub (e.g.
             # gmailvpn's 0.0.0.0:1 "App not supported"). Explain instead
             # of silently importing a dead server.
-            self.status_label.setText(
-                tr("sub.result_only_stub", n=len(result.placeholders))
-            )
+            text = tr("sub.result_only_stub", n=len(result.placeholders))
+            # Pass the panel's OWN words and contacts through: it is refusing
+            # us on purpose, and only the provider can lift that. A generic
+            # error leaves the user guessing; their support link does not.
+            if result.provider_note or result.support_url:
+                text += tr("sub.result_stub_provider",
+                           note=result.provider_note or "—",
+                           support=result.support_url or "—",
+                           account=result.account_url or "—")
+            self.status_label.setText(text)
+            self.status_label.setOpenExternalLinks(True)
         else:
             self.status_label.setText(tr("sub.result_no_share_url"))
 
