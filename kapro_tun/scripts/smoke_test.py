@@ -2239,6 +2239,60 @@ check("subscription: v2ray-json format (array of Xray configs) imports (v3.6.x)"
       _v36_v2ray_json_subscription)
 
 
+def _v36_no_missing_self_calls() -> None:
+    """Every `self.X()` inside MainWindow must actually exist.
+
+    Field bug this guards: _on_import_subscription called
+    `self.refresh_sub_info()`, but that method lives on SettingsPage. The
+    runtime guard swallowed the AttributeError so the app stayed up — and the
+    subscription import saved servers to disk, then died before refreshing the
+    UI, auto-selecting a config or showing its toast. To the user the import
+    silently did nothing, with no error anywhere. A typo'd attribute must fail
+    the build, not become an invisible half-finished handler."""
+    import ast as _ast
+    import pathlib as _pl
+    from PySide6.QtCore import QObject, QThread
+    from PySide6.QtWidgets import QDialog, QMainWindow, QWidget
+
+    # Resolve each class against the Qt base it actually derives from, so a
+    # QThread's msleep()/wait() isn't reported as missing.
+    _BASES = {"QMainWindow": QMainWindow, "QWidget": QWidget, "QDialog": QDialog,
+              "QThread": QThread, "QObject": QObject}
+    src = _pl.Path("kapro_tun/gui/main_window.py").read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    problems = []
+    for node in tree.body:
+        if not isinstance(node, _ast.ClassDef):
+            continue
+        inherited = set()
+        for base in node.bases:
+            base_name = getattr(base, "id", None) or getattr(base, "attr", None)
+            if base_name in _BASES:
+                inherited |= set(dir(_BASES[base_name]))
+        if not inherited:          # unknown/local base — nothing reliable to check
+            continue
+        defined = {n.name for n in node.body
+                   if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))}
+        assigned = {t.attr for n in _ast.walk(node) if isinstance(n, _ast.Assign)
+                    for t in n.targets if isinstance(t, _ast.Attribute)
+                    and isinstance(t.value, _ast.Name) and t.value.id == "self"}
+        known = defined | assigned | inherited
+        for n in _ast.walk(node):
+            if (isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+                    and isinstance(n.func.value, _ast.Name)
+                    and n.func.value.id == "self"
+                    and n.func.attr not in known):
+                problems.append(f"{node.name}.{n.func.attr}() @ line {n.lineno}")
+    if problems:
+        raise AssertionError(
+            "call(s) to attributes that do not exist on their class: "
+            + ", ".join(sorted(set(problems))))
+
+
+check("gui: no self.X() calls to attributes that don't exist (v3.6.x)",
+      _v36_no_missing_self_calls)
+
+
 def _v360_game_kernel_bypass() -> None:
     """v3.6.0: game servers must leave the TUN at the ROUTE level, not just via
     a `direct` rule.

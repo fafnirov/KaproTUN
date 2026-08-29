@@ -2754,8 +2754,12 @@ class MainWindow(QMainWindow):
         storage.save_configs(self.configs)
         # Subscription-Userinfo was just persisted by the dialog — reflect
         # the fresh remaining-traffic / expiry in the Settings subtitle + the
-        # home-screen expiry banner.
-        self.refresh_sub_info()
+        # home-screen expiry banner. (refresh_sub_info lives on SettingsPage;
+        # calling it on the window raised AttributeError, which the runtime
+        # guard swallowed — so the import saved the servers to disk and then
+        # died before refreshing the UI, auto-selecting a config or toasting.
+        # From the user's side the import silently did nothing.)
+        self.settings_page.refresh_sub_info()
         self.home_page.refresh_sub_banner()
         # If no active config yet, pick the first imported one
         if self._active_config is None and self.configs:
