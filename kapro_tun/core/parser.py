@@ -142,13 +142,20 @@ def parse_trojan(url: str) -> ProxyConfig:
     insecure = _truthy(_first_qs(qs, "allowInsecure", "insecure", default="0"))
     utls_fp = _first_qs(qs, "fp")
     net = _first_qs(qs, "type", default="tcp")
+    # trojan over REALITY is common on modern panels (every kavonet trojan node
+    # uses it). Without reading pbk/sid the outbound came out as plain TLS and
+    # could never complete the handshake — the server simply looked broken.
+    security = _first_qs(qs, "security", default="tls").lower()
+    reality_pbk = _first_qs(qs, "pbk") if security == "reality" else ""
+    reality_sid = _first_qs(qs, "sid") if security == "reality" else ""
 
     outbound: dict[str, Any] = {
         "type": "trojan",
         "server": u.hostname,
         "server_port": u.port,
         "password": unquote(u.username),
-        "tls": _build_tls(sni, insecure=insecure, alpn=alpn, utls_fp=utls_fp),
+        "tls": _build_tls(sni, insecure=insecure, alpn=alpn, utls_fp=utls_fp,
+                          reality_pbk=reality_pbk, reality_sid=reality_sid),
     }
     transport = _build_transport(net, qs, host_header_fallback=u.hostname)
     if transport:

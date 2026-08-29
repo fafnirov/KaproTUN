@@ -2293,6 +2293,39 @@ check("gui: no self.X() calls to attributes that don't exist (v3.6.x)",
       _v36_no_missing_self_calls)
 
 
+def _v36_trojan_reality() -> None:
+    """trojan:// over REALITY must keep its REALITY parameters.
+
+    parse_trojan read sni/alpn/fp but never `security`/`pbk`/`sid`, so a
+    REALITY trojan link silently became a plain-TLS outbound that can never
+    complete the handshake — the node just looked dead. Every trojan server on
+    the user's provider uses REALITY, so hand-pasted links were unusable."""
+    from kapro_tun.core.parser import parse
+
+    cfg = parse("trojan://pw@1.2.3.4:443?security=reality&sni=a.com"
+                "&fp=firefox&pbk=PUBKEY&sid=ab&type=tcp#NL")
+    tls = cfg.outbound.get("tls", {})
+    reality = tls.get("reality") or {}
+    if not reality.get("enabled"):
+        raise AssertionError("REALITY lost: trojan outbound has no reality block")
+    if reality.get("public_key") != "PUBKEY":
+        raise AssertionError("REALITY public key lost")
+    if reality.get("short_id") != "ab":
+        raise AssertionError("REALITY short_id lost")
+    if tls.get("utls", {}).get("fingerprint") != "firefox":
+        raise AssertionError("uTLS fingerprint lost")
+    if tls.get("server_name") != "a.com":
+        raise AssertionError("SNI lost")
+
+    # A plain-TLS trojan must NOT gain a reality block.
+    plain = parse("trojan://pw@1.2.3.4:443?security=tls&sni=a.com#T")
+    if "reality" in plain.outbound.get("tls", {}):
+        raise AssertionError("plain TLS trojan must not get a REALITY block")
+
+
+check("parser: trojan over REALITY keeps pbk/sid (v3.6.x)", _v36_trojan_reality)
+
+
 def _v360_game_kernel_bypass() -> None:
     """v3.6.0: game servers must leave the TUN at the ROUTE level, not just via
     a `direct` rule.
