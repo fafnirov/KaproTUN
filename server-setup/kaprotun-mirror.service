@@ -1,0 +1,29 @@
+# Sync the KaproTUN file mirror from upstream releases.
+#   sudo install -m 644 kaprotun-mirror.service /etc/systemd/system/
+#   sudo install -m 644 kaprotun-mirror.timer   /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kaprotun-mirror.timer
+#
+# Status:  systemctl list-timers kaprotun-mirror
+# Logs:    journalctl -u kaprotun-mirror -n 50
+
+[Unit]
+Description=Sync KaproTUN binary mirror
+Documentation=https://github.com/fafnirov/KaproTUN/tree/main/server-setup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kaprotun-sync
+# The sync writes into the nginx docroot and chowns to www-data, so it
+# needs root. It touches nothing else on the box.
+User=root
+# A stuck download should not wedge the timer forever; the fetch helper
+# has its own per-request caps, this is the belt-and-braces outer bound.
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

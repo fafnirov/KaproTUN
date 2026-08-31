@@ -1,142 +1,179 @@
 #!/bin/bash
-# Sync upstream xray-core, tun2socks, wintun binaries into the
-# KaproTUN mirror directory. Run weekly via cron.
+# Sync the KaproTUN file mirror from upstream releases.
 #
-# Usage:
-#   /usr/local/bin/kaprotun-sync
+#   install:  sudo install -m 755 sync-binaries.sh /usr/local/bin/kaprotun-sync
+#   run:      sudo /usr/local/bin/kaprotun-sync
+#   schedule: see kaprotun-mirror.timer (systemd) or cron in README.md
 #
-# Side effects:
-#   Downloads from GitHub / wintun.net into a temp dir, atomically
-#   moves into /var/www/files.kaprovpn.pro/ on success. If a single
-#   download fails the old version stays in place (no half-broken
-#   mirror state).
+# What it mirrors — exactly the three things the client asks us for:
 #
-# Failure handling: exits non-zero on any download failure so a
-# cron log shows "FAILED" in the email/log. Already-downloaded
-# files are kept — only failed ones need re-running.
+#   sing-box-<pin>-<platform>.<zip|tar.gz>   engine        (SagerNet/sing-box)
+#   wintun-<ver>.zip                         Windows TUN   (wintun.net)
+#   KaproTUN-Setup-v<ver>.exe                installer     (our own release)
+#
+# Nothing else. The geoip zone file is NOT mirrored — geoip_ru.py fetches
+# ipdeny.com directly, and ipdeny is not blocked in RU.
+#
+# Versions are read from the client source on GitHub rather than pinned
+# here, so bumping SINGBOX_PINNED_VERSION in a commit is all it takes for
+# the mirror to follow on its next run. There is exactly one source of
+# truth and it lives in the repo. Hardcoded values below are only a
+# fallback for when raw.githubusercontent is unreachable.
+#
+# Failure model: a failed download leaves the PREVIOUS file in place —
+# a stale mirror still serves clients, a half-written one does not. The
+# script exits non-zero if any *required* asset failed, so the systemd
+# unit / cron mail shows it.
 
-set -euo pipefail
+set -uo pipefail
 
-# Path-based mirror: files are served from the existing kaprovpn.pro
-# nginx under /files/ (no separate subdomain / DNS). This dir must match
-# the `location /files/` root in the site's server block — see
-# nginx.conf.example. Adjust if your kaprovpn.pro docroot differs.
-MIRROR_DIR="/var/www/kaprovpn.pro/files"
+MIRROR_DIR="${MIRROR_DIR:-/var/www/kaprovpn.pro/files}"
+REPO="fafnirov/KaproTUN"
+RAW_SRC="https://raw.githubusercontent.com/${REPO}/main/kapro_tun/core/sing_box_installer.py"
+
+# Fallbacks, used only if we can't read the pins out of the repo.
+SINGBOX_FALLBACK="v1.12.9"
+WINTUN_FALLBACK="wintun-0.14.1.zip"
+KEEP_INSTALLERS=3          # how many past KaproTUN-Setup-v*.exe to retain
+
 TMP_DIR="$(mktemp -d -t kaprotun-sync-XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-# Pinned upstream versions. Bump these when a new release comes out
-# (or rewrite to fetch latest via GitHub API — left as a manual
-# step so an upstream breaking change can't auto-poison the mirror).
-XRAY_VERSION="v26.3.27"
-TUN2SOCKS_VERSION="v2.6.0"
-WINTUN_VERSION="0.14.1"
-# Hysteria2 client binary (apernet/hysteria). Release tags are prefixed
-# `app/` — see the download URL below.
-HYSTERIA_VERSION="v2.9.2"
+failed=0
+note() { printf '%s\n' "$*"; }
+fail() { printf '%s\n' "$*" >&2; failed=1; }
 
-XRAY_ASSETS=(
-    "Xray-windows-64.zip"
-    "Xray-windows-arm64-v8a.zip"
-    "Xray-macos-64.zip"
-    "Xray-macos-arm64-v8a.zip"
-    "Xray-linux-64.zip"
-    "Xray-linux-arm64-v8a.zip"
-)
+# --- resolve the pinned versions from the client source -------------------
 
-TUN2SOCKS_ASSETS=(
-    "tun2socks-windows-amd64.zip"
-    "tun2socks-darwin-amd64.zip"
-    "tun2socks-darwin-arm64.zip"
-    "tun2socks-linux-amd64.zip"
-    "tun2socks-linux-arm64.zip"
-)
+note "=== resolving pins from ${REPO} ==="
+src="$(curl -fsSL --connect-timeout 15 --max-time 60 "$RAW_SRC" 2>/dev/null || true)"
 
-HYSTERIA_ASSETS=(
-    "hysteria-windows-amd64.exe"
-    "hysteria-windows-arm64.exe"
-    "hysteria-darwin-amd64"
-    "hysteria-darwin-arm64"
-    "hysteria-linux-amd64"
-    "hysteria-linux-arm64"
-)
+SINGBOX_VERSION="$(printf '%s' "$src" | sed -n 's/^SINGBOX_PINNED_VERSION *= *"\([^"]*\)".*/\1/p' | head -1)"
+WINTUN_FILE="$(printf '%s' "$src"     | sed -n 's/^WINTUN_FILENAME *= *"\([^"]*\)".*/\1/p'          | head -1)"
 
-WINTUN_FILE="wintun-${WINTUN_VERSION}.zip"
+if [ -z "$SINGBOX_VERSION" ]; then
+    SINGBOX_VERSION="$SINGBOX_FALLBACK"
+    note "  ! could not read the pin from source — falling back to $SINGBOX_VERSION"
+fi
+[ -n "$WINTUN_FILE" ] || WINTUN_FILE="$WINTUN_FALLBACK"
 
+SINGBOX_VER_BARE="${SINGBOX_VERSION#v}"
+WINTUN_VERSION="$(printf '%s' "$WINTUN_FILE" | sed -n 's/^wintun-\(.*\)\.zip$/\1/p')"
+note "  sing-box $SINGBOX_VERSION"
+note "  wintun   ${WINTUN_VERSION:-?}"
+
+# Refuse to mirror an engine from a release line we've blacklisted. If a
+# bad pin ever lands in a commit, the mirror should not amplify it.
+sb_minor="$(printf '%s' "$SINGBOX_VER_BARE" | cut -d. -f1-2)"
+if [ "$sb_minor" = "1.13" ]; then
+    fail "  ABORT: sing-box 1.13.x breaks the VLESS data-path on Windows; refusing to mirror"
+    exit 1
+fi
+
+# --- fetch helper ---------------------------------------------------------
+
+# fetch <url> <dest> <min-bytes>
 fetch() {
-    local url="$1" dest="$2"
-    echo "  [fetch] $url"
-    # --connect-timeout/--max-time are essential: without them a host that
-    # accepts the connection but never responds (e.g. wintun.net flaky from
-    # RU) hangs curl — and the whole sync — forever.
-    if ! curl -fsSL --connect-timeout 15 --max-time 600 --retry 3 --retry-delay 5 \
+    local url="$1" dest="$2" min="${3:-102400}"
+    note "  [fetch] ${url##*/}"
+    # Timeouts are not optional: a host that accepts the connection and
+    # then never responds would otherwise hang the whole sync forever.
+    if ! curl -fsSL --connect-timeout 15 --max-time 900 --retry 3 --retry-delay 5 \
               -o "$dest" "$url"; then
-        echo "  [FAIL]  $url" >&2
-        rm -f "$dest"          # don't leave a half-written file to promote
-        return 1
-    fi
-    # Sanity: must be at least 100 KB (smallest tun2socks ~1 MB)
-    if [ "$(stat -c%s "$dest")" -lt 102400 ]; then
-        echo "  [FAIL]  $url returned suspiciously small file" >&2
         rm -f "$dest"
         return 1
     fi
+    local size
+    size="$(stat -c%s "$dest" 2>/dev/null || echo 0)"
+    if [ "$size" -lt "$min" ]; then
+        note "          rejected: ${size}B is below the ${min}B floor (error page?)"
+        rm -f "$dest"
+        return 1
+    fi
+    return 0
 }
 
-echo "=== Xray-core $XRAY_VERSION ==="
-for asset in "${XRAY_ASSETS[@]}"; do
-    fetch "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/${asset}" \
-          "$TMP_DIR/$asset" || echo "  [skip] $asset"
+# --- sing-box engine ------------------------------------------------------
+
+note "=== sing-box ${SINGBOX_VERSION} ==="
+for platform in windows-amd64 windows-arm64 darwin-amd64 darwin-arm64 linux-amd64 linux-arm64; do
+    case "$platform" in
+        windows-*) ext="zip"  ;;
+        *)         ext="tar.gz" ;;
+    esac
+    asset="sing-box-${SINGBOX_VER_BARE}-${platform}.${ext}"
+    fetch "https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_VERSION}/${asset}" \
+          "$TMP_DIR/$asset" \
+        || fail "  [FAIL] $asset"
 done
 
-echo "=== xjasonlyu/tun2socks $TUN2SOCKS_VERSION ==="
-for asset in "${TUN2SOCKS_ASSETS[@]}"; do
-    fetch "https://github.com/xjasonlyu/tun2socks/releases/download/${TUN2SOCKS_VERSION}/${asset}" \
-          "$TMP_DIR/$asset" || echo "  [skip] $asset"
-done
+# --- WinTUN driver --------------------------------------------------------
 
-echo "=== apernet/hysteria $HYSTERIA_VERSION ==="
-# NB: hysteria release tags are prefixed `app/`, so the path is
-# .../releases/download/app/vX.Y.Z/<asset>. Assets are single binaries.
-for asset in "${HYSTERIA_ASSETS[@]}"; do
-    fetch "https://github.com/apernet/hysteria/releases/download/app/${HYSTERIA_VERSION}/${asset}" \
-          "$TMP_DIR/$asset" || echo "  [skip] $asset"
-done
+note "=== wintun ${WINTUN_VERSION} ==="
+# Not required: wintun.net is not blocked in RU, so a client falls back to
+# it cleanly. Worth mirroring anyway for the offline/slow case.
+fetch "https://www.wintun.net/builds/${WINTUN_FILE}" "$TMP_DIR/$WINTUN_FILE" \
+    || note "  [skip] $WINTUN_FILE — clients fall back to wintun.net directly"
 
-echo "=== wintun.net $WINTUN_VERSION ==="
-fetch "https://www.wintun.net/builds/${WINTUN_FILE}" "$TMP_DIR/$WINTUN_FILE" || echo "  [skip] $WINTUN_FILE (wintun.net unreachable — Windows TUN users fall back to wintun.net directly)"
+# --- our own installer ----------------------------------------------------
 
-echo "=== KaproTUN release installer (latest) ==="
-# Mirror the latest Windows installer so the in-app auto-updater can fall
-# back here when github.com is DNS-blocked / throttled (the common RU
-# failure). Flat versioned name `KaproTUN-Setup-v<ver>.exe` matches what
-# updater_dialog._mirror_setup_url() requests. Old versions are left in
-# place (clients may still be updating from them); prune by hand if disk
-# gets tight.
-LATEST_TAG="$(curl -fsSL https://api.github.com/repos/fafnirov/KaproTUN/releases/latest \
-              | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
+note "=== KaproTUN installer (latest release) ==="
+# This is the whole point of the mirror for the auto-updater: when
+# github.com is DNS-blocked from RU, this is the only path that works.
+# The flat versioned name matches updater_dialog._mirror_setup_url().
+LATEST_TAG="$(curl -fsSL --connect-timeout 15 --max-time 60 \
+              "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+              | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
+
 if [ -n "${LATEST_TAG:-}" ]; then
     VER="${LATEST_TAG#v}"
-    if fetch "https://github.com/fafnirov/KaproTUN/releases/download/${LATEST_TAG}/KaproTUN-Setup.exe" \
-             "$TMP_DIR/KaproTUN-Setup-v${VER}.exe"; then
-        echo "  mirrored installer v${VER}"
+    if fetch "https://github.com/${REPO}/releases/download/${LATEST_TAG}/KaproTUN-Setup.exe" \
+             "$TMP_DIR/KaproTUN-Setup-v${VER}.exe" 5242880; then
+        note "  mirrored installer v${VER}"
     else
-        echo "  [skip] no KaproTUN-Setup.exe asset for ${LATEST_TAG}"
+        fail "  [FAIL] no usable KaproTUN-Setup.exe on ${LATEST_TAG}"
     fi
 else
-    echo "  [skip] couldn't resolve latest KaproTUN release tag"
+    fail "  [FAIL] couldn't resolve the latest release tag"
 fi
 
-echo "=== Promoting to $MIRROR_DIR ==="
-mkdir -p "$MIRROR_DIR"
-# Atomic-ish: move each file into place. If we crash mid-loop the
-# already-moved files are the new version, the rest are still the
-# old version — never inconsistent within a single file.
-for f in "$TMP_DIR"/*; do
-    mv -f "$f" "$MIRROR_DIR/"
-done
-chown -R www-data:www-data "$MIRROR_DIR"
-chmod -R a+r "$MIRROR_DIR"
+# --- promote --------------------------------------------------------------
 
-echo "=== Done. Mirror contents: ==="
+note "=== promoting into $MIRROR_DIR ==="
+mkdir -p "$MIRROR_DIR" || { fail "cannot create $MIRROR_DIR"; exit 1; }
+
+promoted=0
+for f in "$TMP_DIR"/*; do
+    [ -e "$f" ] || continue
+    # Same-filesystem rename would be atomic; across filesystems mv falls
+    # back to copy+unlink, so stage next to the target and rename to keep
+    # nginx from ever serving a partially-written file.
+    base="$(basename "$f")"
+    cp -f "$f" "$MIRROR_DIR/.${base}.tmp" && mv -f "$MIRROR_DIR/.${base}.tmp" "$MIRROR_DIR/$base" \
+        && promoted=$((promoted + 1)) \
+        || fail "  [FAIL] could not promote $base"
+done
+note "  $promoted file(s) promoted"
+
+# Retain a few past installers — a client mid-update may still be pulling
+# the version it started with. Everything older goes.
+mapfile -t old_installers < <(ls -1t "$MIRROR_DIR"/KaproTUN-Setup-v*.exe 2>/dev/null | tail -n +$((KEEP_INSTALLERS + 1)))
+for old in "${old_installers[@]:-}"; do
+    [ -n "$old" ] || continue
+    note "  pruning $(basename "$old")"
+    rm -f "$old"
+done
+
+chown -R www-data:www-data "$MIRROR_DIR" 2>/dev/null || true
+chmod -R a+r "$MIRROR_DIR" 2>/dev/null || true
+
+note "=== mirror contents ==="
 ls -lh "$MIRROR_DIR"
+
+if [ "$failed" -ne 0 ]; then
+    note ""
+    fail "sync finished WITH ERRORS — previous copies of any failed asset are still in place"
+    exit 1
+fi
+note ""
+note "sync OK"

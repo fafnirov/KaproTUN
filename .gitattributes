@@ -1,0 +1,8 @@
+# Files that are consumed by Linux must keep LF endings regardless of the
+# platform they were authored on. A shell script checked out with CRLF fails
+# on the VPS with `bad interpreter: /bin/bash^M`, and systemd silently
+# mis-parses unit files whose lines end in \r.
+*.sh            text eol=lf
+*.service       text eol=lf
+*.timer         text eol=lf
+*.example       text eol=lf

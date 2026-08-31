@@ -1,111 +1,160 @@
-# KaproTUN binaries mirror — server setup
+# KaproTUN file mirror — server setup
 
-This directory contains the bits you need to host xray-core /
-tun2socks / wintun-driver on your own server so first-launch
-downloads from KaproTUN clients go to you instead of GitHub.
+The client fetches its engine and its own updates from
+`https://kaprovpn.pro/files/`, falling back to upstream GitHub on any
+failure. This directory holds everything needed to run that mirror.
 
-**Why mirror at all?** GitHub releases CDN is occasionally flaky
-from RU/CIS regions. A mirror under your own domain that you can
-put behind a CDN (Cloudflare, Selectel CDN, etc.) is faster and
-more available. The KaproTUN client always tries the mirror first,
-falls back to upstream GitHub if the mirror is down — so even a
-broken mirror doesn't break new installs.
-
-## Target architecture
+**Why mirror at all?** The fallback is `github.com`, which is exactly what
+gets DNS-blocked or throttled for a large share of our users. For them the
+mirror is not an optimisation — it is the only working path. A dead mirror
+does not look broken from a developer's machine, because the fallback
+quietly succeeds there.
 
 ```
-client.exe (first launch)
-  ├─ wants xray.exe / tun2socks.exe / wintun.dll
-  ├─ tries  https://kaprovpn.pro/files/<filename>     ← THIS server
-  └─ falls back to original GitHub URLs on any failure
+client (first launch / update)
+  ├─ wants sing-box, WinTUN, or KaproTUN-Setup.exe
+  ├─ tries  https://kaprovpn.pro/files/<asset>     ← this server
+  └─ falls back to GitHub — unreachable for RU users
 ```
 
-Files served by URL:
+## What is served
 
-| URL | Source upstream |
-|---|---|
-| `/Xray-windows-64.zip`                | `github.com/XTLS/Xray-core` release asset |
-| `/Xray-windows-arm64-v8a.zip`         | same |
-| `/Xray-macos-64.zip`                  | same |
-| `/Xray-macos-arm64-v8a.zip`           | same |
-| `/Xray-linux-64.zip`                  | same |
-| `/Xray-linux-arm64-v8a.zip`           | same |
-| `/tun2socks-windows-amd64.zip`        | `github.com/xjasonlyu/tun2socks` release asset |
-| `/tun2socks-darwin-amd64.zip`         | same |
-| `/tun2socks-darwin-arm64.zip`         | same |
-| `/tun2socks-linux-amd64.zip`          | same |
-| `/tun2socks-linux-arm64.zip`          | same |
-| `/wintun-0.14.1.zip`                  | `wintun.net` |
-| `/hysteria-windows-amd64.exe` (+ darwin/linux, arm64) | `github.com/apernet/hysteria` release (tag `app/vX.Y.Z`) |
-| `/KaproTUN-Setup-v<ver>.exe`          | KaproTUN GitHub release — **in-app auto-updater fallback** when github.com is unreachable from RU |
+Exactly three things, and nothing else:
 
-Total disk usage: ~150 MB at any given time.
+| Asset | Upstream | Required? |
+|---|---|---|
+| `sing-box-<pin>-<platform>.zip` / `.tar.gz` (6 platforms) | `SagerNet/sing-box` | **yes** — no engine, no VPN |
+| `wintun-<ver>.zip` | `wintun.net` | no — wintun.net isn't blocked in RU |
+| `KaproTUN-Setup-v<ver>.exe` | our own release, asset `KaproTUN-Setup.exe` | **yes** — the auto-updater's only RU-reachable path |
 
-## One-time setup on the VPS
+The geoip zone file is **not** mirrored: `geoip_ru.py` fetches ipdeny.com
+directly and ipdeny is not blocked.
 
-Assumes Ubuntu 22.04 / Debian 12 with root SSH access. Adapt to
-your distro as needed.
+Disk usage: roughly 250 MB with three installers retained.
 
-### 1. No DNS / no extra cert
+Versions are **not** pinned in the sync script. It reads
+`SINGBOX_PINNED_VERSION` and `WINTUN_FILENAME` straight out of
+`kapro_tun/core/sing_box_installer.py` on `main`, so bumping the pin in a
+commit is all it takes — the mirror follows on its next run and can never
+drift from what the client actually requests.
 
-The mirror is **path-based** — served from the existing `kaprovpn.pro`
-site under `/files/`. No separate subdomain, no new DNS record, no new
-TLS cert: it rides the `kaprovpn.pro` vhost certbot already manages.
+---
 
-### 2. nginx — add the `/files/` location
+## 0. First: is the mirror even reachable?
 
-Paste the `location /files/` block from `nginx.conf.example` INTO the
-existing `kaprovpn.pro` server block (the `:443` one), create the dir,
-then reload:
+Run this from a machine that is **not** the VPS. A local `curl` can
+succeed while the public TLS path is broken:
 
 ```bash
-mkdir -p /var/www/kaprovpn.pro/files
-chown -R www-data:www-data /var/www/kaprovpn.pro/files
-# edit the kaprovpn.pro vhost, paste the location block from
-# nginx.conf.example (keep `alias` == /var/www/kaprovpn.pro/files/)
-nginx -t && systemctl reload nginx
+./verify-mirror.sh
 ```
 
-certbot rewrites the nginx site config to add the 443 server block
-with the issued cert. Renewal is automatic via systemd timer.
+It checks the certificate (validity, hostname match, days to expiry) and
+every asset the client will ask for. Exit code is non-zero on any problem,
+so it can gate a cron job or CI.
 
-### 3. Initial sync of upstream binaries
+### If it reports a hostname mismatch
+
+The server is presenting a certificate issued for a different domain. That
+means nginx never matched a `server_name kaprovpn.pro` block and fell
+through to whatever `:443` block came first — typically another site on
+the same box.
+
+Diagnose:
 
 ```bash
-cp sync-binaries.sh /usr/local/bin/kaprotun-sync
-chmod +x /usr/local/bin/kaprotun-sync
-/usr/local/bin/kaprotun-sync   # first run — pulls everything
+sudo nginx -T | grep -n "server_name\|ssl_certificate\|listen 443"
 ```
 
-The script downloads from upstream into `/var/www/kaprovpn.pro/files/`
-under the exact filenames the KaproTUN client expects. Total run
-time on a 100 Mbit link: ~30 seconds.
+Look for: is there still a block with `server_name kaprovpn.pro;`? Is it
+`include`d? Does its certificate exist on disk?
 
-### 4. Schedule weekly auto-resync
+Reissue or renew the certificate:
 
 ```bash
-crontab -e
-```
-Add:
-```
-# Refresh KaproTUN client deps every Sunday 04:00 UTC
-0 4 * * 0 /usr/local/bin/kaprotun-sync >> /var/log/kaprotun-sync.log 2>&1
+sudo certbot --nginx -d kaprovpn.pro
+sudo certbot certificates          # confirm expiry and the domains covered
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-That way new Xray-core releases land on the mirror within a week
-of being published.
+Then add the `default_server` block from `nginx.conf.example`. Without it
+this failure mode is silent — any unmatched hostname borrows a neighbour's
+certificate instead of being refused.
 
-## Verifying the mirror works
+Re-run `./verify-mirror.sh` from outside the box to confirm.
 
-From any machine:
+---
+
+## 1. nginx — serve `/files/`
+
+Paste the `location /files/` block from `nginx.conf.example` into the
+existing `kaprovpn.pro` `:443` server block, and add the `default_server`
+block alongside it. Then:
+
 ```bash
-curl -sI https://kaprovpn.pro/files/Xray-windows-64.zip | head -3
-# Expect:
-#   HTTP/2 200
-#   server: nginx
-#   content-type: application/zip
+sudo mkdir -p /var/www/kaprovpn.pro/files
+sudo chown -R www-data:www-data /var/www/kaprovpn.pro/files
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-Then on a fresh Windows VM that's never run KaproTUN, install v1.2.3+
-and watch the first-launch download progress dialog. It should
-complete in 2-3 seconds (vs. 10-30 seconds against GitHub).
+## 2. Install the sync script
+
+```bash
+sudo install -m 755 sync-binaries.sh /usr/local/bin/kaprotun-sync
+sudo /usr/local/bin/kaprotun-sync
+```
+
+It stages every download in a temp dir and only then renames each file
+into the docroot, so nginx never serves a partially written file. A failed
+download leaves the **previous** copy in place — a stale mirror still
+serves clients; a truncated one does not. The script exits non-zero if any
+required asset failed.
+
+It refuses to mirror a sing-box 1.13.x pin: that line breaks the VLESS
+data-path on Windows, and if a bad pin ever lands in a commit the mirror
+should not amplify it.
+
+## 3. Schedule it
+
+systemd (preferred — `systemctl list-timers` shows the next run):
+
+```bash
+sudo install -m 644 kaprotun-mirror.service /etc/systemd/system/
+sudo install -m 644 kaprotun-mirror.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now kaprotun-mirror.timer
+```
+
+Check on it:
+
+```bash
+systemctl list-timers kaprotun-mirror
+journalctl -u kaprotun-mirror -n 50
+```
+
+Or plain cron, if you'd rather:
+
+```bash
+sudo crontab -e
+# 04:17 daily, log kept for the last run only
+17 4 * * * /usr/local/bin/kaprotun-sync > /var/log/kaprotun-sync.log 2>&1
+```
+
+## 4. After every release
+
+The timer picks up a new installer within a day on its own. To publish it
+immediately:
+
+```bash
+sudo /usr/local/bin/kaprotun-sync && ./verify-mirror.sh
+```
+
+Worth doing as the last step of the release ritual — a release whose
+installer isn't on the mirror is a release RU users can't update to.
+
+---
+
+## Logs
+
+Access-log retention is deliberately short — see
+[nginx-log-rotation.md](nginx-log-rotation.md).

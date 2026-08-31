@@ -1,6 +1,6 @@
 # Mirror access-log retention — keep it short
 
-KaproTUN's file mirror (files.kaprovpn.pro) is logged by nginx like any
+KaproTUN's file mirror (kaprovpn.pro/files) is logged by nginx like any
 website. Each line: IP + timestamp + User-Agent + downloaded URL.
 
 For a privacy-respecting project, we keep this log retention as short
@@ -25,9 +25,9 @@ Then drop in this config — replaces the default nginx rotation
 (usually 14 days) with our shorter policy:
 
 ```bash
-sudo tee /etc/logrotate.d/files.kaprovpn.pro <<'EOF'
-/var/log/nginx/files.kaprovpn.pro.access.log
-/var/log/nginx/files.kaprovpn.pro.error.log
+sudo tee /etc/logrotate.d/kaprovpn.pro <<'EOF'
+/var/log/nginx/kaprovpn.pro.access.log
+/var/log/nginx/kaprovpn.pro.error.log
 {
     daily
     rotate 7
@@ -48,14 +48,14 @@ EOF
 Test the rule (dry run, no actual rotation):
 
 ```bash
-sudo logrotate -d /etc/logrotate.d/files.kaprovpn.pro
+sudo logrotate -d /etc/logrotate.d/kaprovpn.pro
 ```
 
 Force one rotation now to verify it works:
 
 ```bash
-sudo logrotate -f /etc/logrotate.d/files.kaprovpn.pro
-ls -la /var/log/nginx/files.kaprovpn.pro.access.log*
+sudo logrotate -f /etc/logrotate.d/kaprovpn.pro
+ls -la /var/log/nginx/kaprovpn.pro.access.log*
 # Should show .log + .log.1.gz after first run
 ```
 
@@ -65,7 +65,7 @@ up — nothing else to do.
 ## Verifying retention is working a week later
 
 ```bash
-ls -la /var/log/nginx/files.kaprovpn.pro.access.log*
+ls -la /var/log/nginx/kaprovpn.pro.access.log*
 # Should show .log (current) + .log.1.gz through .log.7.gz max.
 # .log.8 should NOT exist — logrotate deleted it on day 8.
 ```

@@ -1,34 +1,60 @@
 # Path-based KaproTUN binary mirror.
 #
-# Paste this `location` block INTO the existing kaprovpn.pro server block
-# (the :443 vhost certbot already manages for the website). No new
-# subdomain / DNS / cert needed — the mirror rides the kaprovpn.pro vhost
-# that's already live.
+# The mirror is served from the existing kaprovpn.pro site under /files/.
+# No separate subdomain, no extra DNS record, no second certificate — it
+# rides the kaprovpn.pro vhost certbot already manages.
 #
 # The client requests  https://kaprovpn.pro/files/<asset>  — see
-# KAPROTUN_MIRROR_BASE in xray_installer / hysteria_installer /
-# updater_dialog. sync-binaries.sh drops the files into
-# /var/www/kaprovpn.pro/files (MIRROR_DIR); keep `alias` below in sync.
+# KAPROTUN_MIRROR_BASE in kapro_tun/core/sing_box_installer.py and
+# kapro_tun/gui/updater_dialog.py. sync-binaries.sh drops files into
+# /var/www/kaprovpn.pro/files (MIRROR_DIR); keep `alias` in sync with it.
+
+# ---------------------------------------------------------------------------
+# IMPORTANT: give :443 an explicit default server.
+#
+# Without one, nginx answers any unmatched request on :443 with whatever
+# server block happens to be first — including that block's certificate.
+# That is exactly how kaprovpn.pro ended up presenting a certificate for
+# an unrelated site hosted on the same box: every client got a hostname
+# mismatch and silently fell back to GitHub. Fail closed instead.
+# ---------------------------------------------------------------------------
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+
+    # Any self-signed pair will do — this block exists to REFUSE unknown
+    # hostnames, not to serve them.
+    ssl_certificate     /etc/nginx/ssl/default.crt;
+    ssl_certificate_key /etc/nginx/ssl/default.key;
+
+    return 444;   # close the connection without a response
+}
+
+# --- inside the real kaprovpn.pro :443 server block ------------------------
 
 location /files/ {
     alias /var/www/kaprovpn.pro/files/;    # must match MIRROR_DIR in sync-binaries.sh
-    autoindex off;                          # don't expose the directory listing
+    autoindex off;                          # don't expose a directory listing
 
     types {
         application/zip          zip;
+        application/gzip         gz;
         application/x-msdownload exe;
-        application/octet-stream dll;
     }
+    default_type application/octet-stream;
 
-    # Assets change weekly at most — cache hard.
-    location ~* \.(zip|exe|dll)$ {
-        expires 1d;
+    # Assets are immutable once published — every filename carries its
+    # version, so a cached copy can never be the "wrong" one.
+    location ~* \.(zip|gz|exe)$ {
+        expires 7d;
         add_header Cache-Control "public, immutable";
         add_header X-Content-Type-Options "nosniff";
     }
 }
 
-# After pasting into the kaprovpn.pro server block:
+# After editing:
 #   sudo nginx -t && sudo systemctl reload nginx
-# Verify:
-#   curl -sI https://kaprovpn.pro/files/Xray-windows-64.zip   # -> 200
+# Then verify from OUTSIDE the box — a local curl can pass while the
+# public TLS path is broken:
+#   ./verify-mirror.sh

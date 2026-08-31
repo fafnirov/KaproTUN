@@ -116,13 +116,14 @@ invisible downgrade.
 2. **`api.github.com/repos/fafnirov/KaproTUN/releases/latest`** — checked once,
    a couple of seconds after launch (and on demand from Settings), to detect new
    versions. There is no recurring poll.
-3. **`kaprovpn.pro/files`** — our mirror for the sing-box binary, the WinTUN
-   driver and the geoip-CIDR list. Falls back to upstream
-   (github.com/SagerNet/sing-box, wintun.net, ipdeny.com). Downloaded once and
-   cached.
-4. **Your subscription URL** — on import, then every 12 hours if
+3. **`kaprovpn.pro/files`** — our mirror for the sing-box binary and the
+   WinTUN driver, with upstream fallback (github.com/SagerNet/sing-box,
+   wintun.net). Downloaded once and cached.
+4. **`ipdeny.com`** — the aggregated RU geoip-CIDR zone file, fetched
+   directly. It is not mirrored.
+5. **Your subscription URL** — on import, then every 12 hours if
    `subscription_auto_refresh` is on (default). Can be disabled.
-5. **A public IP probe** after connect (`public_ip_probe`, on by default) — one
+6. **A public IP probe** after connect (`public_ip_probe`, on by default) — one
    HTTPS request **through the tunnel** so the UI can show your exit IP. Can be
    disabled in Settings.
 

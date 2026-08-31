@@ -8,8 +8,8 @@ users see when they click the release tag.
 
 Этот файл документирует только десктопную версию (Python + PySide6,
 Windows). Android-клиент живёт в отдельном репозитории
-[fafnirov/KaproVPN-Android](https://github.com/fafnirov/KaproVPN-Android)
-со своей историей релизов и [CHANGELOG.md](https://github.com/fafnirov/KaproVPN-Android/blob/main/CHANGELOG.md).
+[fafnirov/KaproTUN-Android](https://github.com/fafnirov/KaproTUN-Android)
+со своей историей релизов и [CHANGELOG.md](https://github.com/fafnirov/KaproTUN-Android/blob/main/CHANGELOG.md).
 До 29 мая 2026 Android жил в `android/` подпапке этого репо, история тех
 коммитов перенесена в новый репо через `git filter-repo`.
 

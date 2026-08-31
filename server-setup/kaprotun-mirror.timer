@@ -1,0 +1,16 @@
+[Unit]
+Description=Sync KaproTUN binary mirror daily
+Documentation=https://github.com/fafnirov/KaproTUN/tree/main/server-setup
+
+[Timer]
+# Daily, with jitter so we are not hammering GitHub on the hour with
+# every other mirror on the internet.
+OnCalendar=daily
+RandomizedDelaySec=1h
+# If the VPS was powered off when the timer was due, run on next boot
+# rather than silently skipping the window.
+Persistent=true
+Unit=kaprotun-mirror.service
+
+[Install]
+WantedBy=timers.target
