@@ -40,6 +40,29 @@ drift from what the client actually requests.
 
 ---
 
+## Fresh VPS? Use bootstrap.sh
+
+`bootstrap.sh` does sections 1-4 in one pass: packages, a fail-closed
+`default_server`, the vhost, the certificate, the sync script, the daily
+timer and log rotation. It is idempotent and refuses rather than guesses
+whenever it meets configuration it did not write.
+
+```bash
+scp -r server-setup root@<new-vps>:/tmp/
+ssh root@<new-vps> 'bash /tmp/server-setup/bootstrap.sh'
+```
+
+**Point DNS at the new box first.** The client has the mirror hostname
+compiled in (`KAPROTUN_MIRROR_BASE`), so the new server has to answer for
+`kaprovpn.pro` itself — a different hostname would strand every client
+already installed. bootstrap.sh checks this and refuses to run certbot if
+the A record still points elsewhere, because the HTTP-01 challenge would
+be answered by the old server.
+
+Then verify from somewhere else, and only then retire the old box.
+
+---
+
 ## 0. First: is the mirror even reachable?
 
 Run this from a machine that is **not** the VPS. A local `curl` can
@@ -85,7 +108,7 @@ Re-run `./verify-mirror.sh` from outside the box to confirm.
 
 ---
 
-## 1. nginx — serve `/files/`
+## 1. nginx — serve `/files/` (manual path)
 
 Paste the `location /files/` block from `nginx.conf.example` into the
 existing `kaprovpn.pro` `:443` server block, and add the `default_server`
