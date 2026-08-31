@@ -329,7 +329,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # possible — a frozen User-Agent (no version, no OS) and no background
     # refresh heartbeat. Opt-in: it trades automatic server updates for
     # unlinkability. NOTE: this cannot hide anything the VPN server itself sees.
-    "minimal_metadata": False,  # v3.5.0: Steam / Riot games bypass the VPN (matched by PROCESS, so raw-IP UDP game traffic is caught too). Games through a tunnel = added latency for zero benefit; they aren't geo-blocked here. Off = everything tunnels as before.
+    "minimal_metadata": False,
+    # v3.7.0: stable per-install device id sent to subscription panels that
+    # enforce a device limit (Remnawave's x-hwid protocol). Generated once on
+    # first use. A random UUID, NOT derived from hardware: it identifies this
+    # installation to a panel the user subscribes to, and reveals nothing about
+    # the machine. Stable on purpose — a rotating id would defeat the device
+    # accounting the user's own plan is based on.
+    "device_id": "",  # v3.5.0: Steam / Riot games bypass the VPN (matched by PROCESS, so raw-IP UDP game traffic is caught too). Games through a tunnel = added latency for zero benefit; they aren't geo-blocked here. Off = everything tunnels as before.
     "high_speed": False,  # v3.3.0: TUN network stack. False = gvisor (userspace, universally works). True = mixed (kernel TCP, much faster) — but carries NO traffic on some Windows setups (WinTUN + AV/NIC filters), so it's opt-in "Turbo".
     "performance_preset": "balanced",  # v2.1.6: tun2socks TCP buffer ceiling — economy(512k)/balanced(1m, default)/speed(4m). Caps per-flow memory; default is NOT the old 4m blow-up
     "theme": "auto",  # "auto" (follow OS) / "dark" / "light" — see gui/styles.py

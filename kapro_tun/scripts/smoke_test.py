@@ -2137,13 +2137,57 @@ def _v36_minimal_metadata_ua() -> None:
             raise AssertionError(
                 "the hint must state plainly that this does not anonymise you "
                 "to the VPN provider — a false privacy promise is worse than none")
-        if "KaproVPN" not in hint:
+        if "не исчезнет" not in hint and "will not disappear" not in hint:
             raise AssertionError(
                 "the hint must admit the device entry stays visible in the panel")
 
 
 check("privacy: minimal-metadata UA drops version/OS, keeps provider prefix (v3.6.x)",
       _v36_minimal_metadata_ua)
+
+
+def _v37_device_headers() -> None:
+    """v3.7.0: identify the device to panels that enforce a device limit.
+
+    Panels like Remnawave expect `x-hwid` and friends; without them they return
+    a stub instead of servers (measured: the same subscription answered
+    "Приложение не поддерживается" with no headers and "Лимит устройств
+    достигнут" with them — i.e. the headers ARE the protocol, and the real
+    blocker was the user's own device quota).
+
+    The id must be STABLE — a rotating one would quietly defeat the device
+    accounting the user's own plan is based on — and must not be derived from
+    hardware."""
+    from kapro_tun.core import subscription as sub
+
+    h1 = sub.device_headers()
+    if not h1.get("x-hwid"):
+        raise AssertionError("device identification must include x-hwid")
+    h2 = sub.device_headers()
+    if h1["x-hwid"] != h2["x-hwid"]:
+        raise AssertionError(
+            "the device id must be stable — a rotating id would evade the "
+            "provider's device counting rather than participate in it")
+    for key in ("x-device-os", "x-device-model"):
+        if not h1.get(key):
+            raise AssertionError(f"missing {key}")
+    # Must not leak a hardware serial / MAC: a random UUID is the whole point.
+    import uuid as _uuid
+    try:
+        _uuid.UUID(h1["x-hwid"])
+    except Exception:
+        raise AssertionError("x-hwid should be a random UUID, not a machine identifier")
+
+    # Privacy mode withholds it; the normal path sends it.
+    import inspect
+    src = inspect.getsource(sub._fetch)
+    if "if not minimal_metadata" not in src or "device_headers()" not in src:
+        raise AssertionError(
+            "device headers must be sent normally and withheld in privacy mode")
+
+
+check("subscription: stable device identification for device-limited panels (v3.7.0)",
+      _v37_device_headers)
 
 
 def _v36_v2ray_json_subscription() -> None:

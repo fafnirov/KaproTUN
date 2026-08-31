@@ -78,6 +78,41 @@ USER_AGENT_MINIMAL = ("KaproVPN/1.0.0 (Windows; "
                       "+https://github.com/fafnirov/KaproTUN)")
 
 
+def device_headers() -> dict:
+    """Device identification for panels that enforce a device limit.
+
+    Modern panels (Remnawave and friends) expect a client to identify the
+    device it runs on; without it they return a stub instead of servers. The
+    provider in the field report told the user exactly this. We therefore speak
+    that protocol rather than pretending to be another app.
+
+    The id is a random UUID stored once in settings — stable across restarts so
+    the panel counts this installation as ONE device, and unrelated to any
+    hardware serial, so it says nothing about the machine. Stability is the
+    point: a rotating id would quietly defeat the device accounting the user's
+    own subscription plan is built on."""
+    try:
+        from . import storage
+        settings = storage.load_settings()
+        device_id = str(settings.get("device_id") or "").strip()
+        if not device_id:
+            import uuid
+            device_id = str(uuid.uuid4())
+            try:
+                storage.save_settings({**settings, "device_id": device_id})
+            except Exception:
+                pass          # a non-persisted id still works for this session
+    except Exception:
+        return {}
+    import platform
+    return {
+        "x-hwid": device_id,
+        "x-device-os": platform.system() or "Unknown",
+        "x-ver-os": platform.release() or "",
+        "x-device-model": "KaproTUN Desktop",
+    }
+
+
 def user_agent(minimal: bool = False) -> str:
     """UA for subscription fetches. `minimal` trades the version/OS fields for
     unlinkability; the provider-gating prefix is preserved either way."""
@@ -439,9 +474,14 @@ def _fetch(url: str, timeout: tuple[float, float],
                 storage.load_settings().get("minimal_metadata", False))
         except Exception:
             minimal_metadata = False
-    response = requests.get(url, timeout=timeout, proxies=proxies, headers={
-        "User-Agent": user_agent(minimal_metadata),
-    })
+    headers = {"User-Agent": user_agent(minimal_metadata)}
+    if not minimal_metadata:
+        # Privacy mode deliberately withholds the device id. If a panel needs it
+        # the fetch returns no configs, and import_with_dpi_fallback retries
+        # with the normal identity — so privacy is preferred but never costs the
+        # user their servers.
+        headers.update(device_headers())
+    response = requests.get(url, timeout=timeout, proxies=proxies, headers=headers)
     response.raise_for_status()
     userinfo = parse_userinfo(response.headers.get("Subscription-Userinfo", ""))
     _last_headers.clear()
