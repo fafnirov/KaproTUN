@@ -113,8 +113,9 @@ invisible downgrade.
 ## Network: what does the app reach out to?
 
 1. **Your VPN server** — wherever your active config points.
-2. **`api.github.com/repos/fafnirov/KaproTUN/releases/latest`** — checked a few
-   seconds after launch, then daily, to detect new versions.
+2. **`api.github.com/repos/fafnirov/KaproTUN/releases/latest`** — checked once,
+   a couple of seconds after launch (and on demand from Settings), to detect new
+   versions. There is no recurring poll.
 3. **`kaprovpn.pro/files`** — our mirror for the sing-box binary, the WinTUN
    driver and the geoip-CIDR list. Falls back to upstream
    (github.com/SagerNet/sing-box, wintun.net, ipdeny.com). Downloaded once and
