@@ -6755,6 +6755,108 @@ check("diagnostics: process_crash logs pid/returncode/uptime/redacted-tail once"
 check("sandbox: smoke never writes to the real app.log", _smoke_does_not_touch_real_app_log)
 
 
+def _parser_never_leaks_bare_valueerror() -> None:
+    """v3.7.1: ParseError subclasses ValueError, so `except ParseError` does
+    NOT catch a plain one. Every parser calls int()/urlsplit().port on
+    untrusted text; those bare ValueErrors used to escape each caller and, in
+    result_from_body, abort the whole subscription over one bad line."""
+    import base64 as _b64
+    from kapro_tun.core.parser import parse as _p, ParseError as _PE
+
+    vmess_bad_port = "vmess://" + _b64.b64encode(
+        b'{"add":"x.com","port":"abc","id":"u","aid":"0"}').decode()
+    vmess_bad_aid = "vmess://" + _b64.b64encode(
+        b'{"add":"x.com","port":"443","id":"u","aid":"zz"}').decode()
+    for label, url in (
+        ("vmess port", vmess_bad_port),
+        ("vmess aid", vmess_bad_aid),
+        ("vmess payload", "vmess://not-base64-at-all!!!"),
+        ("vless port", "vless://uuid@host:notaport?type=tcp#x"),
+        ("trojan port", "trojan://pass@host:abc#x"),
+        ("ss port", "ss://YWVzLTI1Ni1nY206cGFzcw==@host:abc#x"),
+        ("hysteria2 port", "hysteria2://pass@host:abc#x"),
+    ):
+        try:
+            _p(url)
+        except _PE:
+            continue
+        except Exception as e:
+            raise AssertionError(
+                f"{label}: leaked {type(e).__name__} instead of ParseError")
+        raise AssertionError(f"{label}: malformed input was accepted")
+
+
+def _one_bad_line_keeps_the_rest() -> None:
+    """v3.7.1: a single unparseable entry must cost the user that entry and
+    nothing else. It used to take the entire subscription down with it."""
+    import base64 as _b64
+    from kapro_tun.core import subscription as _S
+
+    good = "trojan://pass@good{0}.example.com:443#Server{0}"
+    body = chr(10).join([good.format(1), good.format(2),
+                          "trojan://pass@bad.example.com:abc#Broken",
+                          good.format(3)])
+    for label, payload in (("plain", body),
+                           ("base64", _b64.b64encode(body.encode()).decode())):
+        res = _S.result_from_body(payload)
+        if len(res.configs) != 3:
+            raise AssertionError(
+                f"{label}: kept {len(res.configs)} configs, expected 3")
+        if len(res.errors) != 1:
+            raise AssertionError(
+                f"{label}: reported {len(res.errors)} errors, expected 1")
+
+
+def _settings_migration_flips_ru_direct_once() -> None:
+    """v3.7.1: save_settings persists EVERY key, so a flipped default never
+    reaches an existing install. _migrate_settings repairs that once, and the
+    version stamp must persist or a deliberate opt-out gets re-flipped on
+    every launch."""
+    import json as _json, tempfile as _tf, pathlib as _pl
+    from kapro_tun.core import storage as _st, paths as _pa
+
+    tmp = _pl.Path(_tf.mkdtemp()) / "settings.json"
+    orig = (_pa.settings_file, _st.save_subscription_secrets,
+            _st.load_subscription_secrets, _pa.harden_file_perms)
+    _pa.settings_file = lambda: tmp
+    _st.save_subscription_secrets = lambda s: None
+    _st.load_subscription_secrets = lambda: {}
+    _pa.harden_file_perms = lambda p: None
+    try:
+        tmp.write_text(_json.dumps({"route_ru_direct": False}), encoding="utf-8")
+        s = _st.load_settings()
+        if s["route_ru_direct"] is not True:
+            raise AssertionError("pre-v3.3.0 file was not migrated")
+        on_disk = _json.loads(tmp.read_text(encoding="utf-8"))
+        if on_disk.get("settings_version") != _st.SETTINGS_VERSION:
+            raise AssertionError("version stamp did not reach disk")
+
+        # A deliberate opt-out after migration must survive a reload.
+        s["route_ru_direct"] = False
+        _st.save_settings(s)
+        if _st.load_settings()["route_ru_direct"] is not False:
+            raise AssertionError("deliberate opt-out was re-flipped")
+
+        # An already-migrated file is left alone.
+        tmp.write_text(_json.dumps(
+            {"route_ru_direct": False, "settings_version": _st.SETTINGS_VERSION}),
+            encoding="utf-8")
+        if _st.load_settings()["route_ru_direct"] is not False:
+            raise AssertionError("migration re-ran on an up-to-date file")
+    finally:
+        (_pa.settings_file, _st.save_subscription_secrets,
+         _st.load_subscription_secrets, _pa.harden_file_perms) = orig
+
+
+check("parser: malformed port raises ParseError, never bare ValueError",
+      _parser_never_leaks_bare_valueerror)
+check("subscription: one bad line costs that line only (v3.7.1)",
+      _one_bad_line_keeps_the_rest)
+check("settings: flipped default migrates once, opt-out sticks (v3.7.1)",
+      _settings_migration_flips_ru_direct_once)
+
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------

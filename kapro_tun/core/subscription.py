@@ -547,11 +547,18 @@ def result_from_body(body: str, via_proxy: bool = False) -> SubscriptionResult:
     errors: list[str] = []
     placeholders: list[str] = []
     for share_url in share_urls:
+        short = share_url[:60] + ("…" if len(share_url) > 60 else "")
         try:
             cfg = parse(share_url)
         except ParseError as e:
-            short = share_url[:60] + ("…" if len(share_url) > 60 else "")
             errors.append(f"{short} — {e}")
+            continue
+        except Exception as e:  # noqa: BLE001
+            # Belt to parse()'s braces, and the same shape v2ray_json.py
+            # already uses. One unparseable line must cost the user that
+            # line and nothing else — never the other servers in the
+            # subscription, which is what an escaping exception did here.
+            errors.append(f"{short} — {type(e).__name__}: {e}")
             continue
         if is_placeholder_config(cfg):
             placeholders.append(cfg.name or share_url[:40])

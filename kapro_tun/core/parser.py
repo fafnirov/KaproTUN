@@ -20,7 +20,16 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 class ParseError(ValueError):
-    pass
+    """The only exception `parse()` is allowed to raise for bad input.
+
+    It subclasses ValueError for backwards compatibility, and that
+    inheritance is a trap worth naming: `except ParseError` does NOT catch
+    a plain ValueError. The individual parsers call int() and urlsplit().port
+    on untrusted text, both of which raise bare ValueError on a non-numeric
+    port — those used to escape every caller's `except ParseError` and, in
+    the subscription importer, abort the whole import over a single bad line.
+    `parse()` now translates them, so this class really is the contract.
+    """
 
 
 @dataclass
@@ -408,4 +417,15 @@ def parse(url: str) -> ProxyConfig:
             f"Unsupported scheme '{scheme}'. "
             f"Expected one of: {', '.join(_PARSERS)}"
         )
-    return parser(text)
+    try:
+        return parser(text)
+    except ParseError:
+        raise
+    except ValueError as e:
+        # int() on a non-numeric port, urlsplit().port on the same, a bad
+        # base64 payload (binascii.Error) or malformed vmess JSON
+        # (JSONDecodeError) — all ValueError subclasses raised on untrusted
+        # input. Callers catch ParseError; without this they'd see a bare
+        # ValueError instead, which is how one malformed line in a
+        # subscription used to take the entire import down with it.
+        raise ParseError(f"{scheme}: {e}") from e

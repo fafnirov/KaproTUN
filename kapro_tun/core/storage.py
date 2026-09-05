@@ -348,7 +348,54 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # settings without this key migrate to the sing-box default automatically
     # (DEFAULT_SETTINGS fills the gap); an explicit choice is preserved.
     "tun_engine": "sing_box_tun",
+    # Schema version of the on-disk settings.json. Bump it whenever a DEFAULT
+    # above is *flipped* (not merely added) and add the matching step to
+    # _migrate_settings. See that function for why a flip needs one.
+    "settings_version": 1,
 }
+
+# Bump together with the newest step in _migrate_settings().
+SETTINGS_VERSION = 1
+
+
+def _migrate_settings(raw: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Bring an on-disk settings dict up to SETTINGS_VERSION.
+
+    Why this has to exist: save_settings() persists the WHOLE merged dict,
+    including keys the user never touched. So the moment a release flips a
+    default, every existing install already has the old value written to disk
+    and load_settings()'s `merged.update(raw_data)` faithfully restores it.
+    Changing a DEFAULT therefore reaches new installs only — upgraders keep
+    the old behaviour forever, silently, with nothing in the UI to hint at it.
+
+    Returns the (mutated) dict plus a human-readable note per applied step;
+    an empty note list means there was nothing to do.
+    """
+    notes: list[str] = []
+    version = raw.get("settings_version")
+    version = version if isinstance(version, int) else 0
+
+    if version < 1:
+        # v3.3.0 flipped route_ru_direct False -> True ("ALL geoip:ru IPs
+        # bypass the VPN"), the headline routing fix of that release. Every
+        # install created between v1.22.0 and v3.2.x carries an explicit
+        # `false` and never received it: RU sites kept being tunnelled through
+        # a foreign exit and kept looking geo-blocked.
+        #
+        # We cannot tell "never touched it" from "deliberately turned it off"
+        # — that distinction was never recorded. We migrate anyway, so the
+        # installed base matches the documented product, and say so loudly in
+        # the changelog; it is one toggle in Settings to put back.
+        if raw.get("route_ru_direct") is False:
+            raw["route_ru_direct"] = True
+            notes.append(
+                "route_ru_direct False -> True (v3.3.0 default never reached "
+                "upgraded installs)"
+            )
+
+    if notes or version < SETTINGS_VERSION:
+        raw["settings_version"] = SETTINGS_VERSION
+    return raw, notes
 
 
 def _read_settings_file() -> dict[str, Any]:
@@ -371,6 +418,9 @@ def _read_settings_file() -> dict[str, Any]:
 
 def load_settings() -> dict[str, Any]:
     raw_data = _read_settings_file()
+    raw_data, migration_notes = _migrate_settings(raw_data)
+    for note in migration_notes:
+        _log.info("settings migration: %s", note)
     merged = dict(DEFAULT_SETTINGS)
     merged.update(raw_data)
 
@@ -387,11 +437,15 @@ def load_settings() -> dict[str, Any]:
     # present in settings.json, move them into the encrypted blob and strip
     # the file. Best-effort — if it can't persist now it retries on the next
     # save; `merged` already carries the values for this session.
-    if any(k in raw_data for k in _SUBSCRIPTION_SECRET_KEYS):
+    # Persist if either migration has something to write. The settings_version
+    # stamp in particular MUST reach disk: without it _migrate_settings runs
+    # again on the next launch and would undo a user who deliberately turned
+    # route_ru_direct back off, every single time.
+    if migration_notes or any(k in raw_data for k in _SUBSCRIPTION_SECRET_KEYS):
         try:
             save_settings(merged)
         except Exception as e:  # never let migration crash startup
-            _record_error(f"subscription-secret migration deferred: {e}")
+            _record_error(f"settings migration deferred: {e}")
     return merged
 
 
