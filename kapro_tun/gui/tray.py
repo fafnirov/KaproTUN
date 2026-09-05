@@ -92,11 +92,19 @@ class TrayManager(QObject):
 
         # --- Top-level quick-connect actions ---
         # We rebuild these dynamically; remove old ones first by tag.
+        # removeAction() only unlinks the action from the menu — it does NOT
+        # destroy it, and these were built with `self.menu` as their parent, so
+        # each one stayed alive as a child of the menu forever. Clearing the
+        # Python list dropped our reference but not Qt's. This method runs once
+        # per ping RESULT, so a refresh over N servers used to strand N*(3+1)
+        # QActions. deleteLater() hands them to the event loop to free.
         for act in list(self._quick_actions):
             self.menu.removeAction(act)
+            act.deleteLater()
         self._quick_actions.clear()
         if self._quick_separator is not None:
             self.menu.removeAction(self._quick_separator)
+            self._quick_separator.deleteLater()
             self._quick_separator = None
 
         # Pick top-3 by ping. Skip configs without a usable ping value

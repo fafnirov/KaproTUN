@@ -1974,6 +1974,14 @@ class MainWindow(QMainWindow):
         self._do_connect()
 
     def _do_connect(self) -> None:
+        # The in-flight guard lives HERE, not only in the callers. It used to
+        # sit in _on_connect_click alone, so the tray's server-picker
+        # (_on_tray_config_picked) walked straight past it and could start a
+        # second _ConnectWorker on top of a running one — two threads writing
+        # the same routes and fighting over the same sockets. Every entry point
+        # funnels through this method, so one check here covers all of them.
+        if self._connecting:
+            return
         # sing-box TUN: ensure the engine binary (+ WinTUN driver) is present.
         if not ensure_sing_box_installed(self):
             return
