@@ -63,6 +63,37 @@ Then verify from somewhere else, and only then retire the old box.
 
 ---
 
+## Deployed on a box that already hosts other sites
+
+That is what production actually is, so it is worth writing down. The mirror
+runs alongside four unrelated sites, which rules out `bootstrap.sh`: that
+script assumes an empty machine and installs a `default_server` that would
+change how every other vhost answers an unmatched hostname.
+
+The additive path instead:
+
+1. Point the A records (`@` and `www`) at the box and wait for the
+   authoritative nameserver to serve them — check the registrar's own NS, not
+   a public resolver, or you will be reading a cache.
+2. `tar czf` the nginx config first. There is no undo.
+3. Record what the existing sites return, so "did I break anything" is a
+   comparison and not a feeling.
+4. Add ONE file to `sites-available` with only `server_name kaprovpn.pro
+   www.kaprovpn.pro` and the `/files/` location. No `default_server`.
+5. `nginx -t`, reload, re-check the other sites, then
+   `certbot --nginx -d kaprovpn.pro -d www.kaprovpn.pro --redirect`.
+6. Install the sync script and timer, run the first sync, and verify from
+   somewhere else with `verify-mirror.sh`.
+
+**The `default_server` hardening is still worth doing** — a box with no
+default vhost answers an unknown hostname with whichever server block loads
+first, including its certificate, which is exactly how the previous host
+served KaproTUN clients a stranger's certificate for weeks. But on a machine
+with live sites that is its own deliberate change, not a side effect of
+standing up a mirror.
+
+---
+
 ## 0. First: is the mirror even reachable?
 
 Run this from a machine that is **not** the VPS. A local `curl` can
