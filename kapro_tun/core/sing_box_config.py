@@ -257,18 +257,55 @@ _GAME_DIRECT_SUFFIXES = [
 # Ranges: Riot Direct (AS6507) and Valve/Steam game networks — the published
 # game-server blocks, NOT their web/CDN frontends (those live on Cloudflare and
 # excluding them would punch a hole through the tunnel for unrelated traffic).
+# Regenerating this list (do it when stalls come back on some matches but not
+# others — that pattern means a server landed outside it):
+#
+#   curl -s "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS6507"
+#
+# then collapse with ipaddress.collapse_addresses(). The v3.5.0 list was a
+# hand-picked sample of the real announcements and covered 3 of Riot's 15
+# aggregated prefixes: it had 104.160.128.0/22 where Riot actually announces
+# 104.160.128.0/19, so seven eighths of that block still went through the
+# tunnel, and it missed 151.106.246-254 entirely — the European servers a
+# player in Russia is most likely to be matched onto. That is why the stalls
+# were intermittent rather than constant: they depended on which server the
+# match landed on.
+#
+# An over-broad entry costs privacy (that traffic leaves the tunnel with the
+# real IP), an under-broad one costs latency. These are game-server networks,
+# not the web/CDN frontends — those live on Cloudflare, and excluding them
+# would punch a hole for unrelated browsing.
 _GAME_DIRECT_CIDRS = [
-    # Riot Direct — League of Legends / Valorant game servers
-    "104.160.128.0/22",
+    # Riot Direct (AS6507) — League of Legends / Valorant game servers.
+    "43.229.64.0/22",
+    "45.7.36.0/22",
+    "45.250.208.0/22",
+    "103.219.128.0/22",
+    "103.240.224.0/22",
+    "104.160.128.0/19",
+    "138.0.12.0/22",
+    "151.106.246.0/23",
+    "151.106.248.0/22",
+    "151.106.252.0/23",
+    "151.106.254.0/24",
     "162.249.72.0/21",
     "185.40.64.0/22",
     "192.64.168.0/21",
+    "192.207.0.0/24",
+    # No longer in AS6507's announcements, kept because excluding an unused
+    # range is harmless while dropping one still in service is not.
     "203.29.184.0/21",
     "216.133.224.0/19",
-    # Valve / Steam game + content servers
+    # Valve / Steam (AS32590) — game + content servers.
+    "45.121.184.0/24",
+    "103.10.124.0/23",
+    "103.28.54.0/24",
+    "146.66.152.0/24",
+    "146.66.155.0/24",
     "155.133.224.0/19",
     "162.254.192.0/21",
     "185.25.180.0/22",
+    "192.69.96.0/22",
     "205.196.6.0/24",
     "208.64.200.0/22",
     "208.78.164.0/22",

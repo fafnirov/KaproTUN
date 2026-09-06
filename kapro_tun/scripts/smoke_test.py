@@ -6968,6 +6968,50 @@ check("integrity: updater won't take the mirror unverified (v3.7.3)",
 
 
 
+def _game_cidrs_cover_the_real_networks() -> None:
+    """v3.7.4: the games bypass is only worth anything for addresses actually
+    inside the list. v3.5.0 shipped 104.160.128.0/22 where Riot announces
+    104.160.128.0/19 and omitted 151.106.246-254 (the European servers), so
+    most matches still paid the userspace-TUN tax and stalled — intermittently,
+    depending on which server the match landed on."""
+    import ipaddress as _ip
+    from kapro_tun.core.sing_box_config import _GAME_DIRECT_CIDRS
+
+    nets = []
+    for c in _GAME_DIRECT_CIDRS:
+        try:
+            nets.append(_ip.ip_network(c))
+        except ValueError as e:
+            raise AssertionError(f"malformed CIDR {c!r}: {e}")
+
+    # Addresses that MUST be excluded. Each is a real Riot/Valve game-server
+    # address that the pre-v3.7.4 list let fall through into the tunnel.
+    for addr, why in (
+        ("104.160.136.3", "Riot, inside the /19 but outside the old /22"),
+        ("104.160.156.1", "Riot, same block, further in"),
+        ("151.106.250.1", "Riot EU — the servers a RU player is matched onto"),
+        ("45.7.37.1", "Riot"),
+        ("146.66.152.1", "Valve"),
+    ):
+        a = _ip.ip_address(addr)
+        if not any(a in n for n in nets):
+            raise AssertionError(f"{addr} not excluded from the TUN ({why})")
+
+    # An over-broad entry is worse than a missing one: everything inside it
+    # leaves the tunnel with the user's real IP. Nothing here should be a
+    # supernet of /16, and nothing may cover private space.
+    for n in nets:
+        if n.prefixlen < 16:
+            raise AssertionError(f"{n} is far too broad for a game bypass")
+        if n.is_private:
+            raise AssertionError(f"{n} is private space — not a game network")
+
+
+check("games: bypass CIDRs cover the real Riot/Valve networks (v3.7.4)",
+      _game_cidrs_cover_the_real_networks)
+
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
