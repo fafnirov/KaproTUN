@@ -1794,7 +1794,12 @@ def _v3_updater_dismiss_cancels_download() -> None:
     w.finished_ok.connect(lambda p: emitted.append("ok"))
     w.failed.connect(lambda m: emitted.append("failed"))
 
-    def _fake_download(url, dest, cap, progress=None, timeout=None):
+    def _fake_download(url, dest, cap, progress=None, timeout=None,
+                       expect_sha256=None):
+        # Signature tracks net_download.download_to_file. v3.7.3 added
+        # expect_sha256; without it here the stub raises TypeError before the
+        # cancel ever happens, and the worker reports a download failure
+        # instead of staying silent.
         tried.append(url)
         w.cancel()                    # user dismisses while the stream runs
         progress(1024, 100000)        # next chunk -> must raise _Cancelled
@@ -6854,6 +6859,112 @@ check("subscription: one bad line costs that line only (v3.7.1)",
       _one_bad_line_keeps_the_rest)
 check("settings: flipped default migrates once, opt-out sticks (v3.7.1)",
       _settings_migration_flips_ru_direct_once)
+
+
+
+def _pinned_digests_cover_every_asset() -> None:
+    """v3.7.3: every binary we download and then EXECUTE must have a pinned
+    digest. A missing entry means that platform installs unverified code."""
+    from kapro_tun.core import sing_box_installer as _si
+
+    ver = _si.SINGBOX_PINNED_VERSION.lstrip("v")
+    need = [f"sing-box-{ver}-{p}.{'zip' if p.startswith('windows') else 'tar.gz'}"
+            for p in ("windows-amd64", "windows-arm64", "darwin-amd64",
+                      "darwin-arm64", "linux-amd64", "linux-arm64")]
+    need.append(_si.WINTUN_FILENAME)
+    for name in need:
+        digest = _si.expected_sha256(name)
+        if not digest:
+            raise AssertionError(
+                f"no pinned SHA-256 for {name} — that platform would install "
+                f"unverified code (bumped SINGBOX_PINNED_VERSION without "
+                f"refreshing _PINNED_SHA256?)")
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise AssertionError(f"{name}: malformed digest {digest!r}")
+    # Catches the specific mistake of bumping the pin and leaving the old
+    # table behind: the keys carry the version, so they must all mention it.
+    stale = [k for k in _si._PINNED_SHA256
+             if k.startswith("sing-box-") and ver not in k]
+    if stale:
+        raise AssertionError(f"digests left over from another version: {stale}")
+
+
+def _integrity_check_rejects_and_leaves_nothing() -> None:
+    """v3.7.3: a digest mismatch must abort the download AND leave no file at
+    the destination — a rejected binary that lands on disk anyway is worse
+    than no check at all, because the next run would find it 'installed'."""
+    import tempfile as _tf, pathlib as _pl
+    from kapro_tun.core import net_download as _nd
+
+    payload = b"pretend-this-is-a-binary" * 100
+    good = __import__("hashlib").sha256(payload).hexdigest()
+
+    class _Resp:
+        headers = {"Content-Length": str(len(payload))}
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size=0):
+            yield payload
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    import kapro_tun.core.net_download as _mod
+    orig = _mod.requests.get
+    _mod.requests.get = lambda *a, **k: _Resp()
+    try:
+        tmp = _pl.Path(_tf.mkdtemp())
+        dest = tmp / "asset.bin"
+        _nd.download_to_file("https://example.invalid/a", dest, 10 << 20,
+                             expect_sha256=good)
+        if not dest.is_file():
+            raise AssertionError("matching digest did not produce the file")
+
+        bad_dest = tmp / "rejected.bin"
+        try:
+            _nd.download_to_file("https://example.invalid/a", bad_dest,
+                                 10 << 20, expect_sha256="0" * 64)
+            raise AssertionError("mismatched digest was accepted")
+        except _nd.IntegrityError:
+            pass
+        leftovers = [f.name for f in tmp.iterdir()
+                     if f.name.startswith("rejected")]
+        if leftovers:
+            raise AssertionError(f"rejected download left {leftovers} on disk")
+
+        try:
+            _nd.download_to_memory("https://example.invalid/a", 10 << 20,
+                                   expect_sha256="0" * 64)
+            raise AssertionError("download_to_memory accepted a mismatch")
+        except _nd.IntegrityError:
+            pass
+    finally:
+        _mod.requests.get = orig
+
+
+def _updater_will_not_take_the_mirror_unverified() -> None:
+    """v3.7.3: the installer digest rides along with version discovery, and
+    without one the mirror — the path we do not fully control — is skipped
+    rather than trusted."""
+    import inspect
+    from kapro_tun.core.updater import UpdateInfo
+    from kapro_tun.gui import updater_dialog as _ud
+
+    if "setup_sha256" not in {f for f in UpdateInfo.__dataclass_fields__}:
+        raise AssertionError("UpdateInfo lost its setup_sha256 field")
+
+    src = inspect.getsource(_ud._DownloadWorker.run)
+    if "KAPROTUN_MIRROR_BASE" not in src or "_expect_sha256" not in src:
+        raise AssertionError(
+            "download worker no longer drops the mirror when it has no digest")
+    if "expect_sha256=" not in src:
+        raise AssertionError("download worker stopped passing the digest down")
+
+
+check("integrity: every executed binary has a pinned SHA-256 (v3.7.3)",
+      _pinned_digests_cover_every_asset)
+check("integrity: mismatch aborts and leaves nothing on disk (v3.7.3)",
+      _integrity_check_rejects_and_leaves_nothing)
+check("integrity: updater won't take the mirror unverified (v3.7.3)",
+      _updater_will_not_take_the_mirror_unverified)
 
 
 

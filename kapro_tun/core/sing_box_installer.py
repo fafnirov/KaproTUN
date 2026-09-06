@@ -28,7 +28,7 @@ from typing import Callable, Optional
 
 import requests
 
-from . import net_download, paths
+from . import app_log, net_download, paths
 
 SINGBOX_LATEST = "https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 # The sing-box release we ship. We DELIBERATELY pin to the 1.12.x line and do
@@ -53,6 +53,48 @@ SINGBOX_PINNED_VERSION = "v1.12.9"
 _BLOCKED_MINOR = (1, 13)
 
 KAPROTUN_MIRROR_BASE = "https://kaprovpn.pro/files"
+
+# Expected SHA-256 for every asset we fetch. These are pinned in code on
+# purpose: the versions above are pinned too, so the digests are constants,
+# and a constant needs no network to consult. That matters — the mirror
+# exists precisely for users who cannot reach github.com, so an integrity
+# check that had to ask GitHub for the expected value would be unavailable
+# exactly when it is most needed.
+#
+# sing-box values come from the GitHub release API's own `digest` field for
+# tag v1.12.9; the WinTUN one was computed from wintun.net's published
+# archive and cross-checked against an independently fetched copy.
+#
+# When bumping SINGBOX_PINNED_VERSION, replace all six — a stale digest here
+# fails closed (nothing installs), which is the correct direction to fail but
+# will look like a broken download until the values are refreshed.
+_PINNED_SHA256: dict[str, str] = {
+    "sing-box-1.12.9-windows-amd64.zip":
+        "f9f9b55d394fe08a8afe1fd3bb1c037e687a12fbe701f16481be6941d1766840",
+    "sing-box-1.12.9-windows-arm64.zip":
+        "4a490b0d114e0ae4c7e154232860cad7b9897bfcd9324d40b07a48dae90eb1d0",
+    "sing-box-1.12.9-darwin-amd64.tar.gz":
+        "1657fb9fd356bc17d4b657052db93a0741547348070e605ed2553a067281fd8b",
+    "sing-box-1.12.9-darwin-arm64.tar.gz":
+        "d37141302f0c9e1ea5a2f071e78146961a7b4f9045feaafee51d8b3535c6ff0b",
+    "sing-box-1.12.9-linux-amd64.tar.gz":
+        "519bc521e6b25f779b37738c5fca0fa3f68175b3d8e434fcacd8ea42da9e70ef",
+    "sing-box-1.12.9-linux-arm64.tar.gz":
+        "0d571bf961c651cc5a4eaffe9715d7759edb484b90473f3fa25aaab87fa11961",
+    "wintun-0.14.1.zip":
+        "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51",
+}
+
+
+def expected_sha256(filename: str) -> str:
+    """Pinned digest for `filename`, or "" when we have none on file.
+
+    Returning "" rather than raising keeps a future asset from bricking the
+    installer, but every current caller passes a filename that IS pinned —
+    see the smoke check that asserts the table covers all six platforms plus
+    WinTUN.
+    """
+    return _PINNED_SHA256.get(filename, "")
 
 # Windows-only WinTUN driver (sing-box uses it for the native TUN device). Was
 # previously fetched via tun2socks_installer; inlined here in v3.1.0 when the
@@ -159,12 +201,14 @@ def _fetch_release() -> ReleaseInfo:
                        _pinned_filename())
 
 
-def _download(url: str, progress: ProgressCb, attempts: int = 3) -> bytes:
+def _download(url: str, progress: ProgressCb, attempts: int = 3,
+              expect_sha256: str = "") -> bytes:
     last_err: Optional[Exception] = None
     for attempt in range(attempts):
         try:
             return net_download.download_to_memory(
-                url, net_download.MAX_SINGBOX_ARCHIVE, progress)
+                url, net_download.MAX_SINGBOX_ARCHIVE, progress,
+                expect_sha256=expect_sha256 or None)
         except net_download.DownloadTooLarge:
             raise
         except (requests.exceptions.RequestException, OSError) as e:
@@ -176,20 +220,34 @@ def _download(url: str, progress: ProgressCb, attempts: int = 3) -> bytes:
 
 def _download_with_fallback(filename: str, upstream_url: str,
                             progress: ProgressCb) -> bytes:
-    """Mirror first, upstream fallback — same as the other installers."""
+    """Mirror first, upstream fallback — same as the other installers.
+
+    Both paths are checked against the same pinned digest, so the fallback is
+    not a way around the check: a mirror serving the wrong bytes loses to
+    upstream instead of winning by being first.
+    """
+    want = expected_sha256(filename)
     try:
-        return _download(f"{KAPROTUN_MIRROR_BASE}/{filename}", progress, attempts=2)
+        return _download(f"{KAPROTUN_MIRROR_BASE}/{filename}", progress,
+                         attempts=2, expect_sha256=want)
+    except net_download.IntegrityError as e:
+        # Not a routine fallback. The mirror answered, was not truncated, and
+        # still produced different bytes than we published — say so loudly
+        # rather than quietly succeeding from upstream a moment later.
+        app_log.log(f"[integrity] mirror rejected for {filename}: {e}")
     except RuntimeError:
         pass
-    return _download(upstream_url, progress, attempts=2)
+    return _download(upstream_url, progress, attempts=2, expect_sha256=want)
 
 
-def _download_wintun(url: str, progress: ProgressCb, attempts: int = 2) -> bytes:
+def _download_wintun(url: str, progress: ProgressCb, attempts: int = 2,
+                     expect_sha256: str = "") -> bytes:
     last_err: Optional[Exception] = None
     for attempt in range(attempts):
         try:
             return net_download.download_to_memory(
-                url, net_download.MAX_WINTUN_ZIP, progress)
+                url, net_download.MAX_WINTUN_ZIP, progress,
+                expect_sha256=expect_sha256 or None)
         except net_download.DownloadTooLarge:
             raise
         except (requests.exceptions.RequestException, OSError) as e:
@@ -201,10 +259,15 @@ def _download_wintun(url: str, progress: ProgressCb, attempts: int = 2) -> bytes
 
 def _install_wintun(progress: ProgressCb) -> None:
     """Windows-only: fetch + extract the WinTUN driver DLL (mirror → upstream)."""
+    want = expected_sha256(WINTUN_FILENAME)
     try:
-        data = _download_wintun(f"{KAPROTUN_MIRROR_BASE}/{WINTUN_FILENAME}", progress)
+        data = _download_wintun(f"{KAPROTUN_MIRROR_BASE}/{WINTUN_FILENAME}",
+                                progress, expect_sha256=want)
+    except net_download.IntegrityError as e:
+        app_log.log(f"[integrity] mirror rejected for {WINTUN_FILENAME}: {e}")
+        data = _download_wintun(WINTUN_URL, progress, expect_sha256=want)
     except RuntimeError:
-        data = _download_wintun(WINTUN_URL, progress)
+        data = _download_wintun(WINTUN_URL, progress, expect_sha256=want)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         dll_member = next(
             (n for n in zf.namelist()

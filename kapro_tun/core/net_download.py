@@ -13,6 +13,7 @@ ceiling against a runaway response.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -40,6 +41,50 @@ ProgressCb = Optional[Callable[[int, int], None]]
 class DownloadTooLarge(RuntimeError):
     """A download exceeded its size cap (declared via Content-Length, or
     measured while streaming). Carries a user-readable Russian message."""
+
+
+class IntegrityError(RuntimeError):
+    """A download's SHA-256 did not match what the caller expected.
+
+    This is the check that makes the mirror untrusted infrastructure rather
+    than trusted infrastructure. Everything fetched here is either executed
+    (sing-box, the installer) or loaded into the network stack (the WinTUN
+    driver), and it arrives over a path we do not fully control: a mirror on
+    a shared host, reached through a domain whose A record is one registrar
+    password away from pointing somewhere else. TLS proves we reached the
+    host that answers for that name; it says nothing about whether the bytes
+    are the ones we published. Only this does.
+
+    Carries a user-readable Russian message."""
+
+
+def verify_sha256(data_or_path, expected: str) -> None:
+    """Raise IntegrityError unless the content hashes to `expected`.
+
+    Accepts bytes or a path so callers can check something already on disk
+    (a cached binary from an earlier run, say) with the same rule.
+    """
+    want = (expected or "").strip().lower().removeprefix("sha256:")
+    if not want:
+        raise IntegrityError("Не задан ожидаемый SHA-256 — отказываюсь принимать файл.")
+    h = hashlib.sha256()
+    if isinstance(data_or_path, (bytes, bytearray)):
+        h.update(data_or_path)
+        where = "загруженные данные"
+    else:
+        p = Path(data_or_path)
+        with open(p, "rb") as f:
+            for block in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(block)
+        where = p.name
+    got = h.hexdigest()
+    if got != want:
+        raise IntegrityError(
+            f"Контрольная сумма не совпала ({where}).\n"
+            f"Ожидалась: {want}\nПолучена:  {got}\n\n"
+            "Файл отклонён и не будет использован. Возможна подмена на "
+            "зеркале или повреждение при загрузке."
+        )
 
 
 def _human(n: int) -> str:
@@ -80,9 +125,10 @@ def _guard_running_total(downloaded: int, max_bytes: int, url: str) -> None:
 
 
 def download_to_memory(url: str, max_bytes: int, progress: ProgressCb = None,
-                       timeout=(10, 20)) -> bytes:
+                       timeout=(10, 20), expect_sha256: Optional[str] = None) -> bytes:
     """Stream `url` into memory, capped at `max_bytes`. Raises
-    DownloadTooLarge if the declared or streamed size exceeds the cap, or
+    DownloadTooLarge if the declared or streamed size exceeds the cap,
+    IntegrityError if `expect_sha256` is given and does not match, or
     requests exceptions on network failure."""
     with requests.get(url, stream=True, timeout=timeout, proxies=_NO_PROXY) as r:
         r.raise_for_status()
@@ -98,13 +144,21 @@ def download_to_memory(url: str, max_bytes: int, progress: ProgressCb = None,
             sink.write(chunk)
             if progress:
                 progress(downloaded, total)
-        return sink.getvalue()
+        data = sink.getvalue()
+        if expect_sha256:
+            verify_sha256(data, expect_sha256)
+        return data
 
 
 def download_to_file(url: str, dest: Path, max_bytes: int,
-                     progress: ProgressCb = None, timeout=(10, 30)) -> Path:
+                     progress: ProgressCb = None, timeout=(10, 30),
+                     expect_sha256: Optional[str] = None) -> Path:
     """Stream `url` to `dest` atomically (.part then os.replace), capped at
-    `max_bytes`. The partial file is removed on any failure. Returns `dest`."""
+    `max_bytes`. The partial file is removed on any failure. Returns `dest`.
+
+    When `expect_sha256` is given the digest is checked on the .part file
+    BEFORE it is moved into place, so a file that fails the check never
+    exists at `dest` for another process to pick up."""
     dest = Path(dest)
     tmp = dest.with_name(dest.name + ".part")
     try:
@@ -122,6 +176,8 @@ def download_to_file(url: str, dest: Path, max_bytes: int,
                     f.write(chunk)
                     if progress:
                         progress(downloaded, total)
+        if expect_sha256:
+            verify_sha256(tmp, expect_sha256)
         os.replace(tmp, dest)
         return dest
     except Exception:

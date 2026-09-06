@@ -16,6 +16,11 @@ from .. import __version__
 
 GITHUB_RELEASES_LATEST = "https://api.github.com/repos/fafnirov/KaproTUN/releases/latest"
 
+# The release asset the in-app updater downloads. Must match the name the
+# release workflow publishes — it is how we find the digest in the API
+# response, and a rename would silently turn verification off.
+SETUP_ASSET_NAME = "KaproTUN-Setup.exe"
+
 # Bypass system proxy on update checks — same reason as the installers.
 # Without this, a stale 127.0.0.1:2080 system-proxy entry from a crashed
 # HTTP-mode session makes the updater self-perpetuate the bug: user
@@ -29,6 +34,12 @@ class UpdateInfo:
     tag: str       # original tag including "v" prefix (used as URL slug)
     url: str       # html_url to the release page
     notes: str     # release body markdown
+    # SHA-256 of the Windows installer asset, as reported by GitHub itself.
+    # GitHub computes this from the bytes it stores, so it is an independent
+    # statement of what we published — which is what lets the installer be
+    # fetched from the mirror and still be trustworthy. Empty when the API
+    # omitted it; the updater treats that as "cannot verify" and refuses.
+    setup_sha256: str = ""
 
 
 def _parse_version(s: str) -> tuple[int, ...]:
@@ -61,9 +72,19 @@ def latest_release(timeout: tuple[float, float] = (5, 10)) -> Optional[UpdateInf
     tag = str(data.get("tag_name") or "").strip()
     if not tag:
         return None
+    # The digest travels with the version discovery, deliberately: the same
+    # request that tells us an update exists also tells us what it must hash
+    # to. There is no path where we learn about a release but cannot verify
+    # its installer.
+    setup_digest = ""
+    for asset in data.get("assets") or []:
+        if str(asset.get("name") or "") == SETUP_ASSET_NAME:
+            setup_digest = str(asset.get("digest") or "").removeprefix("sha256:")
+            break
     return UpdateInfo(
         version=tag.lstrip("v"),
         tag=tag,
         url=str(data.get("html_url") or ""),
         notes=str(data.get("body") or ""),
+        setup_sha256=setup_digest,
     )

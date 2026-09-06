@@ -184,11 +184,33 @@ the kill-switch — by design.
 
 ## Downloads
 
-Binaries are fetched over HTTPS from our mirror with a GitHub fallback, and
-every download is **size-capped**: a response that declares — or streams — more
-than the per-asset ceiling is rejected, so a hostile or broken mirror can't fill
-your disk or RAM. We do **not** yet verify a SHA-256 or signature of downloaded
-binaries; that is tracked for a future release.
+Binaries are fetched over HTTPS from our mirror with a GitHub fallback.
+
+**Every download is checked against an expected SHA-256 before it is used.**
+This is what lets the mirror be convenient without being trusted: the engine,
+the WinTUN driver and the installer are all either executed or loaded into the
+network stack, and they arrive over a path we do not fully control. TLS proves
+we reached the host that answers for that name; it says nothing about whether
+the bytes are the ones we published.
+
+- **sing-box and WinTUN** — digests are pinned in the source, next to the
+  pinned version they belong to. No network lookup is involved, which matters:
+  the mirror exists for people who cannot reach github.com, so a check that had
+  to ask GitHub for the expected value would be missing exactly when needed.
+- **The installer** — its digest comes from the GitHub release API, in the same
+  response that tells the app an update exists. There is no path where we learn
+  about a release but cannot verify it. If that digest is ever absent, the
+  mirror is skipped and the installer is taken only from github.com, rather
+  than accepted unverified.
+
+A file that fails the check is deleted, never lands at its destination, and the
+rejection is written to `app.log`. Downloads remain **size-capped** as well: a
+response that declares — or streams — more than the per-asset ceiling is
+rejected, so a hostile or broken mirror can't fill your disk or RAM.
+
+What this does **not** give you: our `.exe` is still not reproducibly built or
+SLSA-attested (see below). The check proves you received the bytes we
+published; it does not independently prove what those bytes were built from.
 
 The sing-box engine is **pinned to the 1.12.x line**. The 1.13 line regressed
 the VLESS data path on Windows (tunnel establishes, payload never flows), so an

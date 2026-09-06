@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
+from ..core import app_log
 from ..core.i18n import tr
 from ..core.updater import UpdateInfo
 
@@ -79,11 +80,13 @@ class _DownloadWorker(QThread):
     finished_ok = Signal(str)     # path to downloaded file
     failed = Signal(str)
 
-    def __init__(self, urls: list[str], dest: Path, parent=None):
+    def __init__(self, urls: list[str], dest: Path, parent=None,
+                 expect_sha256: str = ""):
         super().__init__(parent)
         self._urls = urls
         self._dest = dest
         self._cancelled = False
+        self._expect_sha256 = expect_sha256 or ""
 
     def cancel(self) -> None:
         """Ask the in-flight download to abort (v3.3.7).
@@ -109,7 +112,19 @@ class _DownloadWorker(QThread):
         # the bug (can't auto-update to a fix because the updater fails).
         from ..core import net_download
         errors: list[str] = []
-        for url in self._urls:
+        urls = list(self._urls)
+        if not self._expect_sha256:
+            # GitHub did not report a digest for the installer, so we have
+            # nothing to check the mirror's bytes against. Drop the mirror and
+            # use only the canonical source: the release asset is served by the
+            # same host, under the same TLS, as the API response that told us
+            # this release exists — trusting one and not the other would be
+            # theatre. The mirror is the path that needs the hash, and without
+            # one it does not get used.
+            urls = [u for u in urls if KAPROTUN_MIRROR_BASE not in u]
+            app_log.log("[integrity] no digest from GitHub — mirror skipped, "
+                        "installer will come from github.com only")
+        for url in urls:
             if self._cancelled:
                 return
             host = url.split("/")[2] if "//" in url else url
@@ -121,6 +136,7 @@ class _DownloadWorker(QThread):
                     url, self._dest, net_download.MAX_SETUP_EXE,
                     progress=self._on_chunk,
                     timeout=(15, 30),
+                    expect_sha256=self._expect_sha256 or None,
                 )
                 # Guard: a mirror/CDN serving an HTML error page as 200
                 # would otherwise be "downloaded" and then fail to launch.
@@ -247,6 +263,7 @@ class UpdaterDialog(QDialog):
 
         self._download_worker = _DownloadWorker(
             _setup_sources(self._info.version), dest, parent=self,
+            expect_sha256=getattr(self._info, "setup_sha256", ""),
         )
         self._download_worker.progress.connect(self._on_progress)
         self._download_worker.finished_ok.connect(self._on_downloaded)
