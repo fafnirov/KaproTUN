@@ -30,6 +30,7 @@ from . import geoip_ru, paths
 # Linux runs sing-box with auto_route OFF (the kernel-7.0 netlink incompat breaks
 # it) and replicates routing via iproute2 — see core/linux_tun_route.py.
 _IS_LINUX = sys.platform.startswith("linux")
+_IS_MACOS = sys.platform == "darwin"
 
 # TUN device + addressing — mirrors the classic engine so nothing else changes.
 TUN_DEVICE_NAME = "KaproTun"
@@ -537,7 +538,6 @@ def build_config(
     tun_inbound: dict[str, Any] = {
         "type": "tun",
         "tag": "tun-in",
-        "interface_name": TUN_DEVICE_NAME,
         "address": [TUN_INET4] if _IS_LINUX else [TUN_INET4, TUN_INET6],
         "mtu": TUN_MTU,
         "auto_route": not _IS_LINUX,
@@ -552,6 +552,8 @@ def build_config(
         # manually-routed TUN at all.
         "endpoint_independent_nat": True,
     }
+    if not _IS_MACOS:
+        tun_inbound["interface_name"] = TUN_DEVICE_NAME
     # True kernel bypass for game servers (v3.6.0) — see _GAME_DIRECT_CIDRS.
     # Without this the game's packets still cross the userspace stack even when
     # a rule sends them `direct`, which is what made the tunnel add multi-second
