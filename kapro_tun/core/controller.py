@@ -207,6 +207,14 @@ class ConnectionManager:
 
     def __init__(self, on_log: Optional[Callable[[str], None]] = None):
         self._on_log = on_log
+        # What actually happened to each firewall protection the user switched
+        # on, for this session: "active", "failed", "needs_admin" or
+        # "unsupported". A protection that is switched off has no entry. The
+        # settings checkbox shows what the user ASKED for; this is the only
+        # record of what they GOT, and the UI reads it after connect so a
+        # protection that silently failed to arm is reported rather than
+        # implied by a ticked box. See inactive_protections().
+        self.protection_status: dict[str, str] = {}
         # The single engine: sing-box native-TUN process (owns the TUN device,
         # routes + resolves DNS itself — no tun2socks bridge, no xray).
         self.sing_box_process = SingBoxProcess(
@@ -291,6 +299,7 @@ class ConnectionManager:
             webrtc_block.remove()
         except Exception as e:
             self._log(f"[!] WebRTC-block: не удалось снять правило: {e}")
+        self.protection_status = {}
         self._active = None
         self._active_engine = None
         self._server_ip = ""
@@ -673,15 +682,22 @@ class ConnectionManager:
             raise ConnectionError(tr("err.singbox_rejected_config", msg=msg))
 
         # Kill-switch BEFORE the tunnel comes up, allowing sing-box.exe out.
+        self.protection_status = {}
         self._maybe_arm_killswitch()
+        # The STUN block. This call went missing in v3.1.0 when the legacy
+        # engines were cut, and nothing noticed: the setting stayed on by
+        # default, the Settings hint kept describing the rule, SECURITY.md kept
+        # listing it — and no rule was ever installed. It still matters under
+        # a full TUN: split routing sends RU destinations direct, so a page's
+        # script could reach a STUN server on an RU address and read back the
+        # real IP. Firewall rules filter per socket, so this blocks that path
+        # regardless of which interface the route would take.
+        self._maybe_arm_webrtc_block()
 
         try:
             self.sing_box_process.start(cfg_path)
         except Exception as e:
-            try:
-                killswitch.remove()
-            except Exception:
-                pass
+            self._disarm_session_firewall()
             paths.remove_runtime_configs()
             raise ConnectionError(tr("err.singbox_start_failed", error=e)) from e
 
@@ -741,10 +757,7 @@ class ConnectionManager:
         except Exception:
             self.sing_box_process.stop()
             linux_tun_route.teardown()
-            try:
-                killswitch.remove()
-            except Exception:
-                pass
+            self._disarm_session_firewall()
             paths.remove_runtime_configs()
             raise
 
@@ -754,6 +767,20 @@ class ConnectionManager:
         # can detect an Ethernet↔Wi-Fi roam and clean-reconnect (v3.4.0).
         self._server_ip = server_ip
         self._egress_fp = self._egress_fingerprint()
+
+    def _disarm_session_firewall(self) -> None:
+        """Undo every firewall rule a connect attempt armed. For the failure
+        paths: a connect that dies after arming must not leave rules behind
+        while the UI reports "disconnected" — that half-state is exactly what
+        users can't see. Both rules share one lifecycle, so they are removed
+        together; before this, each path listed its own subset and the
+        post-start path forgot the STUN rule."""
+        for undo in (killswitch.remove, webrtc_block.remove):
+            try:
+                undo()
+            except Exception:
+                pass
+        self.protection_status = {}
 
     def _tun_admin_message(self) -> str:
         """Per-OS 'TUN needs admin' message."""
@@ -775,17 +802,22 @@ class ConnectionManager:
         if not self.settings.get("kill_switch", False):
             return
         if not killswitch.is_supported():
+            self.protection_status["kill_switch"] = "unsupported"
             self._log("[!] Kill-switch пока работает только на Windows")
             return
         if not admin.is_admin():
+            self.protection_status["kill_switch"] = "needs_admin"
             self._log("[!] Kill-switch требует админа — пропускаю")
             return
         if killswitch.install(paths.sing_box_exe()):
+            self.protection_status["kill_switch"] = "active"
             self._log("[*] Kill-switch активирован (firewall блокирует весь "
                       "трафик мимо sing-box)")
         else:
+            self.protection_status["kill_switch"] = "failed"
             self._log("[!] Не удалось установить firewall-правила kill-switch "
                       "— продолжаю без него")
+            app_log.log("[protection] kill_switch requested but NOT armed")
 
     def _maybe_arm_ipv6_block(self) -> None:
         """No-op firewall-wise for the sing-box TUN: the tunnel itself captures
@@ -813,9 +845,11 @@ class ConnectionManager:
         if not self.settings.get("webrtc_leak_protection", True):
             return
         if not webrtc_block.is_supported():
+            self.protection_status["webrtc"] = "unsupported"
             self._log("[!] WebRTC-leak protection пока работает только на Windows")
             return
         if not admin.is_admin():
+            self.protection_status["webrtc"] = "needs_admin"
             # In HTTP-proxy mode we usually aren't admin (don't need it
             # for system_proxy on Windows). Don't spam this — log once
             # at info level so the user knows why protection is off.
@@ -823,11 +857,20 @@ class ConnectionManager:
                       "(перейди в TUN-режим для админ-прав)")
             return
         if webrtc_block.install():
+            self.protection_status["webrtc"] = "active"
             self._log("[*] WebRTC-leak protection активирована "
-                      "(блок UDP к STUN-портам 3478/5349/19302/19305-19308)")
+                      "(блок UDP к STUN-портам 3478/5349/19302/19305-19309)")
         else:
+            self.protection_status["webrtc"] = "failed"
             self._log("[!] Не удалось установить WebRTC-block firewall-правило "
                       "— браузер может узнать реальный IP через STUN")
+            app_log.log("[protection] webrtc requested but NOT armed")
+
+    def inactive_protections(self) -> list[tuple[str, str]]:
+        """(protection, reason) for every protection the user switched on that
+        is NOT actually in force this session. Empty when all is well."""
+        return [(name, state) for name, state in self.protection_status.items()
+                if state != "active"]
 
     def _atexit_cleanup(self) -> None:
         try:

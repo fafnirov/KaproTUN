@@ -72,8 +72,12 @@ _RULE_BLOCK_STUN = f"{_RULE_PREFIX}-block-stun"
 # 3478          STUN (RFC 5389) — the canonical STUN port
 # 5349          STUNS / DTLS-STUN — same protocol over TLS-secured DTLS
 # 19302         Google's public STUN — stun.l.google.com, stun1-4.l...
-# 19305-19308   Google's additional STUN range
-_STUN_PORTS = "3478,5349,19302,19305-19308"
+# 19305-19309   Google's additional STUN range. Up to v3.7.4 this stopped at
+#               19308 — an off-by-one against the range documented at the top
+#               of this file and in the pfctl note, which left 19309 as a
+#               working WebRTC path to the real IP while the leak test (which
+#               only probes 19302) reported the protection as intact.
+_STUN_PORTS = "3478,5349,19302,19305-19309"
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 

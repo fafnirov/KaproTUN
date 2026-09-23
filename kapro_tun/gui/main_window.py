@@ -1637,12 +1637,23 @@ class MainWindow(QMainWindow):
             return
         from .configs_picker import _PingerThread
 
-        # Stop any previous pinger before starting a new one — avoids
-        # racing two pingers for the same configs.
-        if self._tray_pinger is not None:
+        # Stop any previous pinger before starting a new one. quit() — what
+        # this used to call — only ends a thread's event loop, and _PingerThread
+        # has none, so the old pinger ran to completion and its finished signal
+        # then overwrote the newer results with a stale set. Unhook its signals
+        # first so nothing it still emits can land, then ask it to stop; it
+        # checks isInterruptionRequested() between pings. parent=self keeps the
+        # object alive until the thread actually exits.
+        old = self._tray_pinger
+        if old is not None:
+            for sig in (old.pinged, old.finished):
+                try:
+                    sig.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
             try:
-                self._tray_pinger.quit()
-            except Exception:
+                old.requestInterruption()
+            except RuntimeError:
                 pass
 
         new_pings: dict[str, Optional[int]] = {}
@@ -2027,6 +2038,31 @@ class MainWindow(QMainWindow):
         self._connect_worker.failed.connect(self._on_connect_failed)
         self._connect_worker.start()
 
+    def _warn_inactive_protections(self) -> None:
+        """Say so when a protection the user switched on did not arm.
+
+        The Settings checkbox records what the user asked for, and until
+        v3.7.5 it was the only thing the UI ever showed: a kill-switch whose
+        firewall rules failed to install still looked ticked, and the truth
+        lived in one log line. For a VPN that is the worst kind of wrong —
+        believing you are protected when you are not."""
+        try:
+            if not self.manager.is_connected():
+                return
+            inactive = self.manager.inactive_protections()
+        except Exception:
+            return
+        if not inactive:
+            return
+        items = "; ".join(
+            f"{tr('prot.' + name)} — {tr('prot.reason.' + state)}"
+            for name, state in inactive)
+        self.logs_page.append(f"[!] {tr('mw.protection_inactive', items=items)}")
+        app_log.log("[protection] inactive after connect: "
+                    + ", ".join(f"{n}={s}" for n, s in inactive))
+        show_toast(self, tr("mw.protection_inactive", items=items),
+                   kind="error", duration_ms=12000)
+
     def _on_connect_success(self) -> None:
         self._connecting = False
         # Successful connect ⇒ wipe the auto-reconnect counter so the
@@ -2040,6 +2076,9 @@ class MainWindow(QMainWindow):
         # On-disk lifecycle line — no server name/secret.
         app_log.log(f"[connect] mode=TUN engine={self.manager.current_engine()}")
         show_toast(self, tr("mw.toast_connected", name=self._active_config.name), kind="success")
+        # After the "connected" toast has had its moment — show_toast replaces
+        # whatever is on screen, so firing now would erase it.
+        QTimer.singleShot(4000, self._warn_inactive_protections)
         self._refresh_home()
         # v1.14.3: show country + map immediately based on the config
         # name's flag emoji. No waiting for the 2-second probe — user
@@ -2739,6 +2778,10 @@ class MainWindow(QMainWindow):
         self.manager.update_settings(last_config_name=new_cfg.name)
         self._goto("home")
         self._refresh_home()
+        # A new server has no ping yet, and the tray's quick-connect list only
+        # shows servers that do — without this it stayed invisible there until
+        # the next restart.
+        self._refresh_tray_pings()
         show_toast(self, tr("mw.toast_config_added", name=new_cfg.name), kind="success")
 
     def _on_import_subscription(self) -> None:
@@ -2760,6 +2803,9 @@ class MainWindow(QMainWindow):
                 existing_by_name[cfg.name] = len(self.configs) - 1
                 added += 1
         storage.save_configs(self.configs)
+        # Same as a single add: freshly imported servers have no ping, so they
+        # were missing from the tray's quick-connect list until a restart.
+        self._refresh_tray_pings()
         # Subscription-Userinfo was just persisted by the dialog — reflect
         # the fresh remaining-traffic / expiry in the Settings subtitle + the
         # home-screen expiry banner. (refresh_sub_info lives on SettingsPage;

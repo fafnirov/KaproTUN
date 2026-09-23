@@ -376,20 +376,24 @@ def probe_dns(timeout: float = 8.0) -> DnsResult:
             for w in well_known_vpn_dns_substrings
         )
 
+    # Group by ASN; each group is one provider. A group counts as clean if ANY
+    # of its resolvers is recognisably a public resolver — that keeps the
+    # anycast case this used to special-case (AdGuard's whole pool in one AS,
+    # not every hostname carrying the brand) while closing the hole it opened.
+    #
+    # Until v3.7.5 the rule was "one ASN => not a leak", full stop. But the
+    # textbook leak — every query going to the ISP's resolver — is ALWAYS one
+    # ASN, the ISP's. So the test reported "clean" in exactly the case where
+    # the ISP could see every domain looked up.
     leak = False
     if meta:
-        # Same-AS short-circuit: all resolvers in one ASN means
-        # legit single-provider anycast. Not a leak.
-        unique_asns = {
-            (entry.get("asn") or "").split(" ")[0]
-            for entry in meta
-        }
-        if len(unique_asns) <= 1:
-            leak = False
-        else:
-            # Mixed ASNs: flag if any resolver doesn't match the
-            # whitelist. ISP-DNS in the mix → leak.
-            leak = any(not _resolver_looks_official(e) for e in meta)
+        by_asn: dict[str, list[dict]] = {}
+        for entry in meta:
+            by_asn.setdefault((entry.get("asn") or "").split(" ")[0], []).append(entry)
+        leak = any(
+            not any(_resolver_looks_official(e) for e in group)
+            for group in by_asn.values()
+        )
 
     return DnsResult(resolvers=resolvers, resolvers_meta=meta, suspected_leak=leak)
 

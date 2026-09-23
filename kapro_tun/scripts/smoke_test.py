@@ -7012,6 +7012,167 @@ check("games: bypass CIDRs cover the real Riot/Valve networks (v3.7.4)",
 
 
 
+def _stun_block_covers_19305_to_19309() -> None:
+    """v3.7.5: _STUN_PORTS stopped at 19308, one short of the range this
+    module documents, so 19309 stayed open as a WebRTC path to the real IP."""
+    from kapro_tun.core import webrtc_block as _wb
+    covered = set()
+    for part in _wb._STUN_PORTS.split(","):
+        if "-" in part:
+            a, b = part.split("-")
+            covered.update(range(int(a), int(b) + 1))
+        else:
+            covered.add(int(part))
+    missing = [p for p in (3478, 5349, 19302, 19305, 19306, 19307, 19308, 19309)
+               if p not in covered]
+    if missing:
+        raise AssertionError(f"STUN ports not blocked: {missing}")
+
+
+def _webrtc_block_is_armed_on_connect() -> None:
+    """v3.7.5: the call that installs the STUN rule disappeared from the connect
+    path in v3.1.0 and nothing noticed for months — the setting defaulted on,
+    the UI and SECURITY.md described the rule, and no rule was ever created.
+    Pin that the sing-box connect path arms it next to the kill-switch."""
+    import inspect
+    from kapro_tun.core import controller as _c
+    src = inspect.getsource(_c.ConnectionManager)
+    connect_region = src.split("def _maybe_arm_killswitch")[0]
+    if "self._maybe_arm_webrtc_block()" not in connect_region:
+        raise AssertionError("connect path no longer arms the WebRTC STUN block")
+
+
+def _failed_protection_is_reported_not_implied() -> None:
+    """v3.7.5: a protection that was switched on but did not arm must show up
+    in inactive_protections(), so the UI can say so instead of leaving a ticked
+    checkbox to imply it works."""
+    from kapro_tun.core import controller as _c
+    mgr = _c.ConnectionManager(on_log=lambda _l: None)
+    mgr.settings = dict(mgr.settings, kill_switch=True, webrtc_leak_protection=True)
+    o = (_c.killswitch.is_supported, _c.killswitch.install,
+         _c.webrtc_block.is_supported, _c.webrtc_block.install, _c.admin.is_admin)
+    _c.killswitch.is_supported = lambda: True
+    _c.killswitch.install = lambda *_a, **_k: False      # rule fails to install
+    _c.webrtc_block.is_supported = lambda: True
+    _c.webrtc_block.install = lambda: True                # this one succeeds
+    _c.admin.is_admin = lambda: True
+    try:
+        mgr.protection_status = {}
+        mgr._maybe_arm_killswitch()
+        mgr._maybe_arm_webrtc_block()
+        got = mgr.inactive_protections()
+    finally:
+        (_c.killswitch.is_supported, _c.killswitch.install,
+         _c.webrtc_block.is_supported, _c.webrtc_block.install,
+         _c.admin.is_admin) = o
+    if got != [("kill_switch", "failed")]:
+        raise AssertionError(f"expected only the failed kill-switch, got {got}")
+
+    import inspect
+    from kapro_tun.gui import main_window as _mw
+    if "_warn_inactive_protections" not in inspect.getsource(
+            _mw.MainWindow._on_connect_success):
+        raise AssertionError("connect success no longer checks inactive protections")
+
+
+check("webrtc: STUN block covers 19305-19309 (v3.7.5)",
+      _stun_block_covers_19305_to_19309)
+check("webrtc: STUN rule is armed on connect again (v3.7.5)",
+      _webrtc_block_is_armed_on_connect)
+check("protection: failed arming is reported, not implied (v3.7.5)",
+      _failed_protection_is_reported_not_implied)
+
+
+
+def _dns_leak_single_isp_asn_is_a_leak() -> None:
+    """v3.7.5: "all resolvers in one ASN => not a leak" reported clean exactly
+    when every query went to the ISP — the textbook leak is always one ASN."""
+    from kapro_tun.core import leak_test as _lt
+
+    def run(entries):
+        class _R:
+            status_code = 200
+            def json(self_inner):
+                return entries
+        o = (_lt._resolve_with_hard_timeout, _lt.time.sleep, _lt.requests.get)
+        _lt._resolve_with_hard_timeout = lambda *a, **k: None
+        _lt.time.sleep = lambda *_a: None
+        _lt.requests.get = lambda *a, **k: _R()
+        try:
+            return _lt.probe_dns().suspected_leak
+        finally:
+            _lt._resolve_with_hard_timeout, _lt.time.sleep, _lt.requests.get = o
+
+    isp = [{"type": "dns", "ip": f"95.173.1.{n}", "asn": "AS12389 Rostelecom",
+            "hostname": ""} for n in range(3)]
+    if not run(isp):
+        raise AssertionError("all queries to one ISP ASN reported as clean")
+
+    # The case the old short-circuit existed for must stay clean: one public
+    # provider's anycast pool, only some hostnames carrying the brand.
+    adguard = [{"type": "dns", "ip": "94.140.14.14", "asn": "AS208398 Edge Technology",
+                "hostname": "dns.adguard.com"},
+               {"type": "dns", "ip": "5.45.240.9", "asn": "AS208398 Edge Technology",
+                "hostname": "unnamed"}]
+    if run(adguard):
+        raise AssertionError("single public-resolver pool flagged as a leak")
+
+    mixed = adguard + isp[:1]
+    if not run(mixed):
+        raise AssertionError("public pool plus an ISP resolver reported as clean")
+
+
+def _new_configs_get_pinged() -> None:
+    """v3.7.5: adding a server or importing a subscription never refreshed the
+    tray pings, so new servers stayed out of the quick-connect list (built only
+    from pinged servers) until a restart. And the previous pinger was stopped
+    with quit(), a no-op on a thread without an event loop, letting its stale
+    results overwrite the new ones."""
+    import inspect
+    from kapro_tun.gui import main_window as _mw
+    for fn in ("_on_add_page_saved", "_on_import_subscription"):
+        if "self._refresh_tray_pings()" not in inspect.getsource(getattr(_mw.MainWindow, fn)):
+            raise AssertionError(f"{fn} does not refresh pings for the new servers")
+    src = inspect.getsource(_mw.MainWindow._refresh_tray_pings)
+    if "requestInterruption" not in src or ".quit()" in src:
+        raise AssertionError("old pinger is not actually stopped before a new one starts")
+
+
+def _failed_connect_leaves_no_firewall_rules() -> None:
+    """v3.7.5: a connect that fails after arming must remove EVERY rule it
+    armed. The post-start failure path removed the kill-switch but not the
+    STUN rule, leaving a firewall rule behind while the UI said disconnected."""
+    from kapro_tun.core import controller as _c
+    mgr = _c.ConnectionManager(on_log=lambda _l: None)
+    removed = []
+    o = (_c.killswitch.remove, _c.webrtc_block.remove)
+    _c.killswitch.remove = lambda *a, **k: removed.append("kill_switch")
+    _c.webrtc_block.remove = lambda *a, **k: removed.append("webrtc")
+    try:
+        mgr.protection_status = {"kill_switch": "active", "webrtc": "active"}
+        mgr._disarm_session_firewall()
+    finally:
+        _c.killswitch.remove, _c.webrtc_block.remove = o
+    if sorted(removed) != ["kill_switch", "webrtc"]:
+        raise AssertionError(f"rollback removed only {removed}")
+    if mgr.protection_status:
+        raise AssertionError("rollback left protection_status claiming rules are active")
+
+    import inspect
+    src = inspect.getsource(_c.ConnectionManager)
+    if src.count("self._disarm_session_firewall()") < 2:
+        raise AssertionError("a connect failure path no longer uses the shared rollback")
+
+
+check("leak-test: all-ISP DNS in one ASN is a leak (v3.7.5)",
+      _dns_leak_single_isp_asn_is_a_leak)
+check("tray: new servers get pinged, old pinger really stops (v3.7.5)",
+      _new_configs_get_pinged)
+check("connect: failure after arming leaves no firewall rules (v3.7.5)",
+      _failed_connect_leaves_no_firewall_rules)
+
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------

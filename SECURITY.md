@@ -164,8 +164,17 @@ returns are exposed to anyone on the path.
   tunnel; global-unicast v6 (`2000::/3`) is then **rejected in-tunnel** with a
   clean RST/ICMP, so Happy Eyeballs falls back to IPv4 instantly and v6 never
   egresses your real interface. LAN/ULA/link-local v6 stays direct.
-- **WebRTC/STUN.** Firewall rules block the common STUN ports so a browser
-  can't reveal the real address through WebRTC.
+- **WebRTC/STUN.** A firewall rule blocks outbound UDP to the common STUN
+  ports (3478, 5349, 19302, 19305-19309). It matters even with a full TUN:
+  split routing sends Russian destinations direct, so a page's script could
+  otherwise query a STUN server on a Russian address and read back your real
+  IP. **Correction:** from v3.1.0 through v3.7.4 this rule was never actually
+  installed — the call was lost when the legacy engines were removed, while the
+  setting, the Settings hint and this document all kept describing it. Fixed in
+  v3.7.5, which also closes an off-by-one that left port 19309 open.
+- **Protections that fail to arm are reported.** If kill-switch or the STUN
+  block is switched on but its firewall rule can't be installed, the app says
+  so after connecting instead of leaving a ticked box to imply it works.
 - **QUIC.** On the default userspace stack, tunnelled QUIC (UDP/443) is
   rejected so browsers fall back to TCP, which the tunnel carries reliably.
 
