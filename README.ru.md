@@ -27,6 +27,7 @@
 |----|------|------------|
 | **Windows 10 / 11 (x64)** | [`KaproTUN-Setup.exe`](https://github.com/fafnirov/KaproTUN/releases/latest) | Установка для текущего пользователя, права админа не нужны |
 | **macOS (Apple Silicon)** | [`KaproTUN-macOS-arm64.dmg`](https://github.com/fafnirov/KaproTUN/releases/latest) | Перетащить в Applications |
+| **macOS (Intel)** | [`KaproTUN-macOS-x64.dmg`](https://github.com/fafnirov/KaproTUN/releases/latest) | Перетащить в Applications |
 | **Linux (x64)** | [`KaproTUN-Linux-x64.AppImage`](https://github.com/fafnirov/KaproTUN/releases/latest) | `chmod +x` и запустить |
 
 Для Windows также публикуется портативный `KaproTUN.exe`, если ставить не хочется.
@@ -144,7 +145,7 @@ VMess, Shadowsocks, Hysteria2), который поднимает их как **
 | ОС | Минимум |
 |----|---------|
 | Windows | 10 / 11 (x64) |
-| macOS | 12+ (Apple Silicon) |
+| macOS | 13+ (Apple Silicon и Intel) |
 | Linux | glibc 2.31+ (Ubuntu 20.04+ и аналоги) |
 
 Место на диске: ~90 МБ (≈57 МБ приложение + ≈33 МБ движок sing-box и, на

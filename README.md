@@ -26,6 +26,7 @@ Latest stable release — pick the file for your OS:
 |----|------|-------|
 | **Windows 10 / 11 (x64)** | [`KaproTUN-Setup.exe`](https://github.com/fafnirov/KaproTUN/releases/latest) | Per-user install, no admin needed to install |
 | **macOS (Apple Silicon)** | [`KaproTUN-macOS-arm64.dmg`](https://github.com/fafnirov/KaproTUN/releases/latest) | Drag into Applications |
+| **macOS (Intel)** | [`KaproTUN-macOS-x64.dmg`](https://github.com/fafnirov/KaproTUN/releases/latest) | Drag into Applications |
 | **Linux (x64)** | [`KaproTUN-Linux-x64.AppImage`](https://github.com/fafnirov/KaproTUN/releases/latest) | `chmod +x` and run |
 
 A portable `KaproTUN.exe` is also published for Windows if you'd rather not install.
@@ -137,7 +138,7 @@ address.
 | OS | Minimum |
 |----|---------|
 | Windows | 10 / 11 (x64) |
-| macOS | 12+ (Apple Silicon) |
+| macOS | 13+ (Apple Silicon and Intel) |
 | Linux | glibc 2.31+ (Ubuntu 20.04+ and equivalents) |
 
 Disk: ~90 MB total (~57 MB app + ~33 MB for the sing-box engine and, on
