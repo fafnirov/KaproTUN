@@ -55,9 +55,31 @@ free OSS project, not a commercial one. To proceed:
 1. Click **"More info"** on the SmartScreen dialog
 2. Click **"Run anyway"**
 
-You only do this once per release. macOS may show a similar
-**"unidentified developer"** prompt — right-click the `.dmg` → **Open** →
-**Open** to bypass (one-time).
+You only do this once per release.
+
+#### ⚠️ macOS: "Apple could not verify KaproTUN is free of malware"
+
+This is how macOS greets any app without a paid Apple signature (Developer ID,
+$99/year) that was downloaded with a browser. The app is not damaged. Two ways
+forward:
+
+**Install from Terminal — no warning, no password.** Open Terminal and paste:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fafnirov/KaproTUN/main/packaging/install-macos.sh | bash
+```
+
+The script picks the build for your Mac (Intel or Apple Silicon), checks the
+file against the SHA-256 that GitHub reports, installs the app and opens it.
+There is no warning because macOS only checks files a browser has marked on
+download. That also means macOS is not checking the app for you: the checksum
+comparison stands in for it. The script is short, and you can
+[read it](packaging/install-macos.sh) before running it.
+
+**Or allow it by hand, once.** Drag KaproTUN into Applications, try to open it,
+and click "Done" on the warning. Then System Settings → Privacy & Security →
+"Open Anyway" at the bottom → confirm with your password or Touch ID. On macOS
+13 and 14, right-clicking the app → Open → Open is enough.
 
 ---
 

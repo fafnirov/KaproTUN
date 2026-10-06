@@ -201,6 +201,16 @@ jobs:
           | macOS (Intel) | `KaproTUN-macOS-x64.dmg` | Открыть DMG, перетащить в Applications |
           | Linux (x64) | `KaproTUN-Linux-x64.AppImage` | `chmod +x` и запустить |
 
+          **macOS не даёт открыть приложение?** У него нет платной подписи Apple.
+          Поставь одной командой в Терминале, без предупреждения и без пароля:
+
+          ```bash
+          curl -fsSL https://raw.githubusercontent.com/fafnirov/KaproTUN/main/packaging/install-macos.sh | bash
+          ```
+
+          Или разреши вручную: «Системные настройки» → «Конфиденциальность и
+          безопасность» → «Всё равно открыть».
+
           Полный changelog: [CHANGELOG.md](../../blob/main/CHANGELOG.md)
 
           ---

@@ -282,6 +282,15 @@ We're honest about the limits:
   filter (VR link tools, some antivirus) can intercept traffic before it reaches
   our TUN. The client detects known offenders and warns, but cannot override
   them from userspace.
+- **macOS builds are not signed or notarized.** That needs a paid Apple
+  Developer account. Gatekeeper therefore blocks a DMG downloaded with a
+  browser until you allow it in System Settings. The terminal installer
+  (`packaging/install-macos.sh`) avoids the block because curl does not set the
+  quarantine attribute Gatekeeper acts on — which means macOS performs no check
+  at all on that path. The installer compensates by verifying the file against
+  the SHA-256 GitHub reports for the release asset, and installs nothing on a
+  mismatch. It never disables Gatekeeper system-wide and never asks for a
+  password.
 - **Reproducible builds.** We don't produce signed SLSA attestations. Trust in
   our `.exe` rests on (a) public GitHub Actions logs, (b) signed commits,
   (c) open code. A supply-chain attacker who compromised the GitHub account

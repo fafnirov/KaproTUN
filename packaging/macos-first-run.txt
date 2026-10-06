@@ -1,0 +1,46 @@
+KaproTUN: если macOS не даёт открыть приложение
+================================================
+
+macOS показывает «Apple не удалось подтвердить, что KaproTUN не содержит
+вредоносного ПО». Это не вирус и не поломка: у приложения нет платной
+подписи Apple, а macOS блокирует всё неподписанное, что скачано браузером.
+
+Способ 1. Разрешить в настройках (один раз)
+-------------------------------------------
+1. Перетащи KaproTUN в «Программы» и попробуй открыть. В окне с
+   предупреждением нажми «Готово».
+2. Открой «Системные настройки» → «Конфиденциальность и безопасность».
+3. Прокрути вниз до строки про KaproTUN и нажми «Всё равно открыть».
+4. Подтверди паролем или Touch ID. Дальше приложение открывается как обычно.
+
+На macOS 13 и 14 можно проще: правой кнопкой по KaproTUN → «Открыть» →
+«Открыть».
+
+Способ 2. Установить командой (без предупреждения и без пароля)
+---------------------------------------------------------------
+Открой «Терминал» и вставь одну строку:
+
+curl -fsSL https://raw.githubusercontent.com/fafnirov/KaproTUN/main/packaging/install-macos.sh | bash
+
+Команда сама выберет версию под твой Mac (Intel или Apple Silicon), сверит
+контрольную сумму файла с GitHub, установит приложение и откроет его.
+
+
+KaproTUN: if macOS refuses to open the app
+==========================================
+
+macOS says "Apple could not verify KaproTUN is free of malware". The app is
+not broken: it has no paid Apple signature, and macOS blocks every unsigned
+app downloaded with a browser.
+
+Option 1. Allow it in Settings (once)
+1. Drag KaproTUN into Applications and try to open it. Click "Done".
+2. Open System Settings -> Privacy & Security.
+3. Scroll down to the KaproTUN line and click "Open Anyway".
+4. Confirm with your password or Touch ID.
+
+On macOS 13 and 14: right-click KaproTUN -> Open -> Open.
+
+Option 2. Install from Terminal (no warning, no password)
+
+curl -fsSL https://raw.githubusercontent.com/fafnirov/KaproTUN/main/packaging/install-macos.sh | bash

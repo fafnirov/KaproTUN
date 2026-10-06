@@ -45,6 +45,9 @@ fi
 mkdir -p dist/dmg_root
 cp -R dist/KaproTUN.app dist/dmg_root/
 ln -s /Applications dist/dmg_root/Applications
+# The app is unsigned, so Gatekeeper will stop most first launches. Put the
+# way through it where the user is already looking: next to the app.
+cp packaging/macos-first-run.txt "dist/dmg_root/Не открывается? Прочти.txt"
 hdiutil create -volname "KaproTUN" -srcfolder dist/dmg_root \
   -ov -format UDZO "dist/${OUT}"
 rm -rf dist/dmg_root
