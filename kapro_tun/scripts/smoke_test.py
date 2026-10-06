@@ -2400,8 +2400,10 @@ def _v360_game_kernel_bypass() -> None:
         raise AssertionError(
             "games_direct must exclude game networks from the TUN at route level "
             "(a `direct` rule alone still pays the userspace-stack cost)")
-    if "route_exclude_address" in off["inbounds"][0]:
-        raise AssertionError("no route exclusions when the games toggle is off")
+    # v3.7.6: with the toggle off only the LAN exclusions remain — no game nets.
+    off_excl = off["inbounds"][0].get("route_exclude_address") or []
+    if any(c in off_excl for c in sb._GAME_DIRECT_CIDRS):
+        raise AssertionError("game networks excluded although the games toggle is off")
     # Riot Direct and Valve ranges must be there; Cloudflare must NOT (excluding
     # it would punch a hole through the tunnel for unrelated traffic).
     if not any(c.startswith("104.160.128.") for c in excl):
@@ -7170,6 +7172,85 @@ check("tray: new servers get pinged, old pinger really stops (v3.7.5)",
       _new_configs_get_pinged)
 check("connect: failure after arming leaves no firewall rules (v3.7.5)",
       _failed_connect_leaves_no_firewall_rules)
+
+
+
+def _windows_dns_asks_the_network_directly() -> None:
+    """v3.7.6: `type: local` resolved through the Windows DNS client, which asks
+    KaproTun's own DNS (10.255.0.3) first — hijacked straight back into sing-box
+    — and only fell through to the real resolver after ~5 s. Every fresh lookup
+    cost 5 s: the League client's and Vanguard's timeout (VAN 68)."""
+    from kapro_tun.core import sing_box_config as _s, network_routes as _nr
+    from kapro_tun.core.parser import parse as _p
+    proxy = _p("trojan://p@example.com:443?security=tls#t")
+
+    cfg = _s.build_config(proxy, [], upstream_dns="172.20.10.1")
+    first = cfg["dns"]["servers"][0]
+    if first != {"type": "udp", "server": "172.20.10.1", "tag": "local"}:
+        raise AssertionError(f"direct upstream not used: {first}")
+    # NO detour: 1.12 aborts at start on `detour: direct` ("empty direct outbound
+    # makes no sense") even though `sing-box check` accepts it. Without a detour
+    # the server is dialed directly on the physical NIC already.
+    if cfg["dns"]["final"] != "local":
+        raise AssertionError("final no longer points at the network resolver")
+
+    if not _s._IS_LINUX:
+        fallback = _s.build_config(proxy, [])["dns"]["servers"][0]
+        if fallback.get("type") != "local":
+            raise AssertionError("no-upstream case must keep the old local resolver")
+
+    # Discovery must never hand back our own TUN or a loopback stub.
+    orig, plat = _nr._ps, _s.sys.platform
+    try:
+        _s.sys.platform = "win32"
+        for out, want in (("10.255.0.3,172.20.10.1\n", "172.20.10.1"),
+                          ("127.0.0.1\n", ""), ("", "")):
+            _nr._ps = lambda *a, _o=out, **k: (0, _o, "")
+            got = _s.windows_upstream_dns("203.0.113.5")
+            if got != want:
+                raise AssertionError(f"discovery on {out!r} gave {got!r}, want {want!r}")
+    finally:
+        _nr._ps, _s.sys.platform = orig, plat
+
+    import inspect
+    if "windows_upstream_dns(" not in inspect.getsource(_s.write_config):
+        raise AssertionError("write_config no longer discovers the network resolver")
+
+
+check("dns: Windows asks the network resolver directly, no 5 s loop (v3.7.6)",
+      _windows_dns_asks_the_network_directly)
+
+
+
+def _lan_kept_off_the_tun() -> None:
+    """v3.7.6: LAN must leave the TUN at the ROUTE level, not just via the
+    `direct` rule. With the rule alone, INBOUND LAN connections broke: a
+    printer scanning to this PC over FTP got its reply routed into the TUN and
+    dropped by gVisor ("Connection to the server has failed" only while the VPN
+    was on)."""
+    from kapro_tun.core import sing_box_config as sb
+    from kapro_tun.core.parser import parse as _p
+    proxy = _p("trojan://p@example.com:443?security=tls#t")
+    _o_linux = sb._IS_LINUX
+    sb._IS_LINUX = False
+    try:
+        for games in (False, True):
+            excl = sb.build_config(proxy, [], games_direct=games)["inbounds"][0].get(
+                "route_exclude_address") or []
+            for lan in ("192.168.0.0/16", "172.16.0.0/12", "169.254.0.0/16"):
+                if lan not in excl:
+                    raise AssertionError(f"{lan} not excluded from the TUN (games={games})")
+            # The TUN's own subnet (and its DNS 10.255.0.3) must stay captured.
+            if any(c.startswith("10.") for c in excl):
+                raise AssertionError("10.0.0.0/8 must not be excluded — the TUN lives there")
+            if "0.0.0.0/0" in excl:
+                raise AssertionError("0.0.0.0/0 excluded — that would bypass the VPN entirely")
+    finally:
+        sb._IS_LINUX = _o_linux
+
+
+check("tun: LAN excluded from the TUN at route level, inbound LAN works (v3.7.6)",
+      _lan_kept_off_the_tun)
 
 
 

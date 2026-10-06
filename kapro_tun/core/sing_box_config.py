@@ -72,6 +72,31 @@ PRIVATE_CIDRS: list[str] = [
     "255.255.255.255/32",  # limited broadcast
 ]
 
+# LAN ranges excluded from the TUN at the ROUTE level (v3.7.6), on top of the
+# `direct` rule for PRIVATE_CIDRS above.
+#
+# The `direct` rule alone is not enough for the local network. Outbound LAN
+# traffic still crosses the gVisor userspace stack (same tax as the games, see
+# _GAME_DIRECT_CIDRS), and INBOUND LAN connections break outright: a printer
+# scanning to this PC over FTP, an SMB share, RDP from another machine. The
+# LAN host's packet arrives on the physical NIC, but Windows routes our reply
+# into the TUN, where gVisor has no flow for it and drops it — so the printer
+# reports "Connection to the server has failed" while the VPN is on and works
+# the moment it is off. Excluded here, LAN goes straight out the physical NIC,
+# exactly as with the VPN switched off.
+#
+# 10.0.0.0/8 is deliberately NOT excluded: our own TUN subnet (10.255.0.0/30,
+# DNS 10.255.0.3) lives inside it and must stay captured for the DNS hijack.
+# A 10.x LAN keeps the old behaviour (`direct` rule).
+_LAN_ROUTE_EXCLUDE: list[str] = [
+    "192.168.0.0/16",
+    "172.16.0.0/12",
+    "169.254.0.0/16",
+    "224.0.0.0/4",
+    "255.255.255.255/32",
+]
+
+
 # IPv6 LAN / ULA / link-local / multicast — kept DIRECT (NAS, printers, local
 # discovery keep working) and, crucially, NOT rejected by the global-v6 reject
 # rule below. Everything else in global unicast (2000::/3) is rejected in-tunnel.
@@ -328,7 +353,7 @@ def _games_direct_rules() -> list[dict[str, Any]]:
     ]
 
 
-def _dns_block() -> dict[str, Any]:
+def _dns_block(upstream_dns: str = "") -> dict[str, Any]:
     """DNS is ALWAYS the system resolver (v3.1.1).
 
     The previous custom DoH / smart-split resolver was DPI-throttled on many
@@ -382,15 +407,82 @@ def _dns_block() -> dict[str, Any]:
             "final": "local",
             "strategy": "ipv4_only",
         }
+    # Windows: the `local` server above turned out NOT to be loop-free, whatever
+    # the docstring assumed. It resolves through the Windows DNS client, which
+    # asks the highest-priority interface first — our own KaproTun, whose DNS is
+    # 10.255.0.3 — so the query is hijacked straight back into this module,
+    # which asks the DNS client again. Windows gives up on that server after
+    # ~5 s and falls through to the real network's resolver. Measured on a live
+    # session: the network's own DNS answered in 135-207 ms, every fresh name
+    # through the tunnel took 5.0-5.2 s, and 10.255.0.3 never answered at all.
+    # Every uncached lookup paid those 5 s — which is exactly the timeout the
+    # League client and Vanguard use, so they failed with "Resolving timed out
+    # after 5006 milliseconds" and VAN 68.
+    #
+    # So, as on Linux, ask the physical network's resolver directly, over the
+    # physical NIC, so nothing re-enters the tunnel. Same resolver, same ISP visibility as before — just
+    # without going the long way round. When the upstream can't be discovered
+    # we keep `local`: slower on some networks, never worse than before.
+    if upstream_dns:
+        # No `detour`: a DNS server without one dials through sing-box's default
+        # dialer — straight out the physical NIC (auto_detect_interface), not
+        # through the proxy. 1.12 refuses `detour: direct` at START with "detour
+        # to an empty direct outbound makes no sense"; `sing-box check` does not
+        # catch that, which is how the first cut of this fix reached a live
+        # connect and failed it.
+        local_server = {"type": "udp", "server": upstream_dns, "tag": "local"}
+    else:
+        local_server = {"type": "local", "tag": "local"}
     return {
         "servers": [
-            {"type": "local", "tag": "local"},
+            local_server,
             proxy_dns,
         ],
         "rules": [poison_rule],
         "final": "local",
         "strategy": "ipv4_only",
     }
+
+
+# Addresses that are never a usable upstream: loopback stubs, and our own TUN
+# subnet (a KaproTun left over from a crash still advertises 10.255.0.3).
+_NOT_AN_UPSTREAM = ("127.", "0.", "10.255.0.")
+
+
+def windows_upstream_dns(server_ip: str = "") -> str:
+    """IPv4 DNS server of the interface Windows would use to reach the VPN
+    server, i.e. the real network's resolver — or "" when it can't be read.
+
+    Called once per connect from write_config, before the tunnel is up, so the
+    route lookup still sees the physical NIC. One PowerShell round-trip."""
+    if sys.platform != "win32":
+        return ""
+    target = server_ip if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", server_ip or "") else "1.1.1.1"
+    try:
+        from . import network_routes
+        rc, out, _ = network_routes._ps(
+            # The route Windows would use to the server, unless that is our own
+            # TUN (still up during a fast reconnect, or left over from a crash)
+            # — then the physical default route with the lowest metric instead.
+            f"$r = Find-NetRoute -RemoteIPAddress '{target}' -ErrorAction "
+            f"SilentlyContinue | Where-Object {{ $_.InterfaceIndex -and "
+            f"$_.InterfaceAlias -ne '{TUN_DEVICE_NAME}' }} | Select-Object -First 1; "
+            f"if (-not $r) {{ $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' "
+            f"-AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {{ "
+            f"$_.InterfaceAlias -ne '{TUN_DEVICE_NAME}' -and $_.NextHop -ne '0.0.0.0' }} "
+            f"| Sort-Object RouteMetric | Select-Object -First 1 }}; "
+            f"if ($r) {{ (Get-DnsClientServerAddress -InterfaceIndex $r.InterfaceIndex "
+            f"-AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses -join ',' }}",
+            timeout=8.0,
+        )
+    except Exception:
+        return ""
+    if rc != 0:
+        return ""
+    for ip in re.findall(r"\b\d+\.\d+\.\d+\.\d+\b", out or ""):
+        if not ip.startswith(_NOT_AN_UPSTREAM):
+            return ip
+    return ""
 
 
 def _linux_upstream_dns() -> str:
@@ -424,6 +516,7 @@ def build_config(
     bypass_apps: list | None = None,
     log_level: str = "warn",
     on_log=None,
+    upstream_dns: str = "",
 ) -> dict[str, Any]:
     """Full sing-box config dict for TUN mode. Raises UnsupportedBySingBox if
     the proxy can't be faithfully reproduced. `on_log` (optional) receives
@@ -528,7 +621,7 @@ def build_config(
     # the signature for callers/future use.
     _ = (block_ads, on_log, dns_option, dns_leak_protection)
 
-    dns_block = _dns_block()
+    dns_block = _dns_block(upstream_dns)
     # Platform-split TUN inbound. Windows/macOS: native auto_route owns routing
     # and captures both v4+v6. Linux (kernel 7.0+): auto_route's netlink calls
     # fail with "add route 0: invalid argument", so we run it OFF and lay routes
@@ -556,8 +649,12 @@ def build_config(
     # Without this the game's packets still cross the userspace stack even when
     # a rule sends them `direct`, which is what made the tunnel add multi-second
     # stalls to League while the client was running.
-    if games_direct and not _IS_LINUX:
-        tun_inbound["route_exclude_address"] = list(_GAME_DIRECT_CIDRS)
+    # LAN is always excluded the same way (v3.7.6) — see _LAN_ROUTE_EXCLUDE.
+    if not _IS_LINUX:
+        exclude = list(_LAN_ROUTE_EXCLUDE)
+        if games_direct:
+            exclude += list(_GAME_DIRECT_CIDRS)
+        tun_inbound["route_exclude_address"] = exclude
     route_block: dict[str, Any] = {
         "rules": rules,
         "final": "proxy",
@@ -611,12 +708,17 @@ def write_config(
     """Build + atomically write the runtime config (user-only perms; it carries
     the server UUID/password). Deleted on disconnect via
     paths.remove_runtime_configs(). NEVER log its contents."""
+    upstream = windows_upstream_dns(server_ip)
+    if on_log:
+        on_log(f"[*] DNS: {upstream} напрямую (резолвер сети)" if upstream
+               else "[*] DNS: системный резолвер (резолвер сети не определён)")
     config = build_config(
         proxy, direct_domains,
         server_ip=server_ip, dns_option=dns_option,
         dns_leak_protection=dns_leak_protection, block_ads=block_ads,
         route_ru_direct=route_ru_direct, high_speed=high_speed,
         games_direct=games_direct, bypass_apps=bypass_apps, on_log=on_log,
+        upstream_dns=upstream,
     )
     target = paths.write_secure_text(
         paths.sing_box_runtime_config_file(),
