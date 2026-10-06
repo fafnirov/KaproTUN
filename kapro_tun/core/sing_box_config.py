@@ -727,6 +727,121 @@ def write_config(
     return str(target)
 
 
+# --- proxy mode (v3.8.0) ----------------------------------------------------
+# macOS will not let an unprivileged process create a utun device, so the TUN
+# engine there means an administrator password on every launch. Proxy mode is
+# the answer that needs no privilege at all: sing-box runs as the user with a
+# local SOCKS+HTTP listener, and the client points the macOS system proxy at
+# it. The price is coverage — only apps that honour the system proxy are
+# carried — which is why TUN stays available to anyone who launches as root.
+PROXY_LISTEN_HOST = "127.0.0.1"
+PROXY_LISTEN_PORT = 2080
+# Local-only control API, used for one thing: reading the session's byte
+# totals for the traffic graph. There is no TUN interface to read kernel
+# counters from in this mode.
+CLASH_API_PORT = 2083
+
+
+def build_proxy_config(
+    proxy,
+    direct_domains: list[str],
+    *,
+    server_ip: str = "",
+    route_ru_direct: bool = False,
+    api_secret: str = "",
+    log_level: str = "warn",
+) -> dict[str, Any]:
+    """sing-box config for proxy mode: no TUN inbound, nothing that needs root.
+
+    Same split as the TUN config, in the same precedence — always-proxy
+    services, the user's direct list, LAN, then geoip:ru — so a site behaves
+    identically in both modes. One structural difference: a proxy client hands
+    us a HOSTNAME, where the TUN hands us an IP. The ip_cidr rules therefore
+    need an explicit `resolve` step first, and it is placed AFTER the domain
+    rules on purpose: a force-proxied (typically blocked) domain is matched by
+    name and never looked up on the local, possibly tampered, resolver."""
+    outbound = dict(proxy.outbound)
+    ensure_supported(outbound)
+    ensure_transport_supported(proxy)
+    outbound["tag"] = "proxy"
+    if server_ip:
+        outbound["server"] = server_ip
+
+    rules: list[dict[str, Any]] = [
+        # A SOCKS client may pass a bare IP; sniffing recovers the hostname
+        # from TLS SNI / HTTP Host so the domain rules still apply to it.
+        {"action": "sniff"},
+        {"inbound": ["health-probe"], "action": "route", "outbound": "proxy"},
+        {"domain_suffix": list(_ALWAYS_PROXY_SUFFIXES),
+         "action": "route", "outbound": "proxy"},
+    ]
+    cleaned_domains = sorted({d.strip().lower() for d in direct_domains if d.strip()})
+    if cleaned_domains:
+        rules.append({"domain_suffix": cleaned_domains, "action": "route",
+                      "outbound": "direct"})
+    rules.append({"action": "resolve"})
+    rules.append({"ip_cidr": list(PRIVATE_CIDRS) + list(PRIVATE_CIDRS6),
+                  "action": "route", "outbound": "direct"})
+    if route_ru_direct:
+        ru = _ru_cidrs()
+        if ru:
+            rules.append({"ip_cidr": ru, "action": "route", "outbound": "direct"})
+
+    dns_block = _dns_block()
+    config: dict[str, Any] = {
+        "log": {"level": log_level, "timestamp": True},
+        "dns": dns_block,
+        "inbounds": [
+            {"type": "mixed", "tag": "proxy-in",
+             "listen": PROXY_LISTEN_HOST, "listen_port": PROXY_LISTEN_PORT},
+            # Same loopback health inbound as the TUN config, so readiness and
+            # runtime health checks are shared code, not a second variant.
+            {"type": "mixed", "tag": "health-probe",
+             "listen": HEALTH_PROXY_HOST, "listen_port": HEALTH_PROXY_PORT},
+        ],
+        "outbounds": [
+            outbound,
+            {"type": "direct", "tag": "direct"},
+        ],
+        "route": {
+            "rules": rules,
+            "final": "proxy",
+            "default_domain_resolver": {"server": dns_block["final"]},
+        },
+    }
+    if api_secret:
+        # Bound to loopback AND secret-protected: the Clash API can close
+        # connections and switch modes, so "local only" is not enough on a
+        # machine where any process can reach 127.0.0.1.
+        config["experimental"] = {"clash_api": {
+            "external_controller": f"{PROXY_LISTEN_HOST}:{CLASH_API_PORT}",
+            "secret": api_secret,
+        }}
+    return config
+
+
+def write_proxy_config(
+    proxy,
+    direct_domains: list[str],
+    *,
+    server_ip: str = "",
+    route_ru_direct: bool = False,
+    api_secret: str = "",
+) -> str:
+    """Build + atomically write the proxy-mode runtime config. Same file, same
+    user-only permissions and same delete-on-disconnect lifecycle as the TUN
+    config — it carries the same credentials."""
+    config = build_proxy_config(
+        proxy, direct_domains, server_ip=server_ip,
+        route_ru_direct=route_ru_direct, api_secret=api_secret,
+    )
+    target = paths.write_secure_text(
+        paths.sing_box_runtime_config_file(),
+        json.dumps(config, indent=2, ensure_ascii=False),
+    )
+    return str(target)
+
+
 def check_config(config_path: str) -> tuple[bool, str]:
     """Run `sing-box check -c <path>`. Returns (ok, message). Used to validate
     the generated config before starting the real process."""

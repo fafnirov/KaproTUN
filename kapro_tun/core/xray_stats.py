@@ -146,3 +146,41 @@ def format_bytes(total: int) -> str:
     if total < 1024 * 1024 * 1024:
         return f"{total / (1024 * 1024):.1f} МБ"
     return f"{total / (1024 * 1024 * 1024):.2f} ГБ"
+
+
+def query_clash_totals(host: str, port: int, secret: str,
+                       timeout: float = 0.8) -> Optional[TrafficStats]:
+    """Session byte totals from sing-box's local Clash API (proxy mode).
+
+    Proxy mode has no TUN interface, so there are no kernel counters to read:
+    the traffic shares the physical NIC with everything else. sing-box keeps
+    its own running totals and serves them on a loopback, secret-protected
+    endpoint; one small GET per second replaces the psutil read.
+
+    Counts everything sing-box relayed, direct and proxied alike — the same
+    scope as the TUN counters, which also see both. Returns None on any
+    failure (API not up yet, request timed out), exactly like the TUN reader,
+    so callers treat the two sources identically.
+    """
+    try:
+        import requests
+        session = requests.Session()
+        # Never route this through a system/env proxy: in proxy mode the system
+        # proxy IS sing-box, and asking it for its own control API through
+        # itself would be absurd at best.
+        session.trust_env = False
+        r = session.get(
+            f"http://{host}:{port}/connections",
+            headers={"Authorization": f"Bearer {secret}"},
+            timeout=timeout,
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        return TrafficStats(
+            uplink_bytes=int(data.get("uploadTotal", 0)),
+            downlink_bytes=int(data.get("downloadTotal", 0)),
+            timestamp=time.time(),
+        )
+    except Exception:
+        return None

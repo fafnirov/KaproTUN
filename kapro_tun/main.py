@@ -10,8 +10,8 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSplashScreen
 
 from .core import (app_log, autostart, firewall_sweep, i18n, ipv6_block, killswitch,
-                   linux_tun_route, storage, system_proxy, tun_recovery,
-                   webrtc_block)
+                   linux_tun_route, proxy_session, storage, system_proxy,
+                   tun_recovery, webrtc_block)
 from .gui import icons
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
@@ -173,6 +173,15 @@ def _run_app() -> int:
     # pointing at our dead local port. Clear it before any downloads
     # (xray installer, geoip, updater) try to route through nothing.
     _clear_stale_system_proxy()
+    # Proxy mode (macOS): a session that died without restoring the system
+    # proxy left it pointing at a closed port — every browser on the machine
+    # is offline until that is undone. The journal holds the settings from
+    # before the session, so this restores them rather than just switching off.
+    try:
+        if proxy_session.recover():
+            app_log.log("[proxy] restored system proxy left by an unclean exit")
+    except Exception:
+        pass
 
     # Also defensive: a crashed previous run may have left orphan
     # xray.exe / tun2socks.exe processes holding file handles, which

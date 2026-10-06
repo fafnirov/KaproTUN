@@ -360,6 +360,9 @@ class SettingsPage(QWidget):
         self._admin_row = QHBoxLayout()
         self._admin_label = QLabel()
         self._admin_label.setObjectName("dim")
+        # The proxy-mode explanation is a full sentence; let it wrap instead
+        # of clipping in the fixed-width window.
+        self._admin_label.setWordWrap(True)
         self._admin_row.addWidget(self._admin_label, stretch=1)
         self._relaunch_btn = QPushButton(tr("mw.relaunch_admin"))
         self._relaunch_btn.clicked.connect(self._on_relaunch_admin)
@@ -894,14 +897,28 @@ class SettingsPage(QWidget):
         if admin.is_admin():
             self._admin_label.setText(tr("mw.admin_yes"))
             self._relaunch_btn.setVisible(False)
+        elif self._manager.planned_mode() != MODE_TUN:
+            # macOS without root: proxy mode works as-is, so this is not a
+            # warning. Say what the mode covers, and leave the full TUN one
+            # click away for whoever wants every app tunnelled and accepts
+            # the password prompt that goes with it.
+            self._admin_label.setText(tr("mw.proxy_mode_info"))
+            self._relaunch_btn.setText(tr("mw.relaunch_tun"))
+            self._relaunch_btn.setVisible(True)
         else:
             self._admin_label.setText(tr("mw.admin_no"))
+            self._relaunch_btn.setText(tr("mw.relaunch_admin"))
             self._relaunch_btn.setVisible(True)
 
     def _on_relaunch_admin(self) -> None:
         import sys
         rc = admin.relaunch_as_admin()
-        if rc > 32:
+        # ShellExecuteW reports success as a value above 32; the macOS and
+        # Linux helpers return 1. Testing "> 32" everywhere made every
+        # successful relaunch off Windows show the failure dialog and leave
+        # this unprivileged copy running next to the elevated one.
+        launched = rc > 32 if sys.platform == "win32" else rc > 0
+        if launched:
             # New elevated instance is starting. Quit this one.
             sys.exit(0)
         else:
@@ -1682,6 +1699,8 @@ class MainWindow(QMainWindow):
 
     def _engine_tag(self) -> str:
         """Short status-line label for the active dataplane."""
+        if self.manager.current_mode() != MODE_TUN:
+            return tr("mw.engine_proxy")
         return "TUN · sing-box"
 
     def _engine_is_sing_box(self) -> bool:
@@ -1905,7 +1924,7 @@ class MainWindow(QMainWindow):
         Reads kernel byte counters from the sing-box TUN interface via psutil
         (rock-solid, zero subprocess overhead) — the counters exist as soon as
         sing-box brings the "KaproTun" interface up."""
-        sample = xray_stats.query_tun_iface_stats(sing_box_config.TUN_DEVICE_NAME)
+        sample = self.manager.traffic_sample()
         if sample is None:
             return
         if self._prev_traffic is None:
@@ -2050,18 +2069,32 @@ class MainWindow(QMainWindow):
             if not self.manager.is_connected():
                 return
             inactive = self.manager.inactive_protections()
+            proxy_off = self.manager.system_proxy_applied is False
         except Exception:
             return
-        if not inactive:
+        notices = []
+        if proxy_off:
+            # Proxy mode came up but macOS refused the system-proxy change:
+            # the listener works, yet nothing is using it. Without this the
+            # window would say "connected" over a VPN that carries nothing.
+            notices.append(tr(
+                "mw.proxy_not_applied",
+                addr=f"{sing_box_config.PROXY_LISTEN_HOST}:"
+                     f"{sing_box_config.PROXY_LISTEN_PORT}"))
+        if inactive:
+            items = "; ".join(
+                f"{tr('prot.' + name)} — {tr('prot.reason.' + state)}"
+                for name, state in inactive)
+            notices.append(tr("mw.protection_inactive", items=items))
+            app_log.log("[protection] inactive after connect: "
+                        + ", ".join(f"{n}={s}" for n, s in inactive))
+        if not notices:
             return
-        items = "; ".join(
-            f"{tr('prot.' + name)} — {tr('prot.reason.' + state)}"
-            for name, state in inactive)
-        self.logs_page.append(f"[!] {tr('mw.protection_inactive', items=items)}")
-        app_log.log("[protection] inactive after connect: "
-                    + ", ".join(f"{n}={s}" for n, s in inactive))
-        show_toast(self, tr("mw.protection_inactive", items=items),
-                   kind="error", duration_ms=12000)
+        for note in notices:
+            self.logs_page.append(f"[!] {note}")
+        # One toast for everything: show_toast replaces the one on screen, so
+        # two separate warnings would leave only the second visible.
+        show_toast(self, "\n".join(notices), kind="error", duration_ms=15000)
 
     def _on_connect_success(self) -> None:
         self._connecting = False

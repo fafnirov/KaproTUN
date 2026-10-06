@@ -12,7 +12,8 @@ from typing import Callable, Optional
 
 from . import (
     admin, app_log, dns_health, ipv6_block, killswitch, linux_tun_route,
-    paths, proc_stats, storage, tun_recovery, webrtc_block, xray_stats,
+    paths, proc_stats, proxy_session, storage, tun_recovery, webrtc_block,
+    xray_stats,
 )
 from .i18n import tr
 from .parser import ProxyConfig
@@ -25,7 +26,7 @@ class ConnectionError(Exception):
 
 
 # Connection modes
-MODE_HTTP_PROXY = "http"   # Browser-only, sets Windows system HTTP proxy. No admin needed.
+MODE_HTTP_PROXY = "http"   # Proxy mode (v3.8.0, macOS): local SOCKS+HTTP listener + system proxy. No admin needed; only proxy-aware apps are carried.
 MODE_TUN = "tun"           # System-wide TUN tunnel. Needs admin. Works for all apps incl. Telegram, Steam.
 
 # TUN dataplane engines (v3.0.0)
@@ -224,6 +225,15 @@ class ConnectionManager:
         self._active: Optional[ProxyConfig] = None
         # Which TUN engine the live session is using (None when disconnected).
         self._active_engine: Optional[str] = None
+        # Mode of the LIVE session (MODE_TUN / MODE_HTTP_PROXY), None when
+        # disconnected — see planned_mode() for what the next connect will use.
+        self._active_mode: Optional[str] = None
+        # Proxy mode only. Per-session secret for sing-box's loopback control
+        # API (traffic totals), and whether the system proxy verifiably took
+        # effect: True / False, or None when not in a proxy session. False is
+        # a state the UI must report — sing-box is up but nothing is using it.
+        self._api_secret: str = ""
+        self.system_proxy_applied: Optional[bool] = None
         # Roaming detection (v3.4.0): the resolved server IP + the local source
         # IP the OS uses to reach it, snapshotted at connect. sing-box's
         # auto_route pins the tunnel to the interface that was default then; on a
@@ -253,7 +263,10 @@ class ConnectionManager:
         if self.is_connected():
             raise ConnectionError(tr("err.already_connected"))
         try:
-            self._connect_tun_sing_box(config, direct_domains)
+            if self.planned_mode() == MODE_HTTP_PROXY:
+                self._connect_proxy_sing_box(config, direct_domains)
+            else:
+                self._connect_tun_sing_box(config, direct_domains)
         except sing_box_config.UnsupportedBySingBox as e:
             raise ConnectionError(tr("err.unsupported_server", error=e)) from e
 
@@ -264,6 +277,13 @@ class ConnectionManager:
         # presence on next startup means a session died uncleanly), wipe the
         # credential-bearing runtime config, then take down the firewall rules.
         tun_recovery.clear()
+        # Proxy mode: give the system proxy back BEFORE the listener goes away,
+        # so no app is left pointing at a port that is about to close. A no-op
+        # when there is no proxy session (no journal on disk).
+        try:
+            proxy_session.end()
+        except Exception as e:
+            self._log(f"[!] Системный прокси: не удалось вернуть настройки: {e}")
         if self.sing_box_process.is_running():
             self.sing_box_process.stop()
         # Linux: undo the manual routes + resolvectl DNS we laid in place of
@@ -302,6 +322,9 @@ class ConnectionManager:
         self.protection_status = {}
         self._active = None
         self._active_engine = None
+        self._active_mode = None
+        self._api_secret = ""
+        self.system_proxy_applied = None
         self._server_ip = ""
         self._egress_fp = None
 
@@ -354,9 +377,34 @@ class ConnectionManager:
         self.settings.update(changes)
         storage.save_settings(self.settings)
 
-    def current_mode(self) -> str:
-        # v3.1.0: TUN is the only mode (HTTP-proxy mode was removed with Xray).
+    def planned_mode(self) -> str:
+        """Mode the NEXT connect will use.
+
+        macOS without root → proxy mode: creating a utun device needs root, and
+        asking for an administrator password on every launch is exactly what
+        this mode exists to avoid. Launched as root, macOS keeps the full TUN.
+        Windows and Linux are TUN-only, as before."""
+        if sys.platform == "darwin" and not admin.is_admin():
+            return MODE_HTTP_PROXY
         return MODE_TUN
+
+    def current_mode(self) -> str:
+        """Mode of the live session, or the planned one when disconnected."""
+        return self._active_mode or self.planned_mode()
+
+    def traffic_sample(self):
+        """Cumulative byte counters for the live session, or None.
+
+        One accessor for both modes so the traffic graph and the health check
+        never need to know which is active: kernel counters off the TUN device,
+        or sing-box's own totals in proxy mode, where there is no such device."""
+        if self.current_mode() == MODE_HTTP_PROXY:
+            if not self._api_secret:
+                return None
+            return xray_stats.query_clash_totals(
+                sing_box_config.PROXY_LISTEN_HOST,
+                sing_box_config.CLASH_API_PORT, self._api_secret)
+        return xray_stats.query_tun_iface_stats(sing_box_config.TUN_DEVICE_NAME)
 
     def tun_dns_guarded(self) -> bool:
         """True when the live sing-box TUN owns the system DNS path. sing-box
@@ -384,8 +432,7 @@ class ConnectionManager:
         data path is alive by definition, whatever a timed-out HTTP probe says.
         First call after connect has no baseline and returns False."""
         try:
-            sample = xray_stats.query_tun_iface_stats(
-                sing_box_config.TUN_DEVICE_NAME)
+            sample = self.traffic_sample()
         except Exception:
             return False
         if sample is None:
@@ -765,6 +812,99 @@ class ConnectionManager:
         self._active_engine = ENGINE_SING_BOX
         # Snapshot the egress fingerprint so the GUI's network-change watchdog
         # can detect an Ethernet↔Wi-Fi roam and clean-reconnect (v3.4.0).
+        self._server_ip = server_ip
+        self._egress_fp = self._egress_fingerprint()
+
+    def _connect_proxy_sing_box(self, config: ProxyConfig,
+                                direct_domains: list[str]) -> None:
+        """Proxy-mode connect (v3.8.0): nothing here needs root.
+
+        sing-box runs as the user with a loopback SOCKS+HTTP listener, then the
+        system proxy is pointed at it. No TUN device, no routes, no firewall
+        rules — which is also why there is no kill-switch and no STUN block in
+        this mode: both are firewall rules, and both need privileges we are
+        deliberately not asking for."""
+        if not sing_box_installer.is_installed():
+            raise ConnectionError(tr("err.singbox_not_installed"))
+        server_host = str(config.outbound.get("server", "")).strip()
+        if not server_host:
+            raise ConnectionError(tr("err.no_server_address"))
+        try:
+            server_ip = socket.gethostbyname(server_host)
+        except socket.gaierror as e:
+            raise ConnectionError(
+                tr("err.resolve_failed", host=server_host, error=e)) from e
+
+        self._log("[*] Движок: sing-box, режим прокси (без TUN, права "
+                  "администратора не нужны)")
+        import secrets as _secrets
+        self._api_secret = _secrets.token_hex(16)
+        self._active_mode = MODE_HTTP_PROXY
+        self.protection_status = {}
+        # The user explicitly switched the kill-switch on and it cannot be in
+        # force here — report it rather than let the ticked box imply it is.
+        # (The STUN block defaults on, so it is covered by the log line below
+        # instead of by a warning on every single connect.)
+        if self.settings.get("kill_switch", False):
+            self.protection_status["kill_switch"] = "unsupported"
+        self._log("[*] В режиме прокси нет kill-switch и блокировки WebRTC: "
+                  "это правила firewall, им нужны права администратора")
+
+        try:
+            cfg_path = sing_box_config.write_proxy_config(
+                config, direct_domains, server_ip=server_ip,
+                route_ru_direct=bool(self.settings.get("route_ru_direct", True)),
+                api_secret=self._api_secret,
+            )
+            ok, msg = sing_box_config.check_config(cfg_path)
+            if not ok:
+                raise ConnectionError(tr("err.singbox_rejected_config", msg=msg))
+            try:
+                self.sing_box_process.start(cfg_path)
+            except Exception as e:
+                raise ConnectionError(
+                    tr("err.singbox_start_failed", error=e)) from e
+            if not self._wait_until_running(4.0):
+                tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
+                raise ConnectionError(
+                    tr("err.singbox_died_on_start") + (f":\n{tail}" if tail else "."))
+            self._log("[*] Проверяю, что прокси sing-box пропускает трафик…")
+            if not self._wait_for_singbox_ready(15.0):
+                diag = [l for l in self.sing_box_process.recent_logs()
+                        if not is_benign_noise(l, live=False)]
+                tail = "\n".join(diag[-6:])
+                raise ConnectionError(
+                    tr("err.singbox_no_real_traffic")
+                    + (tr("err.singbox_diag_tail", tail=tail) if tail else ""))
+            self.sing_box_process.mark_live()
+        except Exception:
+            self.sing_box_process.stop()
+            paths.remove_runtime_configs()
+            self._active_mode = None
+            self._api_secret = ""
+            self.protection_status = {}
+            raise
+
+        # Only now, with a listener that is proven to carry traffic, touch the
+        # system: pointing the proxy at a dead port would cut the user off.
+        host, port = (sing_box_config.PROXY_LISTEN_HOST,
+                      sing_box_config.PROXY_LISTEN_PORT)
+        self.system_proxy_applied = proxy_session.begin(host, port)
+        if self.system_proxy_applied:
+            self._log(f"[*] Системный прокси включён ({host}:{port}) — браузеры "
+                      "и приложения, использующие системный прокси, идут через VPN.")
+        else:
+            # Not a failed connect: the listener works and can be used by
+            # anything pointed at it by hand. But it is NOT what the user
+            # expects from pressing Connect, so it is said plainly.
+            self._log(f"[!] Не удалось включить системный прокси (macOS не "
+                      f"разрешила менять сетевые настройки этой учётной записи). "
+                      f"Прокси работает на {host}:{port} — укажи его вручную в "
+                      f"Системные настройки → Сеть → Прокси или в браузере.")
+            app_log.log("[proxy] system proxy NOT applied; listener is up")
+
+        self._active = config
+        self._active_engine = ENGINE_SING_BOX
         self._server_ip = server_ip
         self._egress_fp = self._egress_fingerprint()
 

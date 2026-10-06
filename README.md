@@ -30,9 +30,19 @@ Latest stable release — pick the file for your OS:
 
 A portable `KaproTUN.exe` is also published for Windows if you'd rather not install.
 
-**Connecting needs admin/root.** KaproTUN is TUN-only: it creates a virtual
-network adapter to tunnel every app system-wide (browsers, games, Telegram),
-and creating one requires elevation. The app asks for it when you connect.
+**On Windows and Linux, connecting needs admin/root.** There KaproTUN runs in
+TUN mode: it creates a virtual network adapter to tunnel every app system-wide
+(browsers, games, Telegram), and creating one requires elevation. The app asks
+for it when you connect.
+
+**On macOS no administrator password is needed.** macOS does not let an
+unprivileged process create a tunnel interface, so by default the client runs
+in proxy mode there: the engine starts as the ordinary user and the client
+switches the system proxy on by itself. Browsers and apps that use the system
+proxy go through the VPN; games, UDP and programs that ignore the proxy do not.
+There is no kill-switch and no WebRTC block in this mode. If you want every app
+tunnelled, Settings has a button for the full TUN — macOS then asks for the
+password once per launch.
 
 #### ⚠️ Windows SmartScreen warning on first run
 

@@ -148,6 +148,20 @@ def _win_restore(state: dict) -> None:
 # macOS — networksetup
 # ============================================================================
 
+_NETWORKSETUP = "/usr/sbin/networksetup"
+
+# (state key, get verb, set verb, on/off verb, default port). The three proxy
+# slots macOS keeps per network service. SOCKS is set alongside HTTP/HTTPS so
+# apps that only speak SOCKS are carried too; sing-box's `mixed` inbound
+# answers all three on one port.
+_MAC_SLOTS = (
+    ("http", "-getwebproxy", "-setwebproxy", "-setwebproxystate", "80"),
+    ("https", "-getsecurewebproxy", "-setsecurewebproxy", "-setsecurewebproxystate", "443"),
+    ("socks", "-getsocksfirewallproxy", "-setsocksfirewallproxy",
+     "-setsocksfirewallproxystate", "1080"),
+)
+
+
 def _mac_run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         args, capture_output=True, text=True, timeout=10, check=check,
@@ -164,7 +178,7 @@ def _mac_active_services() -> list[str]:
     web-proxy slots.
     """
     try:
-        proc = _mac_run(["/usr/sbin/networksetup", "-listallnetworkservices"], check=False)
+        proc = _mac_run([_NETWORKSETUP, "-listallnetworkservices"], check=False)
     except (OSError, subprocess.SubprocessError):
         return []
     services: list[str] = []
@@ -177,16 +191,15 @@ def _mac_active_services() -> list[str]:
 
 
 def _mac_get_state() -> dict:
-    """Snapshot getwebproxy / getsecurewebproxy for every active service.
+    """Snapshot the HTTP / HTTPS / SOCKS proxy slots of every active service.
 
-    Output is a nested dict {service_name: {http: {...}, https: {...}}}.
+    Output is a nested dict {service_name: {http: {...}, https: {...},
+    socks: {...}}}.
     """
     snapshot: dict[str, dict[str, dict[str, str]]] = {}
     for svc in _mac_active_services():
-        snapshot[svc] = {
-            "http":  _mac_query_one(svc, "-getwebproxy"),
-            "https": _mac_query_one(svc, "-getsecurewebproxy"),
-        }
+        snapshot[svc] = {key: _mac_query_one(svc, get_verb)
+                         for key, get_verb, _set, _state, _port in _MAC_SLOTS}
     return {"_os": "mac", "services": snapshot}
 
 
@@ -201,7 +214,7 @@ def _mac_query_one(service: str, verb: str) -> dict[str, str]:
     """
     out: dict[str, str] = {}
     try:
-        proc = _mac_run(["/usr/sbin/networksetup", verb, service], check=False)
+        proc = _mac_run([_NETWORKSETUP, verb, service], check=False)
     except (OSError, subprocess.SubprocessError):
         return out
     for line in proc.stdout.splitlines():
@@ -213,62 +226,80 @@ def _mac_query_one(service: str, verb: str) -> dict[str, str]:
 
 
 def _mac_set_proxy(host: str, port: int, override: str) -> None:
-    """Enable both HTTP and HTTPS system proxy on every active service.
+    """Point HTTP, HTTPS and SOCKS at host:port on every active service.
 
     `<local>` (Windows convention) translates to bypass entries for
     *.local, 169.254/16, and the standard localhost set.
+
+    Failures are swallowed per service (a Bluetooth PAN has no proxy slots),
+    which is exactly why callers must not treat a clean return as success —
+    use mac_proxy_points_at() to find out what actually took effect.
     """
     bypass = _mac_bypass_list(override)
     for svc in _mac_active_services():
-        try:
-            _mac_run(["/usr/sbin/networksetup", "-setwebproxy", svc, host, str(port)])
-            _mac_run(["/usr/sbin/networksetup", "-setsecurewebproxy", svc, host, str(port)])
-            if bypass:
-                _mac_run(["/usr/sbin/networksetup", "-setproxybypassdomains", svc, *bypass])
-        except subprocess.CalledProcessError:
-            # Service may not support proxies (e.g. Bluetooth PAN) — skip silently
-            continue
+        for _key, _get, set_verb, _state, _port in _MAC_SLOTS:
+            try:
+                _mac_run([_NETWORKSETUP, set_verb, svc, host, str(port)])
+            except (OSError, subprocess.SubprocessError):
+                continue
+        if bypass:
+            try:
+                _mac_run([_NETWORKSETUP, "-setproxybypassdomains", svc, *bypass])
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+
+def mac_proxy_points_at(host: str, port: int) -> bool:
+    """True if at least one active service really has its web proxy enabled
+    and pointing at host:port.
+
+    This is the only trustworthy answer to "did the system proxy apply".
+    networksetup changes network settings through an authorization check:
+    an administrator account passes it silently, but a standard account is
+    refused, and the refusal arrives as an ordinary non-zero exit that
+    _mac_set_proxy has to tolerate anyway. Reading the setting back is the
+    difference between "connected" and "connected, but nothing is using it".
+    """
+    if sys.platform != "darwin":
+        return False
+    for svc in _mac_active_services():
+        cur = _mac_query_one(svc, "-getwebproxy")
+        if (cur.get("enabled", "").lower() == "yes"
+                and cur.get("server") == host
+                and cur.get("port") == str(port)):
+            return True
+    return False
 
 
 def _mac_disable_proxy() -> None:
     for svc in _mac_active_services():
-        try:
-            _mac_run(["/usr/sbin/networksetup", "-setwebproxystate", svc, "off"])
-            _mac_run(["/usr/sbin/networksetup", "-setsecurewebproxystate", svc, "off"])
-        except subprocess.CalledProcessError:
-            continue
+        for _key, _get, _set, state_verb, _port in _MAC_SLOTS:
+            try:
+                _mac_run([_NETWORKSETUP, state_verb, svc, "off"])
+            except (OSError, subprocess.SubprocessError):
+                continue
 
 
 def _mac_restore(state: dict) -> None:
-    """Reapply the per-service web/secure-web settings we snapshotted."""
+    """Reapply the per-service proxy settings we snapshotted.
+
+    A slot that was enabled goes back to its server:port; everything else is
+    switched off. A slot missing from an older snapshot is left alone rather
+    than guessed at."""
     services = state.get("services", {})
     for svc, conf in services.items():
-        # HTTP
-        http = conf.get("http", {})
-        if http.get("enabled", "").lower() == "yes" and http.get("server"):
+        for key, _get, set_verb, state_verb, default_port in _MAC_SLOTS:
+            if key not in conf:
+                continue
+            slot = conf.get(key) or {}
             try:
-                _mac_run(["/usr/sbin/networksetup", "-setwebproxy", svc,
-                          http["server"], http.get("port", "80")])
-            except subprocess.CalledProcessError:
-                pass
-        else:
-            try:
-                _mac_run(["/usr/sbin/networksetup", "-setwebproxystate", svc, "off"])
-            except subprocess.CalledProcessError:
-                pass
-        # HTTPS
-        https = conf.get("https", {})
-        if https.get("enabled", "").lower() == "yes" and https.get("server"):
-            try:
-                _mac_run(["/usr/sbin/networksetup", "-setsecurewebproxy", svc,
-                          https["server"], https.get("port", "443")])
-            except subprocess.CalledProcessError:
-                pass
-        else:
-            try:
-                _mac_run(["/usr/sbin/networksetup", "-setsecurewebproxystate", svc, "off"])
-            except subprocess.CalledProcessError:
-                pass
+                if slot.get("enabled", "").lower() == "yes" and slot.get("server"):
+                    _mac_run([_NETWORKSETUP, set_verb, svc,
+                              slot["server"], slot.get("port", default_port)])
+                else:
+                    _mac_run([_NETWORKSETUP, state_verb, svc, "off"])
+            except (OSError, subprocess.SubprocessError):
+                continue
 
 
 def _mac_bypass_list(override: str) -> list[str]:

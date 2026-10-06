@@ -7254,6 +7254,288 @@ check("tun: LAN excluded from the TUN at route level, inbound LAN works (v3.7.6)
 
 
 
+def _mac_without_root_plans_proxy_mode() -> None:
+    """v3.8.0: macOS without root must plan proxy mode (no password prompt);
+    root on macOS keeps the full TUN; Windows and Linux stay TUN-only."""
+    from kapro_tun.core import controller as _c
+    mgr = _c.ConnectionManager(on_log=lambda _l: None)
+    plat, is_admin = _c.sys.platform, _c.admin.is_admin
+    try:
+        for platform, root, want in (
+            ("darwin", False, _c.MODE_HTTP_PROXY),
+            ("darwin", True, _c.MODE_TUN),
+            ("win32", False, _c.MODE_TUN),
+            ("linux", False, _c.MODE_TUN),
+        ):
+            _c.sys.platform = platform
+            _c.admin.is_admin = lambda _r=root: _r
+            got = mgr.planned_mode()
+            if got != want:
+                raise AssertionError(f"{platform} root={root}: planned {got}, want {want}")
+    finally:
+        _c.sys.platform, _c.admin.is_admin = plat, is_admin
+
+
+def _proxy_config_needs_no_privilege() -> None:
+    """v3.8.0: the proxy-mode config must contain nothing that needs root, keep
+    the same split precedence as TUN, and resolve names only AFTER the domain
+    rules — so a force-proxied (blocked) domain is never looked up locally."""
+    from kapro_tun.core import sing_box_config as _s
+    from kapro_tun.core.parser import parse as _p
+    cfg = _s.build_proxy_config(
+        _p("trojan://p@example.com:443?security=tls#t"), ["2ip.ru"],
+        server_ip="203.0.113.5", route_ru_direct=True, api_secret="x" * 32)
+
+    kinds = [i["type"] for i in cfg["inbounds"]]
+    if "tun" in kinds:
+        raise AssertionError("proxy mode must not create a TUN device")
+    for inbound in cfg["inbounds"]:
+        if inbound.get("listen") != "127.0.0.1":
+            raise AssertionError(f"{inbound.get('tag')} listens beyond loopback")
+    if "auto_route" in str(cfg) or "hijack-dns" in str(cfg):
+        raise AssertionError("proxy mode must not touch routes or hijack DNS")
+
+    rules = cfg["route"]["rules"]
+    def index(pred):
+        return next(n for n, r in enumerate(rules) if pred(r))
+    always = index(lambda r: "youtube.com" in r.get("domain_suffix", []))
+    direct_list = index(lambda r: r.get("domain_suffix") == ["2ip.ru"])
+    resolve = index(lambda r: r.get("action") == "resolve")
+    lan = index(lambda r: "192.168.0.0/16" in r.get("ip_cidr", []))
+    if not (always < direct_list < resolve < lan):
+        raise AssertionError(
+            f"rule order wrong: always={always} direct={direct_list} "
+            f"resolve={resolve} lan={lan}")
+    if rules[always]["outbound"] != "proxy" or cfg["route"]["final"] != "proxy":
+        raise AssertionError("always-proxy / final must go to the proxy outbound")
+
+    api = cfg["experimental"]["clash_api"]
+    if not api["secret"] or not api["external_controller"].startswith("127.0.0.1:"):
+        raise AssertionError("control API must be loopback-only and secret-protected")
+    if "experimental" in _s.build_proxy_config(
+            _p("trojan://p@example.com:443?security=tls#t"), []):
+        raise AssertionError("control API enabled without a secret")
+
+
+def _proxy_connect_is_honest_and_reversible() -> None:
+    """v3.8.0: the system proxy is touched only after the listener is proven
+    to carry traffic; a refusal by macOS is reported (not a silent
+    'connected'); and every exit path gives the system proxy back."""
+    from kapro_tun.core import controller as _c
+    from kapro_tun.core.parser import parse as _p
+    server = _p("trojan://p@127.0.0.1:443?security=tls#t")
+    calls = []
+
+    class _Proc:
+        def __init__(self): self.running = False
+        def is_running(self): return self.running
+        def start(self, path): self.running = True; calls.append("start")
+        def stop(self): self.running = False; calls.append("stop")
+        def recent_logs(self): return []
+        def mark_live(self): calls.append("live")
+        def pid(self): return 1
+
+    o = (_c.sing_box_installer.is_installed,
+         _c.sing_box_config.write_proxy_config, _c.sing_box_config.check_config,
+         _c.proxy_session.begin, _c.proxy_session.end,
+         _c.paths.remove_runtime_configs)
+    _c.sing_box_installer.is_installed = lambda: True
+    _c.sing_box_config.write_proxy_config = lambda *a, **k: "cfg.json"
+    _c.sing_box_config.check_config = lambda p: (True, "")
+    _c.proxy_session.end = lambda: calls.append("proxy_end")
+    _c.paths.remove_runtime_configs = lambda: []
+    try:
+        def run(ready, applied, kill_switch=False):
+            calls.clear()
+            mgr = _c.ConnectionManager(on_log=lambda _l: None)
+            # Force the mode on the instance instead of faking sys.platform:
+            # that is process-global and drags storage/DPAPI code along with it.
+            # Platform -> mode is covered by _mac_without_root_plans_proxy_mode.
+            mgr.planned_mode = lambda: _c.MODE_HTTP_PROXY
+            mgr.sing_box_process = _Proc()
+            mgr.settings = dict(mgr.settings, kill_switch=kill_switch)
+            mgr._wait_until_running = lambda *_a: True
+            mgr._wait_for_singbox_ready = lambda *_a: ready
+            _c.proxy_session.begin = lambda h, p: (calls.append("proxy_begin"), applied)[1]
+            err = None
+            try:
+                mgr.connect(server, [])
+            except _c.ConnectionError as e:
+                err = e
+            return mgr, err
+
+        # 1) Listener not carrying traffic: fail, and never touch the system.
+        mgr, err = run(ready=False, applied=True)
+        if err is None:
+            raise AssertionError("connect succeeded over a dead proxy")
+        if "proxy_begin" in calls:
+            raise AssertionError("system proxy was changed before the listener was proven")
+        if mgr.sing_box_process.is_running() or mgr._active_mode is not None:
+            raise AssertionError("failed proxy connect left a session behind")
+
+        # 2) Happy path.
+        mgr, err = run(ready=True, applied=True)
+        if err or mgr.system_proxy_applied is not True:
+            raise AssertionError(f"happy path failed: {err}")
+        if mgr.current_mode() != _c.MODE_HTTP_PROXY:
+            raise AssertionError("live proxy session reports the wrong mode")
+        if calls.index("live") > calls.index("proxy_begin"):
+            raise AssertionError("system proxy set before readiness was confirmed")
+        mgr.disconnect()
+        if "proxy_end" not in calls or calls.index("proxy_end") > calls.index("stop"):
+            raise AssertionError("disconnect must restore the system proxy before stopping the listener")
+        if mgr.system_proxy_applied is not None or mgr._active_mode is not None:
+            raise AssertionError("disconnect left proxy-session state behind")
+
+        # 3) macOS refuses the change: connected, but flagged — never silent.
+        mgr, err = run(ready=True, applied=False)
+        if err is not None:
+            raise AssertionError("a refused system proxy must not fail the connect")
+        if mgr.system_proxy_applied is not False:
+            raise AssertionError("refused system proxy was not recorded")
+        mgr.disconnect()
+
+        # 4) An explicitly enabled kill-switch cannot hold here — say so.
+        mgr, err = run(ready=True, applied=True, kill_switch=True)
+        if mgr.inactive_protections() != [("kill_switch", "unsupported")]:
+            raise AssertionError(f"kill-switch not reported: {mgr.inactive_protections()}")
+        mgr.disconnect()
+    finally:
+        (_c.sing_box_installer.is_installed,
+         _c.sing_box_config.write_proxy_config, _c.sing_box_config.check_config,
+         _c.proxy_session.begin, _c.proxy_session.end,
+         _c.paths.remove_runtime_configs) = o
+
+
+def _proxy_session_journal_restores() -> None:
+    """v3.8.0: the pre-session proxy settings are journalled BEFORE anything is
+    changed, restored on end(), restored on the next startup if we died, and a
+    change macOS refused leaves no journal and no half-applied setting."""
+    import json as _json, tempfile as _tf, pathlib as _pl
+    from kapro_tun.core import proxy_session as _ps, system_proxy as _sp, paths as _pa
+
+    journal = _pl.Path(_tf.mkdtemp()) / "proxy-recovery.json"
+    before = {"_os": "mac", "services": {"Wi-Fi": {"http": {"enabled": "No"}}}}
+    log = []
+    o = (_pa.proxy_recovery_file, _sp.get_state, _sp.set_proxy, _sp.restore,
+         _sp.mac_proxy_points_at, _sp.disable_proxy)
+    _pa.proxy_recovery_file = lambda: journal
+    _sp.get_state = lambda: before
+    _sp.restore = lambda st: log.append(("restore", st))
+    _sp.disable_proxy = lambda: log.append(("disable",))
+    try:
+        def set_proxy(host, port, override="<local>"):
+            if not journal.is_file():
+                raise AssertionError("system proxy changed before the journal was written")
+            log.append(("set", host, port))
+        _sp.set_proxy = set_proxy
+
+        _sp.mac_proxy_points_at = lambda h, p: True
+        if not _ps.begin("127.0.0.1", 2080):
+            raise AssertionError("begin() reported failure on an applied proxy")
+        if _json.loads(journal.read_text(encoding="utf-8")) != before:
+            raise AssertionError("journal does not hold the pre-session settings")
+        _ps.end()
+        if ("restore", before) not in log or journal.exists():
+            raise AssertionError("end() did not restore + delete the journal")
+
+        # Died mid-session: the journal survives; startup recovery undoes it.
+        log.clear()
+        _ps.begin("127.0.0.1", 2080)
+        if not _ps.recover() or ("restore", before) not in log or journal.exists():
+            raise AssertionError("startup recovery did not restore the proxy")
+        if _ps.recover():
+            raise AssertionError("recover() acted with no journal present")
+
+        # macOS refuses: report False and leave nothing behind.
+        log.clear()
+        _sp.mac_proxy_points_at = lambda h, p: False
+        if _ps.begin("127.0.0.1", 2080):
+            raise AssertionError("begin() claimed success on a refused change")
+        if journal.exists():
+            raise AssertionError("refused change left a journal behind")
+    finally:
+        (_pa.proxy_recovery_file, _sp.get_state, _sp.set_proxy, _sp.restore,
+         _sp.mac_proxy_points_at, _sp.disable_proxy) = o
+
+
+def _mac_system_proxy_covers_socks_and_verifies() -> None:
+    """v3.8.0: macOS proxy handling sets and restores HTTP, HTTPS and SOCKS,
+    and mac_proxy_points_at() reads the result back instead of trusting a
+    clean return from networksetup."""
+    from kapro_tun.core import system_proxy as _sp
+    ran = []
+    answers = {}
+
+    class _R:
+        def __init__(self, out): self.stdout = out
+
+    def fake_run(args, check=True):
+        ran.append(args[1:])
+        if args[1] == "-listallnetworkservices":
+            return _R("An asterisk (*) denotes that a network service is disabled.\nWi-Fi\n*Old VPN\n")
+        return _R(answers.get(args[1], "Enabled: No\nServer: \nPort: 0\n"))
+
+    o_run, o_plat = _sp._mac_run, _sp.sys.platform
+    _sp._mac_run = fake_run
+    _sp.sys.platform = "darwin"
+    try:
+        _sp._mac_set_proxy("127.0.0.1", 2080, "<local>")
+        verbs = {a[0] for a in ran}
+        for need in ("-setwebproxy", "-setsecurewebproxy", "-setsocksfirewallproxy"):
+            if need not in verbs:
+                raise AssertionError(f"set_proxy never ran {need}")
+        if any(a[1:2] == ["Old VPN"] for a in ran):
+            raise AssertionError("a disabled network service was touched")
+
+        if _sp.mac_proxy_points_at("127.0.0.1", 2080):
+            raise AssertionError("points_at true while the proxy is off")
+        answers["-getwebproxy"] = "Enabled: Yes\nServer: 127.0.0.1\nPort: 2080\n"
+        if not _sp.mac_proxy_points_at("127.0.0.1", 2080):
+            raise AssertionError("points_at false on an applied proxy")
+        if _sp.mac_proxy_points_at("127.0.0.1", 9999):
+            raise AssertionError("points_at matched the wrong port")
+
+        ran.clear()
+        _sp._mac_restore({"services": {"Wi-Fi": {
+            "http": {"enabled": "Yes", "server": "10.0.0.9", "port": "3128"},
+            "https": {"enabled": "No"},
+            "socks": {"enabled": "No"},
+        }}})
+        if ["-setwebproxy", "Wi-Fi", "10.0.0.9", "3128"] not in ran:
+            raise AssertionError("a pre-existing proxy was not restored")
+        if ["-setsocksfirewallproxystate", "Wi-Fi", "off"] not in ran:
+            raise AssertionError("SOCKS slot was not switched back off")
+    finally:
+        _sp._mac_run, _sp.sys.platform = o_run, o_plat
+
+
+def _relaunch_success_is_judged_per_platform() -> None:
+    """v3.8.0: "rc > 32" is ShellExecuteW's convention. Applied everywhere, it
+    made every successful relaunch on macOS/Linux (rc == 1) show the failure
+    dialog and keep the unprivileged copy running."""
+    import inspect
+    from kapro_tun.gui import main_window as _mw
+    src = inspect.getsource(_mw.SettingsPage._on_relaunch_admin)
+    if 'sys.platform == "win32"' not in src or "rc > 0" not in src:
+        raise AssertionError("relaunch result is not judged per platform")
+
+
+check("proxy mode: macOS without root plans proxy, never a password (v3.8.0)",
+      _mac_without_root_plans_proxy_mode)
+check("proxy mode: config needs no privilege, resolves after domain rules (v3.8.0)",
+      _proxy_config_needs_no_privilege)
+check("proxy mode: connect is honest and fully reversible (v3.8.0)",
+      _proxy_connect_is_honest_and_reversible)
+check("proxy mode: journal restores the system proxy, even after a crash (v3.8.0)",
+      _proxy_session_journal_restores)
+check("proxy mode: macOS proxy covers SOCKS and verifies the result (v3.8.0)",
+      _mac_system_proxy_covers_socks_and_verifies)
+check("relaunch: success judged per platform, not by ShellExecute rc (v3.8.0)",
+      _relaunch_success_is_judged_per_platform)
+
+
+
 # ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------

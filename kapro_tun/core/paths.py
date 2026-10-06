@@ -196,6 +196,14 @@ def app_log_file() -> Path:
     return app_data_dir() / "app.log"
 
 
+def proxy_recovery_file() -> Path:
+    """Crash-recovery journal for proxy mode (v3.8.0): the system proxy
+    settings as they were before we pointed them at our local listener.
+    Present only while a proxy session is live; if it survives to the next
+    startup the session died uncleanly and core/proxy_session.py restores it."""
+    return app_data_dir() / "proxy-recovery.json"
+
+
 def tun_recovery_file() -> Path:
     """Crash-recovery journal for TUN mode. While a TUN session holds the
     physical NIC's DNS cleared (leak protection), we record which interface

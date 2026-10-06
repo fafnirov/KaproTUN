@@ -178,6 +178,42 @@ returns are exposed to anyone on the path.
 - **QUIC.** On the default userspace stack, tunnelled QUIC (UDP/443) is
   rejected so browsers fall back to TCP, which the tunnel carries reliably.
 
+## Proxy mode on macOS: what it does not cover
+
+On macOS without root the client runs in **proxy mode** instead of TUN, so
+that it never asks for an administrator password. It is a narrower kind of
+protection, and the difference matters:
+
+- **Only proxy-aware traffic is carried.** Browsers and apps that honour the
+  macOS system proxy go through the VPN. Anything that ignores it — many games,
+  most UDP, some CLI tools — uses your real connection and real IP.
+- **WebRTC can reveal your real IP.** Browsers send WebRTC's UDP outside an
+  HTTP/SOCKS proxy, and the STUN block that covers this in TUN mode is a
+  firewall rule, which needs the privileges this mode avoids. Use a browser
+  setting or extension that disables WebRTC if this matters to you.
+- **No kill-switch.** If the engine stops, apps fall back to your real
+  connection.
+- **The system proxy may be refused.** macOS normally lets an administrator
+  account change network settings without a prompt; a standard account can be
+  refused.
+  The client reads the setting back after changing it and tells you if it did
+  not take effect — it does not report "connected" over a proxy nothing uses.
+- **Your previous proxy settings are restored**, not just switched off: they
+  are saved to `proxy-recovery.json` before the session and put back on
+  disconnect, or on the next launch if the app died.
+
+The split is the same as in TUN mode (RU destinations and your direct list go
+direct), and so is DNS visibility: names routed by IP are resolved by the
+system resolver. Domains that are always proxied are matched by name and never
+looked up locally.
+
+sing-box also exposes a control API on `127.0.0.1:2083` in this mode, used
+only to read byte totals for the traffic graph. It listens on loopback and
+requires a random per-session secret.
+
+Launching KaproTUN as root on macOS gives the full TUN instead, with the same
+coverage as on Windows minus the Windows-only firewall protections.
+
 ## Kill-switch
 
 Optional (Settings), **Windows-only**, needs admin. When on, Windows Firewall
