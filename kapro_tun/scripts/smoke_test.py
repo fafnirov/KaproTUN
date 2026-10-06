@@ -7186,8 +7186,14 @@ def _windows_dns_asks_the_network_directly() -> None:
 
     cfg = _s.build_config(proxy, [], upstream_dns="172.20.10.1")
     first = cfg["dns"]["servers"][0]
-    if first != {"type": "udp", "server": "172.20.10.1", "tag": "local"}:
+    # Linux picks its upstream itself (resolvectl, see _linux_upstream_dns) and
+    # ignores this argument, so the exact server is only defined off Linux.
+    # Asserting it everywhere failed the Linux pre-release job and blocked the
+    # v3.7.6 and v3.8.0 builds while passing on the Windows dev machine.
+    if not _s._IS_LINUX and first != {"type": "udp", "server": "172.20.10.1", "tag": "local"}:
         raise AssertionError(f"direct upstream not used: {first}")
+    if first.get("type") not in ("udp", "local") or "detour" in first:
+        raise AssertionError(f"unexpected system DNS server shape: {first}")
     # NO detour: 1.12 aborts at start on `detour: direct` ("empty direct outbound
     # makes no sense") even though `sing-box check` accepts it. Without a detour
     # the server is dialed directly on the physical NIC already.
