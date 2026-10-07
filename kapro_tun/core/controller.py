@@ -216,6 +216,20 @@ class ConnectionManager:
         # protection that silently failed to arm is reported rather than
         # implied by a ticked box. See inactive_protections().
         self.protection_status: dict[str, str] = {}
+        # True while the kill-switch rules are deliberately left in the
+        # firewall with no tunnel up: the client is reconnecting on its own, or
+        # gave up and is waiting for the user. Only release_killswitch() (user
+        # disconnect, setting switched off, quit) clears it.
+        self.killswitch_held = False
+        # True from a successful install until a confirmed removal. This, not
+        # protection_status, decides whether there is anything to hold:
+        # protection_status is what the user is told about THIS connect (a
+        # re-arm can fail while the previous rules are still in force).
+        self._killswitch_armed = False
+        self._held_server_ip = ""
+        # host -> IP of the last successful lookup, for reconnecting under a
+        # held kill-switch when the resolver itself is out of reach.
+        self._last_resolved: tuple[str, str] = ("", "")
         # The single engine: sing-box native-TUN process (owns the TUN device,
         # routes + resolves DNS itself — no tun2socks bridge, no xray).
         self.sing_box_process = SingBoxProcess(
@@ -270,7 +284,7 @@ class ConnectionManager:
         except sing_box_config.UnsupportedBySingBox as e:
             raise ConnectionError(tr("err.unsupported_server", error=e)) from e
 
-    def disconnect(self) -> None:
+    def disconnect(self, hold_killswitch: bool = False) -> None:
         # sing-box owns the TUN + its routes (auto_route removes them on a clean
         # shutdown) and restores the physical NIC's DNS itself. Stop it, drop the
         # crash-recovery journal (a clean stop has nothing left to undo — its
@@ -294,15 +308,16 @@ class ConnectionManager:
             self._log("[!] Не удалось удалить runtime-конфиги: "
                       f"{', '.join(leftover)} — они содержат секреты, "
                       "проверь права на папку данных")
-        # Kill-switch teardown LAST — until now the firewall block is the
-        # safety net if any step above leaves traffic in a weird state.
-        # Safe to call even if it wasn't installed (idempotent). v2.0.0: a
-        # failed firewall removal can strand the user's connectivity, so it's
-        # surfaced to the log instead of swallowed.
-        try:
-            killswitch.remove()
-        except Exception as e:
-            self._log(f"[!] Kill-switch: не удалось снять firewall-правила: {e}")
+        # Kill-switch LAST — until now the firewall block is the safety net if
+        # any step above leaves traffic in a weird state. `hold_killswitch` is
+        # what every automatic teardown passes (engine crash, DNS watchdog,
+        # network change): the tunnel is down and about to be rebuilt, which is
+        # precisely when the rules must stay. Before v4.0.0 they were removed
+        # here on every path, so the kill-switch was off whenever it mattered.
+        if hold_killswitch and self._killswitch_in_force():
+            self.killswitch_held = True
+        else:
+            self.release_killswitch()
         # Same idempotent teardown for the IPv6-leak block (v1.11.0).
         # Order doesn't matter relative to killswitch — both are
         # independent firewall rules with non-overlapping scopes
@@ -374,8 +389,16 @@ class ConnectionManager:
         return self._active if self.is_connected() else None
 
     def update_settings(self, **changes) -> None:
-        self.settings.update(changes)
-        storage.save_settings(self.settings)
+        # Merge onto what is on disk NOW, not onto the copy loaded at startup:
+        # other code writes settings.json too (the device id, subscription
+        # stamps), and saving a stale whole dict erased their keys.
+        fresh = storage.update_settings(changes, fallback=self.settings)
+        # Same dict object, new contents — the GUI holds references to it, and
+        # the connect worker reads it from another thread. So never empty it
+        # first: for one instant kill_switch would read as off.
+        for stale in [k for k in self.settings if k not in fresh]:
+            del self.settings[stale]
+        self.settings.update(fresh)
 
     def planned_mode(self) -> str:
         """Mode the NEXT connect will use.
@@ -677,22 +700,37 @@ class ConnectionManager:
         server_host = str(config.outbound.get("server", "")).strip()
         if not server_host:
             raise ConnectionError(tr("err.no_server_address"))
+        if self.killswitch_held:
+            # Reconnecting under a held kill-switch, possibly on a different
+            # network than the rules were written for: re-spare the current
+            # DNS servers first, or the lookup below is blocked by our own rules.
+            self._maybe_arm_killswitch(self._held_server_ip)
         try:
             server_ip = socket.gethostbyname(server_host)
         except socket.gaierror as e:
-            raise ConnectionError(
-                tr("err.resolve_failed", host=server_host, error=e)) from e
+            if not (self.killswitch_held and self._last_resolved[0] == server_host):
+                raise ConnectionError(
+                    tr("err.resolve_failed", host=server_host, error=e)) from e
+            # Under the held kill-switch the resolver may be unreachable (a
+            # public DoH resolver, say). The server has not moved since the
+            # session that armed the rules: reuse its address.
+            server_ip = self._last_resolved[1]
+            self._log(f"[*] DNS недоступен под kill-switch — использую прежний "
+                      f"адрес сервера {server_ip}")
+        self._last_resolved = (server_host, server_ip)
 
         self._log("[*] Движок: sing-box (нативный TUN, без tun2socks/SOCKS-моста)")
+        self._note_security_warnings(config)
         # v3.1.1: DNS is always the system resolver — no dns_option / leak toggle.
         block_ads = bool(self.settings.get("block_ads", False))
         # v3.3.0: RU-direct defaults ON (RU IP → real IP, else → VPN); high_speed
         # (Turbo kernel stack) defaults OFF.
-        route_ru_direct = bool(self.settings.get("route_ru_direct", True))
-        high_speed = bool(self.settings.get("high_speed", False))
-        # v3.5.0: Steam/Riot games bypass the tunnel (matched by process).
-        games_direct = bool(self.settings.get("games_direct", True))
-        bypass_apps = list(self.settings.get("bypass_apps", []) or [])
+        # (v3.5.0: Steam/Riot games bypass the tunnel, matched by process.)
+        plan = self._routing_plan()
+        if plan["lockdown"]:
+            self._log("[*] Kill-switch включён: на время сессии российские сайты, "
+                      "прямые сайты и игры тоже идут через VPN — мимо туннеля "
+                      "firewall пропускает только VPN-сервер и локальную сеть")
 
         # Honest ONE-TIME notice (not on every reconnect) that ad-block is
         # legacy-only — see _note_singbox_adblock_once().
@@ -703,12 +741,10 @@ class ConnectionManager:
         # has started yet, so nothing to roll back).
         cfg_path = sing_box_config.write_config(
             config, direct_domains, server_ip=server_ip,
-            block_ads=block_ads, route_ru_direct=route_ru_direct,
-            high_speed=high_speed, games_direct=games_direct,
-            bypass_apps=bypass_apps, on_log=self._log,
+            block_ads=block_ads, on_log=self._log, **plan,
         )
         ok, msg = sing_box_config.check_config(cfg_path)
-        if not ok and games_direct:
+        if not ok and plan["games_direct"] and not plan["lockdown"]:
             # Safety net (v3.5.0): the games bypass uses process-based rules
             # (process_name / process_path_regex). If the installed engine build
             # doesn't accept them, a rejected config would mean the user simply
@@ -719,18 +755,24 @@ class ConnectionManager:
             app_log.log(f"[games-direct] config rejected, retrying without it: {msg}")
             cfg_path = sing_box_config.write_config(
                 config, direct_domains, server_ip=server_ip,
-                block_ads=block_ads, route_ru_direct=route_ru_direct,
-                high_speed=high_speed, games_direct=False,
-                bypass_apps=bypass_apps, on_log=self._log,
+                block_ads=block_ads, on_log=self._log,
+                **dict(plan, games_direct=False),
             )
             ok, msg = sing_box_config.check_config(cfg_path)
         if not ok:
             paths.remove_runtime_configs()
             raise ConnectionError(tr("err.singbox_rejected_config", msg=msg))
 
-        # Kill-switch BEFORE the tunnel comes up, allowing sing-box.exe out.
+        # Kill-switch BEFORE the tunnel comes up, written for this server.
         self.protection_status = {}
-        self._maybe_arm_killswitch()
+        self._maybe_arm_killswitch(server_ip)
+        if (self.protection_status.get("kill_switch") == "failed"
+                and not self._killswitch_armed):
+            # Asked for, and not a single rule in the firewall. Connecting
+            # anyway would be the opposite of what the setting means; a ticked
+            # box plus a passing toast is not consent to run unprotected.
+            paths.remove_runtime_configs()
+            raise ConnectionError(tr("err.killswitch_not_armed"))
         # The STUN block. This call went missing in v3.1.0 when the legacy
         # engines were cut, and nothing noticed: the setting stayed on by
         # default, the Settings hint kept describing the rule, SECURITY.md kept
@@ -810,6 +852,8 @@ class ConnectionManager:
 
         self._active = config
         self._active_engine = ENGINE_SING_BOX
+        # A held kill-switch has become this session's ordinary one again.
+        self.killswitch_held = False
         # Snapshot the egress fingerprint so the GUI's network-change watchdog
         # can detect an Ethernet↔Wi-Fi roam and clean-reconnect (v3.4.0).
         self._server_ip = server_ip
@@ -837,6 +881,7 @@ class ConnectionManager:
 
         self._log("[*] Движок: sing-box, режим прокси (без TUN, права "
                   "администратора не нужны)")
+        self._note_security_warnings(config)
         import secrets as _secrets
         self._api_secret = _secrets.token_hex(16)
         self._active_mode = MODE_HTTP_PROXY
@@ -915,12 +960,77 @@ class ConnectionManager:
         users can't see. Both rules share one lifecycle, so they are removed
         together; before this, each path listed its own subset and the
         post-start path forgot the STUN rule."""
-        for undo in (killswitch.remove, webrtc_block.remove):
-            try:
-                undo()
-            except Exception:
-                pass
+        # ...except a kill-switch that was already being held when this
+        # attempt began: a reconnect that fails is still the tunnel-down case
+        # the rules exist for, so they stay until the user releases them.
+        if not self.killswitch_held:
+            self.release_killswitch()
+        try:
+            webrtc_block.remove()
+        except Exception:
+            pass
         self.protection_status = {}
+
+    def _killswitch_in_force(self) -> bool:
+        return self._killswitch_armed
+
+    def _killswitch_wanted(self) -> bool:
+        """Whether the next TUN connect will arm the kill-switch."""
+        return (bool(self.settings.get("kill_switch", False))
+                and killswitch.is_supported() and admin.is_admin())
+
+    def release_killswitch(self) -> None:
+        """Take the kill-switch down for good: a user disconnect, the setting
+        switched off, or quit. A removal that fails leaves the machine without
+        internet, so it is said out loud rather than swallowed."""
+        self.protection_status.pop("kill_switch", None)
+        try:
+            # force: when we installed rules ourselves, delete without asking
+            # the firewall first whether they exist.
+            gone = killswitch.remove(force=self._killswitch_armed) is not False
+        except Exception as e:
+            gone = False
+            app_log.log(f"[protection] kill_switch removal raised: {e}")
+        if not gone and not (self._killswitch_armed or self.killswitch_held):
+            # Nothing of this session's, yet the firewall would not confirm it
+            # is clean (leftovers we may not delete, or netsh not answering).
+            # Startup reports real leftovers; don't invent a blocked state here.
+            app_log.log("[protection] kill_switch state could not be confirmed clean")
+            return
+        if not gone:
+            # Still blocking. Keep saying so (the home screen shows the held
+            # state) and keep the flags, so the next disconnect / untick / quit
+            # tries again instead of believing the machine is clean.
+            self.killswitch_held = self._killswitch_armed = True
+            self._log("[!] Kill-switch: правила firewall не сняты — интернет может "
+                      "оставаться заблокированным. Перезапусти KaproTUN от "
+                      "администратора: при запуске он убирает свои правила.")
+            app_log.log("[protection] kill_switch rules could NOT be removed")
+            return
+        self.killswitch_held = self._killswitch_armed = False
+        self._held_server_ip = ""
+
+    def _routing_plan(self) -> dict:
+        """Split-routing switches for the next TUN session. Under the
+        kill-switch only the server and the LAN are reachable past the tunnel,
+        so `lockdown` makes the config route nothing direct (see killswitch.py)."""
+        return {
+            "route_ru_direct": bool(self.settings.get("route_ru_direct", True)),
+            "high_speed": bool(self.settings.get("high_speed", False)),
+            "games_direct": bool(self.settings.get("games_direct", True)),
+            "bypass_apps": list(self.settings.get("bypass_apps", []) or []),
+            "lockdown": self._killswitch_wanted(),
+        }
+
+    def _note_security_warnings(self, config: ProxyConfig) -> None:
+        """Say when a server link asks for less security than the user would
+        assume (certificate not verified, a pin the engine cannot check)."""
+        from .parser import security_warnings
+        # The name comes from a subscription: printable characters only.
+        name = "".join(ch for ch in str(config.name) if ch.isprintable())[:80]
+        for note in security_warnings(config):
+            self._log(f"[!] {note}")
+            app_log.log(f"[security] {name}: {note}")
 
     def _tun_admin_message(self) -> str:
         """Per-OS 'TUN needs admin' message."""
@@ -934,11 +1044,10 @@ class ConnectionManager:
         """Always the sing-box engine (the only one since v3.1.0)."""
         return ENGINE_SING_BOX
 
-    def _maybe_arm_killswitch(self) -> None:
-        """Install the kill-switch firewall rules (block ALL outbound except LAN
-        + sing-box.exe) if the user enabled it. Silent no-op when off / not
-        Windows / not admin. Never raises — defence-in-depth, the tunnel works
-        either way."""
+    def _maybe_arm_killswitch(self, server_ip: str = "") -> None:
+        """Install the kill-switch firewall rules for this server if the user
+        enabled it. No-op when off; reported in protection_status when it could
+        not be armed (not Windows / not admin / netsh refused). Never raises."""
         if not self.settings.get("kill_switch", False):
             return
         if not killswitch.is_supported():
@@ -949,10 +1058,18 @@ class ConnectionManager:
             self.protection_status["kill_switch"] = "needs_admin"
             self._log("[!] Kill-switch требует админа — пропускаю")
             return
-        if killswitch.install(paths.sing_box_exe()):
+        if killswitch.install(server_ips=[server_ip] if server_ip else [],
+                              dns_servers=killswitch.physical_dns_servers()):
             self.protection_status["kill_switch"] = "active"
+            self._killswitch_armed = True
+            self._held_server_ip = server_ip
             self._log("[*] Kill-switch активирован (firewall блокирует весь "
-                      "трафик мимо sing-box)")
+                      "трафик мимо туннеля, кроме VPN-сервера и локальной сети)")
+        elif self.killswitch_held:
+            self.protection_status["kill_switch"] = "failed"
+            self._log("[!] Kill-switch: не удалось обновить firewall-правила под "
+                      "этот сервер — прежняя блокировка остаётся в силе")
+            app_log.log("[protection] kill_switch re-arm failed, old rules kept")
         else:
             self.protection_status["kill_switch"] = "failed"
             self._log("[!] Не удалось установить firewall-правила kill-switch "

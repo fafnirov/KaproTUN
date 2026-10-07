@@ -44,8 +44,11 @@ def looks_like_v2ray_json(body: str) -> bool:
 def _tls_block(stream: dict, default_sni: str = "") -> Optional[dict]:
     """Xray streamSettings -> sing-box `tls` block (incl. REALITY / uTLS)."""
     security = str(stream.get("security") or "").lower()
-    if security not in ("tls", "reality", "xtls"):
+    if security in ("", "none"):
         return None
+    if security not in ("tls", "reality", "xtls"):
+        # An unknown value must not quietly mean "no encryption".
+        raise ParseError(f"неподдерживаемое значение security={security!r}")
     reality = stream.get("realitySettings") or {}
     tls_set = stream.get("tlsSettings") or {}
     src = reality if security == "reality" else tls_set
@@ -53,7 +56,8 @@ def _tls_block(stream: dict, default_sni: str = "") -> Optional[dict]:
     tls: dict[str, Any] = {"enabled": True}
     if sni:
         tls["server_name"] = sni
-    if src.get("allowInsecure"):
+    # Panels emit this as a bool, a number or a string; "false" is truthy.
+    if str(src.get("allowInsecure")).strip().lower() in ("true", "1", "yes"):
         tls["insecure"] = True
     alpn = src.get("alpn")
     if alpn:

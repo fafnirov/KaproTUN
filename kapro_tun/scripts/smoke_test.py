@@ -111,6 +111,63 @@ _sbx_atexit.register(lambda: _sbx_shutil.rmtree(_SANDBOX_DIR, ignore_errors=True
 
 
 # ---------------------------------------------------------------------------
+# Firewall sandbox — the suite must never touch the machine's real firewall.
+# Tests call webrtc_block.remove() / killswitch.remove() / manager.disconnect()
+# directly. Run elevated next to a live KaproTUN session, those were real
+# `netsh ... delete rule` calls: the running client lost its STUN block
+# mid-session and went on reporting it as active (seen in the field, v3.8.3).
+# So every firewall module gets a stand-in for `subprocess` whose run() drives
+# an in-memory rule table instead — which also lets tests assert on the exact
+# commands and on the order they were issued in.
+# ---------------------------------------------------------------------------
+import subprocess as _fw_real_subprocess
+
+from kapro_tun.core import firewall_sweep as _fw_sweep_mod
+from kapro_tun.core import ipv6_block as _fw_ipv6_mod
+from kapro_tun.core import killswitch as _fw_ks_mod
+from kapro_tun.core import webrtc_block as _fw_webrtc_mod
+
+FIREWALL_CALLS: list[list[str]] = []     # every command, in order
+FAKE_FIREWALL_RULES: list[str] = []      # names the fake firewall holds
+FAKE_FIREWALL = {"fail_add": False}      # flip to make `add rule` fail
+
+
+def _fw_fake_run(cmd, *_a, **kw):
+    argv = [str(c) for c in cmd]
+    FIREWALL_CALLS.append(argv)
+    name = next((a.split("=", 1)[1] for a in argv if a.startswith("name=")), "")
+    rc, out = 1, ""
+    if "add" in argv and "rule" in argv:
+        if not FAKE_FIREWALL["fail_add"]:
+            FAKE_FIREWALL_RULES.append(name)
+            rc = 0
+    elif "delete" in argv and "rule" in argv:
+        if name in FAKE_FIREWALL_RULES:
+            FAKE_FIREWALL_RULES[:] = [n for n in FAKE_FIREWALL_RULES if n != name]
+            rc = 0
+    elif "show" in argv and "rule" in argv:
+        rc = 0 if name in FAKE_FIREWALL_RULES else 1
+    elif argv and "powershell" in argv[0].lower():
+        rc, out = 0, "\n".join(dict.fromkeys(FAKE_FIREWALL_RULES))
+    text = kw.get("text") or kw.get("encoding") or kw.get("universal_newlines")
+    return _fw_real_subprocess.CompletedProcess(
+        argv, rc, stdout=out if text else out.encode(), stderr="" if text else b"")
+
+
+class _FwSubprocess:
+    """`subprocess`, except run() never reaches the operating system."""
+    run = staticmethod(_fw_fake_run)
+
+    def __getattr__(self, attr):
+        return getattr(_fw_real_subprocess, attr)
+
+
+_FW_SUBPROCESS = _FwSubprocess()
+for _fw_mod in (_fw_ks_mod, _fw_webrtc_mod, _fw_ipv6_mod, _fw_sweep_mod):
+    _fw_mod.subprocess = _FW_SUBPROCESS
+
+
+# ---------------------------------------------------------------------------
 # Synthetic share URLs — placeholder grammar, no real keys/passwords.
 # When you bump these, keep them obviously-fake (UUIDs of all-a's, etc).
 # ---------------------------------------------------------------------------
@@ -156,7 +213,20 @@ def section(name: str) -> None:
     print(f"\n=== {name} ===")
 
 
+# Run a slice of the suite while working on one area:
+#   KAPROTUN_SMOKE_ONLY="kill-switch" python kapro_tun/scripts/smoke_test.py
+# Unset (CI, releases) every check runs.
+_ONLY = _os.environ.get("KAPROTUN_SMOKE_ONLY", "").strip().lower()
+
+
+_checks_run = 0
+
+
 def check(label: str, fn: Callable[[], None]) -> None:
+    global _checks_run
+    if _ONLY and _ONLY not in label.lower():
+        return
+    _checks_run += 1
     try:
         fn()
         print(f"  OK   {label}")
@@ -999,7 +1069,7 @@ def _runtime_safety_branches_via_window() -> None:
         cfg = ProxyConfig(name="🇩🇪 T", protocol="vless", raw_url="vless://x@1.2.3.4:1",
                           outbound={"server": "1.2.3.4", "server_port": 1})
         calls = {"disconnect": 0}
-        w.manager.disconnect = lambda: calls.__setitem__("disconnect", calls["disconnect"] + 1)
+        w.manager.disconnect = lambda **_k: calls.__setitem__("disconnect", calls["disconnect"] + 1)
 
         # --- critical + exhausted → emergency shutdown ---
         w._active_config = cfg
@@ -2735,12 +2805,12 @@ def _leak_test_fixable_protections() -> None:
     rep.ipv6 = lt.IPv6Result(ip="2a01:ecc0::2", ipv6_blocked=False)   # leaking
     rep.webrtc = lt.WebRtcResult(stun_blocked=False)                   # leaking
 
-    # Both leaking + both toggles OFF -> both offered.
-    fx = lt.fixable_protections(rep, {"ipv6_leak_protection": False,
-                                       "webrtc_leak_protection": False})
+    # Both leaking + the WebRTC toggle OFF -> WebRTC offered. IPv6 has no
+    # toggle since v4.0.0 (its protection is built into the tunnel).
+    fx = lt.fixable_protections(rep, {"webrtc_leak_protection": False})
     keys = {k for k, _ in fx}
-    if keys != {"ipv6_leak_protection", "webrtc_leak_protection"}:
-        raise AssertionError(f"expected both fixable, got {keys}")
+    if keys != {"webrtc_leak_protection"}:
+        raise AssertionError(f"expected only WebRTC fixable, got {keys}")
 
     # Leaking but protection already ON -> NOT offered (a real toggle flip
     # wouldn't help; e.g. the rule failed to install — different problem).
@@ -4255,50 +4325,6 @@ def _runtime_config_secure_write_and_cleanup() -> None:
 check("runtime configs: secure write (0600) + cleanup", _runtime_config_secure_write_and_cleanup)
 
 
-def _killswitch_allows_hysteria_only_for_hy2() -> None:
-    import sys as _sys
-    if _sys.platform != "win32":
-        return  # kill-switch is Windows-only
-    from kapro_tun.core import killswitch as _ks
-    calls: list = []
-    o_add, o_sup, o_rm = _ks._add_rule, _ks.is_supported, _ks.remove
-    _ks.is_supported = lambda: True
-    _ks._add_rule = lambda name, args: (calls.append((name, list(args))) or True)
-    _ks.remove = lambda: None  # don't touch the real firewall during install
-    try:
-        calls.clear()
-        _ks.install(_SecPath("C:/x/xray.exe"))
-        names = [c[0] for c in calls]
-        if _ks._RULE_ALLOW_HYSTERIA in names:
-            raise AssertionError("non-hy2 install must NOT add the hysteria allow rule")
-        if _ks._RULE_ALLOW_XRAY not in names:
-            raise AssertionError("xray allow rule missing")
-        calls.clear()
-        _ks.install(_SecPath("C:/x/xray.exe"), _SecPath("C:/x/hysteria.exe"))
-        hy = [c for c in calls if c[0] == _ks._RULE_ALLOW_HYSTERIA]
-        if not hy:
-            raise AssertionError("hy2 install must add the hysteria allow rule")
-        if not any("hysteria.exe" in a for a in hy[0][1]):
-            raise AssertionError("hysteria allow rule must target hysteria.exe")
-        # remove() must delete the hysteria rule name too.
-        removed: list = []
-        _ks.remove = o_rm
-        import subprocess as _sp
-        o_run = _sp.run
-        _sp.run = lambda cmd, *a, **k: (removed.append(" ".join(map(str, cmd)))
-                                        or type("R", (), {"returncode": 0})())
-        try:
-            _ks.remove()
-        finally:
-            _sp.run = o_run
-        if not any(_ks._RULE_ALLOW_HYSTERIA in r for r in removed):
-            raise AssertionError("remove() must delete the hysteria rule too")
-    finally:
-        _ks._add_rule, _ks.is_supported, _ks.remove = o_add, o_sup, o_rm
-
-
-
-
 def _download_size_caps() -> None:
     from kapro_tun.core import net_download as _nd
     import requests as _rq
@@ -5403,15 +5429,15 @@ def _v3_runtime_cleanup() -> None:
 
 
 def _v3_killswitch_singbox() -> None:
-    # 8) Kill-switch must allow sing-box.exe out (else its own transport is
-    #    blocked) and tear that rule down on remove (no orphan firewall rule).
+    # 8) The kill-switch is written for the server sing-box connects to, and
+    #    never as an "allow sing-box.exe" rule: Windows applies block rules
+    #    before allow rules, so that design blocked the engine too (v4.0.0).
     sig = _inspect_v3.signature(_ks_v3.install)
-    if "allow_exe_path" not in sig.parameters:
-        raise AssertionError("killswitch.install must take the sing-box exe path")
-    if "_RULE_ALLOW_SINGBOX" not in _inspect_v3.getsource(_ks_v3.install):
-        raise AssertionError("install() must add the sing-box allow rule")
-    if "_RULE_ALLOW_SINGBOX" not in _inspect_v3.getsource(_ks_v3.remove):
-        raise AssertionError("remove() must delete the sing-box allow rule")
+    if "server_ips" not in sig.parameters or "allow_exe_path" in sig.parameters:
+        raise AssertionError("killswitch.install must be keyed on the server address")
+    for name, args in _ks_v3.build_rules("a", server_ips=["203.0.113.7"]):
+        if "action=allow" in args or any(a.startswith("program=") for a in args):
+            raise AssertionError(f"{name} is an allow/program rule")
 
 
 def _v3_stats_include_singbox() -> None:
@@ -5569,7 +5595,7 @@ def _v3_singbox_watchdog_engine_aware() -> None:
         w._active_config = cfg
         m = w.manager
         m._active = cfg
-        m.disconnect = lambda: None
+        m.disconnect = lambda **_k: None
         logs = []
         w.logs_page.append = lambda s: logs.append(str(s))
         arm = []
@@ -6608,7 +6634,8 @@ def _v3_self_heal_rearms_backoff() -> None:
         s.logs_page = types.SimpleNamespace(append=lambda *_a: None)
         s._refresh_home = lambda: None
         s._arm_reconnect = lambda reason, n, total: True
-        s.manager = types.SimpleNamespace(disconnect=lambda: None)
+        s.manager = types.SimpleNamespace(disconnect=lambda **_k: None)
+        s._note_killswitch_hold = lambda: None
         return s
 
     _orig_toast = mw.show_toast
@@ -7543,10 +7570,634 @@ check("relaunch: success judged per platform, not by ShellExecute rc (v3.8.0)",
 
 
 # ---------------------------------------------------------------------------
+# v4.0.0 — the protections the audit found promised but not delivered
+# ---------------------------------------------------------------------------
+
+section("v4.0.0: kill-switch, IPv6, settings, subscriptions, parser")
+
+import contextlib as _v4_contextlib
+import ipaddress as _v4_ip
+
+
+@_v4_contextlib.contextmanager
+def _v4_patched(obj, **attrs):
+    """Swap attributes for the duration of a test, then put them back."""
+    saved = {k: getattr(obj, k) for k in attrs}
+    for k, v in attrs.items():
+        setattr(obj, k, v)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            setattr(obj, k, v)
+
+
+@_v4_contextlib.contextmanager
+def _v4_fresh_data_dir():
+    """An empty app-data dir, so a test owns its settings.json."""
+    tmp = _SbxPath(_sbx_tempfile.mkdtemp(prefix="kaprotun-v4-"))
+    with _v4_patched(_sbx_paths, app_data_dir=lambda: tmp):
+        try:
+            yield tmp
+        finally:
+            _sbx_shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _v4_field(args: list, key: str) -> list:
+    return next(a.split("=", 1)[1] for a in args if a.startswith(key + "=")).split(",")
+
+
+def _v4_ks_rules(args: list) -> tuple:
+    return ([_v4_ip.ip_network(c) for c in _v4_field(args, "localip")],
+            [_v4_ip.ip_network(c) for c in _v4_field(args, "remoteip")])
+
+
+def _v4_killswitch_rules_block_only_what_must_not_pass() -> None:
+    """Windows evaluates block rules before allow rules, so "block everything,
+    allow sing-box.exe" blocked sing-box too. The rules are now block-only and
+    scoped so that what must pass simply never matches."""
+    from kapro_tun.core import killswitch as ks
+    rules = dict(ks.build_rules("a", server_ips=["203.0.113.7"],
+                                dns_servers=["8.8.8.8", "192.168.1.1"]))
+    for name, args in rules.items():
+        if "action=block" not in args or "dir=out" not in args:
+            raise AssertionError(f"{name} is not an outbound block rule: {args}")
+        if any(a.startswith("program=") for a in args):
+            raise AssertionError(f"{name} relies on a program match")
+
+    local, remote = _v4_ks_rules(rules[ks.rule_name("a", "v4")])
+
+    def blocked(src: str, dst: str) -> bool:
+        s, d = _v4_ip.ip_address(src), _v4_ip.ip_address(dst)
+        return any(s in n for n in local) and any(d in n for n in remote)
+
+    nic = "192.168.1.5"
+    must_pass = {
+        "sing-box to the VPN server": (nic, "203.0.113.7"),
+        "an app through the tunnel": ("10.255.0.2", "1.2.3.4"),
+        "the LAN router": (nic, "192.168.1.1"),
+        "loopback": ("127.0.0.1", "127.0.0.1"),
+        "mDNS multicast": (nic, "224.0.0.251"),
+        "DHCP broadcast": (nic, "255.255.255.255"),
+    }
+    for what, (src, dst) in must_pass.items():
+        if blocked(src, dst):
+            raise AssertionError(f"kill-switch would block {what}")
+    must_block = {
+        "a foreign site past the tunnel": (nic, "1.2.3.4"),
+        "an adapter that only shares the tunnel's subnet": ("10.255.0.1", "1.2.3.4"),
+        "the server's neighbour address": (nic, "203.0.113.8"),
+        "a Russian site past the tunnel": (nic, "77.88.8.8"),
+    }
+    for what, (src, dst) in must_block.items():
+        if not blocked(src, dst):
+            raise AssertionError(f"kill-switch lets through {what}")
+
+    # A public resolver stays reachable, but only as a resolver.
+    if blocked(nic, "8.8.8.8"):
+        raise AssertionError("the network's DNS server is blocked outright")
+    for kind, proto in (("dns-udp", "UDP"), ("dns-tcp", "TCP")):
+        args = rules[ks.rule_name("a", kind)]
+        if (f"protocol={proto}" not in args or _v4_field(args, "remoteip") != ["8.8.8.8"]
+                or "remoteport=0-52,54-65535" not in args):
+            raise AssertionError(f"{kind} does not pin the resolver to port 53: {args}")
+
+    local6, remote6 = _v4_ks_rules(rules[ks.rule_name("a", "v6")])
+    for what, dst in (("global unicast", "2a00:1450::5"), ("NAT64", "64:ff9b::102:304")):
+        if not any(_v4_ip.ip_address(dst) in n for n in remote6):
+            raise AssertionError(f"IPv6 rule does not cover {what}")
+    for lan in ("fe80::1", "fd00::5", "ff02::fb"):
+        if any(_v4_ip.ip_address(lan) in n for n in remote6):
+            raise AssertionError(f"IPv6 rule would block the local network ({lan})")
+    spared = [a for a in ("fdfe:dcba:9876::1", "fdfe:dcba:9876::2", "2a00:1450::5")
+              if not any(_v4_ip.ip_address(a) in n for n in local6)]
+    if spared != ["fdfe:dcba:9876::1"]:
+        raise AssertionError(f"IPv6 rule must spare the tunnel's own address only: {spared}")
+
+    # No public resolver -> no resolver rules at all.
+    lan_only = dict(ks.build_rules("a", server_ips=["203.0.113.7"],
+                                   dns_servers=["192.168.1.1"]))
+    if ks.rule_name("a", "dns-udp") in lan_only:
+        raise AssertionError("a LAN resolver needs no port rule")
+
+
+def _v4_killswitch_install_swaps_without_a_gap() -> None:
+    """Re-arming for a new server must never leave a moment with no rules, and
+    a failed re-arm must leave the old generation in place."""
+    from kapro_tun.core import killswitch as ks
+    with _v4_patched(ks, is_supported=lambda: True):
+        FAKE_FIREWALL_RULES.clear()
+        try:
+            if not ks.install(server_ips=["203.0.113.7"]):
+                raise AssertionError("first install failed")
+            first = set(FAKE_FIREWALL_RULES)
+            if not first or not ks.is_active():
+                raise AssertionError("install reported success but no rule exists")
+
+            mark = len(FIREWALL_CALLS)
+            if not ks.install(server_ips=["198.51.100.9"]):
+                raise AssertionError("re-arm failed")
+            second = set(FAKE_FIREWALL_RULES)
+            if second & first or not second:
+                raise AssertionError(f"old generation still present: {second & first}")
+            calls = FIREWALL_CALLS[mark:]
+            name_of = lambda c: next((a[5:] for a in c if a.startswith("name=")), "")
+            last_add = max(i for i, c in enumerate(calls)
+                           if "add" in c and name_of(c) in second)
+            first_del = min(i for i, c in enumerate(calls)
+                            if "delete" in c and name_of(c) in first)
+            if not last_add < first_del:
+                raise AssertionError("old rules were deleted before the new ones existed")
+
+            FAKE_FIREWALL["fail_add"] = True
+            try:
+                if ks.install(server_ips=["192.0.2.1"]):
+                    raise AssertionError("install claimed success though netsh failed")
+            finally:
+                FAKE_FIREWALL["fail_add"] = False
+            if set(FAKE_FIREWALL_RULES) != second:
+                raise AssertionError("a failed re-arm dropped the rules that were in force")
+
+            # Rules from a pre-4.0 build are found and cleared too.
+            FAKE_FIREWALL_RULES.append("KaproTUN-killswitch-block")
+            if not ks.remove():
+                raise AssertionError("remove() did not confirm the rules are gone")
+            if FAKE_FIREWALL_RULES or ks.is_active():
+                raise AssertionError(f"rules left behind: {FAKE_FIREWALL_RULES}")
+        finally:
+            FAKE_FIREWALL_RULES.clear()
+
+
+def _v4_killswitch_survives_auto_recovery() -> None:
+    """The point of a kill-switch is the moment the tunnel dies. Every
+    auto-recovery path used to call disconnect(), which removed the rules."""
+    from kapro_tun.core import controller as _c
+    from kapro_tun.core import killswitch as ks
+    mgr = _c.ConnectionManager(on_log=lambda _l: None)
+    mgr.settings = dict(mgr.settings, kill_switch=True)
+    FAKE_FIREWALL_RULES.clear()
+    with _v4_patched(ks, is_supported=lambda: True, physical_dns_servers=lambda: []), \
+            _v4_patched(_c.admin, is_admin=lambda: True):
+        try:
+            mgr._maybe_arm_killswitch("203.0.113.7")
+            if mgr.protection_status.get("kill_switch") != "active" or not ks.is_active():
+                raise AssertionError("kill-switch did not arm")
+
+            mgr.disconnect(hold_killswitch=True)        # engine crashed, reconnecting
+            if not ks.is_active() or not mgr.killswitch_held:
+                raise AssertionError("auto-recovery teardown removed the kill-switch")
+
+            mgr._disarm_session_firewall()              # the reconnect attempt failed
+            if not ks.is_active() or not mgr.killswitch_held:
+                raise AssertionError("a failed reconnect removed the kill-switch")
+
+            mgr.disconnect()                            # the user pressed disconnect
+            if ks.is_active() or mgr.killswitch_held:
+                raise AssertionError("a user disconnect left the machine blocked")
+
+            mgr.disconnect(hold_killswitch=True)        # nothing armed: nothing to hold
+            if mgr.killswitch_held or ks.is_active():
+                raise AssertionError("hold invented a kill-switch that was never armed")
+
+            mgr._maybe_arm_killswitch("203.0.113.7")
+            mgr.disconnect(hold_killswitch=True)
+            mgr.release_killswitch()                    # setting switched off / app quits
+            if ks.is_active() or mgr.killswitch_held:
+                raise AssertionError("release_killswitch left the rules in place")
+
+            mgr._maybe_arm_killswitch("203.0.113.7")    # a fresh connect that then fails
+            mgr._disarm_session_firewall()
+            if ks.is_active():
+                raise AssertionError("a failed first connect left the machine blocked")
+        finally:
+            FAKE_FIREWALL_RULES.clear()
+
+
+def _v4_connect_keeps_the_killswitch_consistent() -> None:
+    """Runs _connect_tun_sing_box for real (engine and OS stubbed) through the
+    sequences where what is in the firewall and what the manager believes
+    could drift apart."""
+    import socket as _socket
+    from kapro_tun.core import controller as _c
+    from kapro_tun.core import killswitch as ks
+    from kapro_tun.core.parser import parse
+    cfg = parse(SAMPLE_URLS[1][1])
+
+    class _Engine:
+        def __init__(self):
+            self.running, self.starts = False, 0
+
+        def start(self, _path):
+            self.running, self.starts = True, self.starts + 1
+
+        def stop(self):
+            self.running = False
+
+        def is_running(self):
+            return self.running
+
+        def recent_logs(self):
+            return []
+
+        def mark_live(self):
+            pass
+
+    written: list = []
+    state = {"ready": True, "dns": True, "installs": 0, "fail_install": 0}
+    real_install = ks.install
+
+    def install(**kw):
+        state["installs"] += 1
+        return state["installs"] != state["fail_install"] and real_install(**kw)
+
+    def resolve(_host):
+        if not state["dns"]:
+            raise _socket.gaierror("blocked")
+        return "203.0.113.7"
+
+    mgr = _c.ConnectionManager(on_log=lambda _l: None)
+    mgr.settings = dict(mgr.settings, kill_switch=True, webrtc_leak_protection=False)
+    engine = mgr.sing_box_process = _Engine()
+    mgr._wait_until_running = lambda _t: True
+    mgr._wait_for_singbox_ready = lambda _t: state["ready"]
+    mgr._note_singbox_adblock_once = lambda: None
+    mgr._egress_fingerprint = lambda: "fp"
+
+    def connect() -> None:
+        mgr._connect_tun_sing_box(cfg, [])
+
+    def crash() -> None:
+        engine.running = False
+        mgr.disconnect(hold_killswitch=True)
+
+    def fails() -> bool:
+        try:
+            connect()
+        except _c.ConnectionError:
+            return True
+        return False
+
+    FAKE_FIREWALL_RULES.clear()
+    with _v4_patched(ks, is_supported=lambda: True, physical_dns_servers=lambda: [],
+                     install=install), \
+            _v4_patched(_c.admin, is_admin=lambda: True), \
+            _v4_patched(_c.sing_box_installer, is_installed=lambda: True), \
+            _v4_patched(_c.socket, gethostbyname=resolve), \
+            _v4_patched(_c.linux_tun_route, setup=lambda: None, teardown=lambda: None), \
+            _v4_patched(_c.sing_box_config,
+                        write_config=lambda *_a, **k: (written.append(k) or "cfg.json"),
+                        check_config=lambda _p: (True, "")):
+        try:
+            connect()
+            if not ks.is_active() or mgr.killswitch_held:
+                raise AssertionError("a fresh connect did not arm the kill-switch cleanly")
+            if written[-1].get("lockdown") is not True:
+                raise AssertionError("the kill-switch session was not built as a lockdown")
+
+            # The re-arm for the reconnect fails; the old rules still block.
+            crash()
+            state["fail_install"] = state["installs"] + 2      # early re-arm ok, final one fails
+            connect()
+            crash()
+            if not ks.is_active() or not mgr.killswitch_held:
+                raise AssertionError("after a failed re-arm the next auto-teardown "
+                                     "removed rules that were still in force")
+
+            state["ready"] = False                              # reconnect never carries traffic
+            if not fails() or not ks.is_active() or not mgr.killswitch_held:
+                raise AssertionError("a failed reconnect dropped the held kill-switch")
+
+            state["ready"], state["dns"] = True, False          # resolver unreachable under hold
+            connect()
+            if written[-1].get("server_ip") != "203.0.113.7":
+                raise AssertionError("reconnect under a held kill-switch needs a working resolver")
+            state["dns"] = True
+
+            mgr.disconnect()                                    # the user disconnects
+            if ks.is_active() or mgr.killswitch_held:
+                raise AssertionError("a user disconnect left the rules in place")
+
+            starts = engine.starts                              # the firewall refuses the rules
+            state["fail_install"] = state["installs"] + 1
+            if not fails() or engine.starts != starts or ks.is_active():
+                raise AssertionError("connected although the kill-switch could not be armed")
+
+            state["ready"] = False                              # a first connect that fails
+            if not fails() or ks.is_active() or mgr.killswitch_held:
+                raise AssertionError("a failed first connect left the machine blocked")
+        finally:
+            FAKE_FIREWALL_RULES.clear()
+
+
+def _v4_gui_recovery_paths_hold_the_killswitch() -> None:
+    """Pin the wiring: automatic teardowns hold, user actions release."""
+    import ast
+    import inspect
+    import textwrap
+    from kapro_tun.gui import main_window as _mw
+    cls = _mw.MainWindow
+
+    def disconnect_calls(fn_name: str) -> list:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(cls, fn_name))))
+        return [n for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "disconnect"
+                and isinstance(n.func.value, ast.Attribute) and n.func.value.attr == "manager"]
+
+    def holds(call) -> bool:
+        return any(k.arg == "hold_killswitch" and getattr(k.value, "value", None) is True
+                   for k in call.keywords)
+
+    auto = [name for name, fn in vars(cls).items()
+            if inspect.isfunction(fn) and name not in ("_do_disconnect", "_on_quit_for_real", "closeEvent")
+            and "self.manager.disconnect(" in inspect.getsource(fn)]
+    if len(auto) < 5:
+        raise AssertionError(f"expected the auto-recovery paths, found only {auto}")
+    for name in auto:
+        for call in disconnect_calls(name):
+            if not holds(call):
+                raise AssertionError(f"{name} tears down without holding the kill-switch")
+    for call in disconnect_calls("_do_disconnect"):
+        if holds(call):
+            raise AssertionError("a user disconnect must release the kill-switch")
+
+    src = inspect.getsource(cls)
+    if "and False" in src:
+        raise AssertionError("the kill-switch branch is still switched off with `and False`")
+    if "killswitch_held" not in inspect.getsource(cls._killswitch_holding):
+        raise AssertionError("_killswitch_holding does not look at the real state")
+    for fn in ("_on_quit_for_real", "closeEvent"):
+        if "release_killswitch" not in inspect.getsource(getattr(cls, fn)):
+            raise AssertionError(f"{fn} can leave the machine blocked after exit")
+    if "release_killswitch" not in inspect.getsource(_mw.SettingsPage._on_kill_switch_changed):
+        raise AssertionError("switching the setting off does not lift a held block")
+
+
+def _v4_killswitch_session_has_no_direct_routes() -> None:
+    """Under the kill-switch only the VPN server and the LAN are reachable past
+    the tunnel, so a config that still routed sites `direct` would just time
+    out. Such a session sends everything through the proxy instead."""
+    from kapro_tun.core import controller as _c
+    from kapro_tun.core import killswitch as ks
+    from kapro_tun.core import sing_box_config as sbc
+    from kapro_tun.core.parser import parse
+    proxy = parse(SAMPLE_URLS[0][1])
+    kwargs = dict(server_ip="203.0.113.7", route_ru_direct=True, games_direct=True,
+                  bypass_apps=["game.exe"])
+    cfg = sbc.build_config(proxy, ["yandex.ru"], lockdown=True, **kwargs)
+    private = [_v4_ip.ip_network(c) for c in sbc.PRIVATE_CIDRS + sbc.PRIVATE_CIDRS6]
+    for rule in cfg["route"]["rules"]:
+        if rule.get("outbound") != "direct":
+            continue
+        cidrs = rule.get("ip_cidr")
+        if not cidrs or set(rule) - {"ip_cidr", "action", "outbound"}:
+            raise AssertionError(f"lockdown config still routes direct: {rule}")
+        for c in cidrs:
+            net = _v4_ip.ip_network(c)
+            if not any(net.version == p.version and net.subnet_of(p) for p in private):
+                raise AssertionError(f"lockdown sends {c} past the tunnel")
+    tun = next(i for i in cfg["inbounds"] if i.get("type") == "tun")
+    extra = set(tun.get("route_exclude_address", [])) - set(sbc._LAN_ROUTE_EXCLUDE)
+    if extra:
+        raise AssertionError(f"lockdown excludes non-LAN networks from the tunnel: {extra}")
+    normal = sbc.build_config(proxy, ["yandex.ru"], **kwargs)
+    if not any(r.get("outbound") == "direct" and "domain_suffix" in r
+               for r in normal["route"]["rules"]):
+        raise AssertionError("the normal config lost its direct sites")
+
+    mgr = _c.ConnectionManager(on_log=lambda _l: None)
+    with _v4_patched(ks, is_supported=lambda: True), _v4_patched(_c.admin, is_admin=lambda: True):
+        mgr.settings = dict(mgr.settings, kill_switch=True)
+        if not mgr._routing_plan()["lockdown"]:
+            raise AssertionError("connect does not plan a lockdown session for the kill-switch")
+        mgr.settings = dict(mgr.settings, kill_switch=False)
+        if mgr._routing_plan()["lockdown"]:
+            raise AssertionError("lockdown planned without the kill-switch")
+    with _v4_patched(ks, is_supported=lambda: False):
+        mgr.settings = dict(mgr.settings, kill_switch=True)
+        if mgr._routing_plan()["lockdown"]:
+            raise AssertionError("lockdown planned where the kill-switch cannot be armed")
+
+
+def _v4_ipv6_protection_is_real_everywhere() -> None:
+    """The checkbox wrote a setting nothing read. IPv6 is rejected inside the
+    tunnel unconditionally on Windows/macOS; Linux, where the tunnel is
+    IPv4-only, had no protection at all."""
+    from kapro_tun.core import i18n as _i18n
+    from kapro_tun.core import leak_test as lt
+    from kapro_tun.core import linux_tun_route as ltr
+    from kapro_tun.core import storage as _st
+    from kapro_tun.gui import main_window as _mw
+
+    calls: list = []
+    with _v4_patched(ltr, applies=lambda: True,
+                     _run=lambda args: (calls.append(list(args)) or 0)):
+        ltr.setup()
+        added = [c for c in calls if c[:3] == ["ip", "-6", "route"] and "2000::/3" in c]
+        if not added or "unreachable" not in added[-1] or added[-1][3] not in ("add", "replace"):
+            raise AssertionError(f"Linux setup lays no IPv6 unreachable route: {calls}")
+        calls.clear()
+        ltr.teardown()
+        if not any(c[:4] == ["ip", "-6", "route", "del"] and "2000::/3" in c for c in calls):
+            raise AssertionError("Linux teardown leaves the IPv6 unreachable route behind")
+
+    if hasattr(_mw.SettingsPage, "_on_ipv6_leak_changed"):
+        raise AssertionError("Settings still has a handler for the dead IPv6 toggle")
+    if "ipv6_leak_protection" in _st.DEFAULT_SETTINGS:
+        raise AssertionError("the dead ipv6_leak_protection setting is still a default")
+    for lang, table in (("ru", _i18n._RU), ("en", _i18n._EN)):
+        hint = table["mw.ipv6_hint"].lower()
+        if "firewall" in hint or "ipv4 only" in hint or "только ipv4" in hint:
+            raise AssertionError(f"[{lang}] IPv6 hint still describes a firewall rule")
+
+    rep = lt.LeakTestReport()
+    rep.ipv6 = lt.IPv6Result(ip="2a01:ecc0::2", ipv6_blocked=False)
+    rep.webrtc = lt.WebRtcResult(stun_blocked=False)
+    keys = {k for k, _ in lt.fixable_protections(rep, {"webrtc_leak_protection": False})}
+    if keys != {"webrtc_leak_protection"}:
+        raise AssertionError(f"leak test offers a toggle that does nothing: {keys}")
+
+
+def _v4_settings_update_keeps_what_others_wrote() -> None:
+    """ConnectionManager kept the settings it loaded at startup and wrote that
+    whole dict back on every toggle — erasing the device id the subscription
+    code had created meanwhile, so the provider saw a new device each time."""
+    from kapro_tun.core import controller as _c
+    from kapro_tun.core import storage as _st
+    from kapro_tun.core import subscription as _sub
+    with _v4_fresh_data_dir():
+        mgr = _c.ConnectionManager(on_log=lambda _l: None)
+        hwid = _sub.device_headers()["x-hwid"]
+        mgr.update_settings(theme="light")
+        if _st.load_settings().get("device_id") != hwid:
+            raise AssertionError("a settings toggle erased the device id")
+        if _sub.device_headers()["x-hwid"] != hwid:
+            raise AssertionError("the provider would see a new device after a settings toggle")
+
+        s = _st.load_settings()
+        s["subscription_last_refresh"] = 12345
+        _st.save_settings(s)
+        mgr.update_settings(language="en")
+        on_disk = _st.load_settings()
+        if on_disk.get("subscription_last_refresh") != 12345 or on_disk.get("language") != "en":
+            raise AssertionError(f"another writer's change was lost: {on_disk}")
+        if mgr.settings.get("subscription_last_refresh") != 12345:
+            raise AssertionError("the manager's copy did not pick up the fresh value")
+        if _st.load_settings().get("theme") != "light":
+            raise AssertionError("the manager's own earlier change was lost")
+
+        # An unreadable file must not turn every setting back into a default.
+        _sbx_paths.settings_file().write_text("{ not json", encoding="utf-8")
+        mgr.update_settings(high_speed=True)
+        after = _st.load_settings()
+        if after.get("language") != "en" or after.get("device_id") != hwid:
+            raise AssertionError(f"a corrupt settings.json wiped the settings: {after}")
+
+
+def _v4_subscription_base64_variants() -> None:
+    """A URL-safe base64 body ('-' and '_') decoded to garbage and imported
+    zero servers without a word."""
+    import base64
+    from kapro_tun.core import subscription as _sub
+    links = [u for _p, u in SAMPLE_URLS if u.startswith(("vless://", "trojan://"))]
+    body, pad = "", 0
+    while True:                      # a body whose URL-safe form really differs
+        body = "\n".join(links) + f"\n#{'~' * pad}?>"
+        if set(base64.urlsafe_b64encode(body.encode()).decode()) & {"-", "_"}:
+            break
+        pad += 1
+    raw = body.encode()
+    std = base64.b64encode(raw).decode()
+    variants = {
+        "standard": std,
+        "url-safe": base64.urlsafe_b64encode(raw).decode(),
+        "url-safe, no padding": base64.urlsafe_b64encode(raw).decode().rstrip("="),
+        "wrapped at 76 columns": "\r\n".join(std[i:i + 76] for i in range(0, len(std), 76)),
+        "plain text": body,
+    }
+    for name, payload in variants.items():
+        got = _sub.result_from_body(payload)
+        if len(got.configs) != len(links):
+            raise AssertionError(f"{name} body: {len(got.configs)} servers, "
+                                 f"expected {len(links)} (errors: {got.errors})")
+    if _sub.result_from_body("<html><body>502 Bad Gateway</body></html>").configs:
+        raise AssertionError("an error page was parsed into servers")
+
+
+def _v4_parser_never_downgrades_security() -> None:
+    from kapro_tun.core import parser as _p
+    from kapro_tun.core import v2ray_json as _v2j
+    uid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    def rejected(url: str) -> bool:
+        try:
+            _p.parse(url)
+        except _p.ParseError:
+            return True
+        return False
+
+    hy = _p.parse("hysteria2://user:secret@h.example:443/?sni=h.example#x").outbound
+    if hy["password"] != "user:secret":
+        raise AssertionError(f"hysteria2 auth truncated to {hy['password']!r}")
+    if _p.parse("hysteria2://p%40ss%3Aw@h.example:443#x").outbound["password"] != "p@ss:w":
+        raise AssertionError("hysteria2 auth is not percent-decoded as a whole")
+
+    for scheme, cred in (("vless", uid), ("trojan", "pw")):
+        if not rejected(f"{scheme}://{cred}@h.example:443?security=reality&sni=x.com#x"):
+            raise AssertionError(f"{scheme} REALITY without a public key became plain TLS")
+    for sec in ("xtls", "bogus"):
+        if not rejected(f"vless://{uid}@h.example:443?security={sec}#x"):
+            raise AssertionError(f"vless security={sec} silently became no TLS at all")
+    if "tls" in _p.parse(f"vless://{uid}@h.example:443?security=none#x").outbound:
+        raise AssertionError("an explicit security=none must stay plain")
+    if "tls" not in _p.parse(f"vless://{uid}@h.example:443?security=tls#x").outbound:
+        raise AssertionError("security=tls lost its TLS block")
+
+    for value, want in (("false", False), ("0", False), (False, False), (0, False),
+                        ("true", True), ("1", True), (True, True), (1, True)):
+        tls = _v2j._tls_block({"security": "tls", "tlsSettings": {"allowInsecure": value}})
+        if bool(tls.get("insecure")) != want:
+            raise AssertionError(f"allowInsecure={value!r} read as insecure={not want}")
+    try:
+        _v2j._tls_block({"security": "bogus"})
+    except _p.ParseError:
+        pass
+    else:
+        raise AssertionError("v2ray-json: an unknown security value became no TLS")
+    if _v2j._tls_block({"security": "none"}) is not None or _v2j._tls_block({}) is not None:
+        raise AssertionError("v2ray-json: explicit/absent security must stay plain")
+
+    import base64 as _b64
+    import json as _json
+
+    def vmess(tls_value) -> str:
+        blob = {"add": "1.2.3.4", "port": 443, "id": uid, "aid": 0, "net": "tcp",
+                "tls": tls_value}
+        return "vmess://" + _b64.b64encode(_json.dumps(blob).encode()).decode()
+
+    for value, want in (("tls", True), (True, True), ("1", True),
+                        ("", False), ("none", False), (False, False)):
+        if ("tls" in _p.parse(vmess(value)).outbound) != want:
+            raise AssertionError(f"vmess tls={value!r} read as TLS={not want}")
+    if not rejected(vmess("reality")):
+        raise AssertionError("vmess with an unknown tls value silently became plaintext")
+
+    # What cannot be enforced is said out loud instead of dropped.
+    if not _p.security_warnings(_p.parse(f"vless://{uid}@h.example:443?security=none#x")):
+        raise AssertionError("a VLESS server without TLS is not mentioned")
+    pinned = _p.parse("hysteria2://pw@h.example:443/?insecure=1&pinSHA256=AB:CD#x")
+    notes = " ".join(_p.security_warnings(pinned)).lower()
+    if "pinsha256" not in notes:
+        raise AssertionError("a dropped certificate pin is not mentioned")
+    if not _p.security_warnings(_p.parse("trojan://pw@h.example:443?allowInsecure=1#x")):
+        raise AssertionError("an unverified certificate is not mentioned")
+    if _p.security_warnings(_p.parse(SAMPLE_URLS[1][1])):
+        raise AssertionError("a normally verified server triggers a warning")
+    import inspect
+    from kapro_tun.core import controller as _c
+    for fn in ("_connect_tun_sing_box", "_connect_proxy_sing_box"):
+        if "_note_security_warnings" not in inspect.getsource(getattr(_c.ConnectionManager, fn)):
+            raise AssertionError(f"{fn} connects without surfacing the warnings")
+
+
+def _v4_firewall_sandbox_is_in_place() -> None:
+    from kapro_tun.core import firewall_sweep, ipv6_block, killswitch, webrtc_block
+    for mod in (killswitch, webrtc_block, ipv6_block, firewall_sweep):
+        if mod.subprocess is not _FW_SUBPROCESS:
+            raise AssertionError(f"{mod.__name__} can reach the real firewall from the suite")
+
+
+check("kill-switch: block-only rules spare the server, the tunnel and the LAN (v4.0.0)",
+      _v4_killswitch_rules_block_only_what_must_not_pass)
+check("kill-switch: re-arm swaps generations with no gap, fails closed (v4.0.0)",
+      _v4_killswitch_install_swaps_without_a_gap)
+check("kill-switch: survives auto-recovery, released only by the user (v4.0.0)",
+      _v4_killswitch_survives_auto_recovery)
+check("kill-switch: the connect path keeps firewall and state in step (v4.0.0)",
+      _v4_connect_keeps_the_killswitch_consistent)
+check("kill-switch: GUI recovery paths hold, quit and settings release (v4.0.0)",
+      _v4_gui_recovery_paths_hold_the_killswitch)
+check("kill-switch: a locked-down session routes nothing direct (v4.0.0)",
+      _v4_killswitch_session_has_no_direct_routes)
+check("ipv6: protection is real on every OS, the dead toggle is gone (v4.0.0)",
+      _v4_ipv6_protection_is_real_everywhere)
+check("settings: an update keeps the device id and other writers' changes (v4.0.0)",
+      _v4_settings_update_keeps_what_others_wrote)
+check("subscription: url-safe and wrapped base64 bodies import (v4.0.0)",
+      _v4_subscription_base64_variants)
+check("parser: never downgrades a server's transport security (v4.0.0)",
+      _v4_parser_never_downgrades_security)
+check("firewall sandbox: the suite cannot reach the real firewall (v4.0.0)",
+      _v4_firewall_sandbox_is_in_place)
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 
 print()
+if not _checks_run:
+    failures.append(f"KAPROTUN_SMOKE_ONLY={_ONLY!r} matched no check — nothing was tested")
 if failures:
     print(f"=== SMOKE TEST FAILED ({len(failures)} issue{'s' if len(failures) != 1 else ''}) ===")
     for f in failures:

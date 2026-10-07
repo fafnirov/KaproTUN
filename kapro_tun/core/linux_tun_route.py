@@ -31,6 +31,12 @@ RULE_TUN_PRIORITY = "9000"    # весь остальной трафик — в 
 # Любой адрес в TUN-подсети: systemd-resolved отправит DNS через KaproTun, а
 # sing-box hijack-dns перехватит :53 независимо от адреса назначения.
 TUN_DNS_TARGET = "10.255.0.1"
+# На Linux TUN только IPv4 (см. sing_box_config), поэтому глобальный IPv6 шёл бы
+# мимо туннеля через реальный интерфейс. Маршрут `unreachable` на весь
+# global-unicast закрывает это: приложение сразу получает отказ и переходит на
+# IPv4. Локальная сеть (fe80::/10, ULA, on-link /64) точнее этого маршрута и
+# продолжает работать.
+IPV6_GLOBAL_UNICAST = "2000::/3"
 
 
 def applies() -> bool:
@@ -60,6 +66,10 @@ def setup() -> None:
           "priority", RULE_MARK_PRIORITY])
     _run(["ip", "rule", "add", "from", "all", "lookup", TABLE,
           "priority", RULE_TUN_PRIORITY])
+    # Внешний IPv6 — в отказ, а не мимо туннеля (см. IPV6_GLOBAL_UNICAST).
+    # `add`, не `replace`: если у пользователя уже есть свой маршрут на этот
+    # префикс, не затираем его (teardown снимает только `unreachable`).
+    _run(["ip", "-6", "route", "add", "unreachable", IPV6_GLOBAL_UNICAST])
     # systemd-resolved → DNS через TUN (иначе getaddrinfo минует туннель)
     _run(["resolvectl", "dns", TUN_DEVICE, TUN_DNS_TARGET])
     _run(["resolvectl", "default-route", TUN_DEVICE, "yes"])
@@ -75,4 +85,5 @@ def teardown() -> None:
     _run(["ip", "rule", "del", "priority", RULE_TUN_PRIORITY])
     _run(["ip", "rule", "del", "priority", RULE_MARK_PRIORITY])
     _run(["ip", "route", "flush", "table", TABLE])
+    _run(["ip", "-6", "route", "del", "unreachable", IPV6_GLOBAL_UNICAST])
     _run(["resolvectl", "flush-caches"])

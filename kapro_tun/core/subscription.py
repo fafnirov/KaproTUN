@@ -93,15 +93,7 @@ def device_headers() -> dict:
     own subscription plan is built on."""
     try:
         from . import storage
-        settings = storage.load_settings()
-        device_id = str(settings.get("device_id") or "").strip()
-        if not device_id:
-            import uuid
-            device_id = str(uuid.uuid4())
-            try:
-                storage.save_settings({**settings, "device_id": device_id})
-            except Exception:
-                pass          # a non-persisted id still works for this session
+        device_id = storage.ensure_device_id()
     except Exception:
         return {}
     import platform
@@ -431,9 +423,13 @@ def parse_subscription_body(body: str) -> list[str]:
     # If the body doesn't have an obvious scheme already, try base64-decode
     if not any(sch in body for sch in SUPPORTED_SCHEMES):
         try:
-            # base64 fix-padding: append '=' until length % 4 == 0
-            padded = body + "=" * ((-len(body)) % 4)
-            decoded = base64.b64decode(padded, validate=False).decode(
+            # Panels emit standard or URL-safe base64, padded or not, sometimes
+            # wrapped at 76 columns. b64decode(validate=False) DROPS characters
+            # outside the standard alphabet, so a URL-safe body ('-', '_')
+            # decoded to garbage and imported nothing, without an error.
+            compact = "".join(body.split()).replace("-", "+").replace("_", "/")
+            padded = compact.rstrip("=") + "=" * ((-len(compact.rstrip("="))) % 4)
+            decoded = base64.b64decode(padded, validate=True).decode(
                 "utf-8", errors="replace",
             )
             if any(sch in decoded for sch in SUPPORTED_SCHEMES):

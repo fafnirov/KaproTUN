@@ -204,9 +204,13 @@ def _run_app() -> int:
     # — every app on the machine has no internet. Clear them so the
     # user isn't trapped (we'll re-install on their next connect if
     # they still have the setting enabled).
+    # Whether that worked matters: the rules can only be deleted by an elevated
+    # process, and after a crash or a reboot this launch is often not one. Then
+    # the machine stays blocked — and the window says why (see reveal()).
+    killswitch_stuck = False
     try:
         if killswitch.is_active():
-            killswitch.remove()
+            killswitch_stuck = not killswitch.remove(force=True)
     except Exception:
         pass
 
@@ -287,6 +291,8 @@ def _run_app() -> int:
             window.show()
             if splash is not None:
                 splash.finish(window)
+        if killswitch_stuck:
+            window.warn_killswitch_stuck()
         # Optional auto-connect on launch — wait a beat after window
         # construction so any first-run installer dialogs finish first.
         if window.manager.settings.get("autoconnect_on_launch", False):

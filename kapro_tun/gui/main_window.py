@@ -418,16 +418,13 @@ class SettingsPage(QWidget):
         kill_hint.setContentsMargins(28, 0, 0, 0)
         outer.addWidget(kill_hint)
 
-        # --- IPv6 leak protection (v1.11.0) ---
-        # TUN tunnels IPv4 only. On IPv6-enabled hosts (most RU residential
-        # ISPs hand out public v6), apps with AAAA records leak through
-        # the real ISP. Default ON because the user is almost always
-        # surprised when we explain it ("я думал VPN покрывает всё").
+        # --- IPv6 leak protection ---
+        # Built into the tunnel and always on, so this is a statement, not a
+        # switch: ticked and disabled. Until v4.0.0 it was a live checkbox that
+        # wrote a setting nothing read — on or off, the behaviour was the same.
         self.ipv6_check = QCheckBox(tr("mw.ipv6_check"))
-        self.ipv6_check.setChecked(
-            bool(manager.settings.get("ipv6_leak_protection", True))
-        )
-        self.ipv6_check.toggled.connect(self._on_ipv6_leak_changed)
+        self.ipv6_check.setChecked(True)
+        self.ipv6_check.setEnabled(False)
         outer.addWidget(self.ipv6_check)
         ipv6_hint = QLabel(tr("mw.ipv6_hint"))
         ipv6_hint.setObjectName("dim")
@@ -791,10 +788,11 @@ class SettingsPage(QWidget):
 
     def _on_kill_switch_changed(self, checked: bool) -> None:
         self._manager.update_settings(kill_switch=checked)
-        self.settings_changed.emit()
-
-    def _on_ipv6_leak_changed(self, checked: bool) -> None:
-        self._manager.update_settings(ipv6_leak_protection=checked)
+        if not checked:
+            # Switching it off lifts the block now, not at the next connect:
+            # with the tunnel down this is the way to get the internet back
+            # without reconnecting.
+            self._manager.release_killswitch()
         self.settings_changed.emit()
 
     def _on_webrtc_leak_changed(self, checked: bool) -> None:
@@ -1771,8 +1769,6 @@ class MainWindow(QMainWindow):
             self._crash_confirm += 1
             if self._crash_confirm < 2:
                 return
-            kill_switch = bool(self.manager.settings.get("kill_switch", False))
-            mode_is_tun = self.manager.current_mode() == MODE_TUN
             rc = primary.returncode()
 
             # Log a FULL diagnostic (old pid, returncode, uptime, last 10 raw
@@ -1787,72 +1783,55 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            # v3.1.0: sing-box is a single process — when it dies the TUN is
-            # gone too, so there's no separate helper to keep the tunnel up. A
-            # sing-box death always falls through to the reconnect path below;
-            # the kill-switch firewall rules keep blocking leaks until the
-            # reconnect re-arms them. (`if False` keeps the old kill-switch-holds
-            # branch out without restructuring the indentation.)
-            if kill_switch and mode_is_tun and False:
-                if not self._crash_notified:
+            # sing-box is a single process: when it dies the TUN is gone too,
+            # so the only way back is a reconnect. Most crashes are transient,
+            # so try a few times before giving up. Every teardown on this path
+            # HOLDS the kill-switch (v4.0.0): the firewall rules stay through
+            # the reconnect, and stay if it gives up, until the user reconnects
+            # or releases them. Before, disconnect() removed them right here —
+            # at the one moment a kill-switch is for.
+            if (self._reconnect_attempts < self._reconnect_max
+                    and not self._reconnect_timer.isActive()
+                    and not self._auto_recovery_disabled):
+                delay = self._reconnect_backoff[self._reconnect_attempts]
+                self._reconnect_attempts += 1
+                # Gate + log (reason=process_crash); aborts on no-config /
+                # storm without starting another reconnect.
+                if self._arm_reconnect("process_crash",
+                                       self._reconnect_attempts, self._reconnect_max):
                     self.logs_page.append(
                         f"[!] {core_name} упал (код {rc}). "
-                        f"Kill-switch активен — туннель удерживается, "
-                        f"иностранный трафик блокируется."
+                        f"Авто-переподключение #{self._reconnect_attempts}/"
+                        f"{self._reconnect_max} через {delay} с…"
                     )
                     show_toast(
                         self,
-                        tr("mw.toast_killswitch_hold"),
-                        kind="error",
-                        duration_ms=10000,
+                        tr("mw.toast_reconnecting", n=self._reconnect_attempts),
+                        kind="info", duration_ms=delay * 1000,
+                    )
+                    # Tear down xray/proxy state but DON'T clear self._active
+                    # — the timer reuses the SAME config for the reconnect.
+                    saved = self._active_config
+                    self.manager.disconnect(hold_killswitch=True)
+                    self._active_config = saved
+                    self._connected_at = 0.0
+                    self._reconnect_timer.start(delay * 1000)
+            elif self._reconnect_attempts >= self._reconnect_max:
+                if not self._crash_notified:
+                    self.logs_page.append(
+                        f"[!] Авто-переподключение не удалось после "
+                        f"{self._reconnect_max} попыток. Ткни «ВКЛЮЧИТЬ» "
+                        f"вручную когда захочешь снова."
+                    )
+                    show_toast(
+                        self,
+                        tr("mw.toast_reconnect_failed", n=self._reconnect_max),
+                        kind="error", duration_ms=10000,
                     )
                     self._crash_notified = True
-            else:
-                # Plain HTTP-mode crash (or TUN without kill-switch): try
-                # to auto-reconnect a few times before giving up. Most
-                # crashes are transient — a brief network blip or xray
-                # config-reload glitch.
-                if (self._reconnect_attempts < self._reconnect_max
-                        and not self._reconnect_timer.isActive()
-                        and not self._auto_recovery_disabled):
-                    delay = self._reconnect_backoff[self._reconnect_attempts]
-                    self._reconnect_attempts += 1
-                    # Gate + log (reason=process_crash); aborts on no-config /
-                    # storm without starting another reconnect.
-                    if self._arm_reconnect("process_crash",
-                                           self._reconnect_attempts, self._reconnect_max):
-                        self.logs_page.append(
-                            f"[!] {core_name} упал (код {rc}). "
-                            f"Авто-переподключение #{self._reconnect_attempts}/"
-                            f"{self._reconnect_max} через {delay} с…"
-                        )
-                        show_toast(
-                            self,
-                            tr("mw.toast_reconnecting", n=self._reconnect_attempts),
-                            kind="info", duration_ms=delay * 1000,
-                        )
-                        # Tear down xray/proxy state but DON'T clear self._active
-                        # — the timer reuses the SAME config for the reconnect.
-                        saved = self._active_config
-                        self.manager.disconnect()
-                        self._active_config = saved
-                        self._connected_at = 0.0
-                        self._reconnect_timer.start(delay * 1000)
-                elif self._reconnect_attempts >= self._reconnect_max:
-                    if not self._crash_notified:
-                        self.logs_page.append(
-                            f"[!] Авто-переподключение не удалось после "
-                            f"{self._reconnect_max} попыток. Ткни «ВКЛЮЧИТЬ» "
-                            f"вручную когда захочешь снова."
-                        )
-                        show_toast(
-                            self,
-                            tr("mw.toast_reconnect_failed", n=self._reconnect_max),
-                            kind="error", duration_ms=10000,
-                        )
-                        self._crash_notified = True
-                    self.manager.disconnect()
-                    self._connected_at = 0.0
+                self.manager.disconnect(hold_killswitch=True)
+                self._connected_at = 0.0
+                self._note_killswitch_hold()
         else:
             # Reset crash-notified flags when state is healthy
             self._crash_notified = False
@@ -1896,14 +1875,14 @@ class MainWindow(QMainWindow):
             # (instead of always "Не подключено"). Mirrors the crash / reconnect
             # / kill-switch branches above (which already logged + toasted the
             # reason); here we set the matching home state, single-source.
-            if self._killswitch_holding():
-                self.home_page.set_state(connection_state.KILLSWITCH_ACTIVE)
-                self.tray.set_state("connecting", active_name)
-            elif self._reconnect_timer.isActive():
+            if self._reconnect_timer.isActive():
                 self.home_page.set_state(
                     connection_state.RECONNECTING,
                     f"#{self._reconnect_attempts}/{self._reconnect_max}")
                 self.tray.set_state("connecting", active_name)
+            elif self._killswitch_holding():
+                self.home_page.set_state(connection_state.KILLSWITCH_ACTIVE)
+                self.tray.set_state("idle", active_name)
             elif (self._active_config is not None
                     and self._reconnect_attempts >= self._reconnect_max):
                 self.home_page.set_state(connection_state.ERROR, tr("mw.state_vpn_failed"))
@@ -2230,6 +2209,13 @@ class MainWindow(QMainWindow):
         self._connecting = False
         self.home_page.set_state("idle")
         self._refresh_home()
+        if self._reconnect_attempts <= 0 and self._killswitch_holding():
+            # Not an auto-reconnect attempt (those report on their own when
+            # they give up): a manual connect, a server switch or a self-heal
+            # restart failed while the kill-switch is up. The error alone would
+            # not explain why the internet is gone.
+            self._note_killswitch_hold()
+            msg = f"{msg}\n\n{tr('mw.toast_killswitch_hold')}"
         # If this was triggered by auto-reconnect (we're mid-attempts),
         # silently let the timer try again instead of popping a modal
         # — the user would be furious to OK 3 dialogs in 30 seconds.
@@ -2275,8 +2261,9 @@ class MainWindow(QMainWindow):
                     )
                     self._crash_notified = True
                 self._reconnect_timer.stop()
-                self.manager.disconnect()
+                self.manager.disconnect(hold_killswitch=True)
                 self._connected_at = 0.0
+                self._note_killswitch_hold()
                 self._refresh_home()
             return
         QMessageBox.critical(self, tr("mw.connect_failed_title"), msg)
@@ -2321,7 +2308,10 @@ class MainWindow(QMainWindow):
         self._reconnect_timer.stop()
         self._auto_recovery_disabled = True
         try:
-            self.manager.disconnect()   # stops helpers; restores routes/DNS/proxy/firewall
+            # Stops the engine and restores routes/DNS/proxy. An armed
+            # kill-switch stays: an emergency stop is not the user asking for
+            # unprotected internet.
+            self.manager.disconnect(hold_killswitch=True)
         except Exception:
             pass
         self._connected_at = 0.0
@@ -2329,6 +2319,9 @@ class MainWindow(QMainWindow):
         self.logs_page.append("[!] " + line)
         app_log.log(line)
         show_toast(self, tr("mw.toast_emergency_stop"), kind="error", duration_ms=12000)
+        # After the emergency toast, which would otherwise replace it: of the
+        # two, "the internet is blocked on purpose" is the one to leave on screen.
+        self._note_killswitch_hold()
         self._refresh_home()
 
     def _do_auto_reconnect(self) -> None:
@@ -2388,8 +2381,9 @@ class MainWindow(QMainWindow):
                 )
                 self._crash_notified = True
             self._reconnect_timer.stop()
-            self.manager.disconnect()      # restores DNS/routes/proxy, clears journal
+            self.manager.disconnect(hold_killswitch=True)      # restores DNS/routes/proxy, clears journal
             self._connected_at = 0.0
+            self._note_killswitch_hold()
             self._refresh_home()
             return
 
@@ -2412,7 +2406,7 @@ class MainWindow(QMainWindow):
         # reconnects to the SAME server. disconnect() restores DNS/routes/proxy
         # and clears the recovery journal; the reconnect re-marks it.
         saved = self._active_config
-        self.manager.disconnect()
+        self.manager.disconnect(hold_killswitch=True)
         self._active_config = saved
         self._connected_at = 0.0
         self._reconnect_timer.start(delay * 1000)
@@ -2446,7 +2440,7 @@ class MainWindow(QMainWindow):
         show_toast(self, tr("mw.toast_network_changed"),
                    kind="info", duration_ms=delay * 1000)
         saved = self._active_config
-        self.manager.disconnect()
+        self.manager.disconnect(hold_killswitch=True)
         self._active_config = saved
         self._connected_at = 0.0
         self._reconnect_timer.start(delay * 1000)
@@ -2500,7 +2494,7 @@ class MainWindow(QMainWindow):
             app_log.log(em)
             show_toast(self, tr("mw.toast_socket_exhaust"), kind="info", duration_ms=4000)
             saved = self._active_config
-            self.manager.disconnect()
+            self.manager.disconnect(hold_killswitch=True)
             self._active_config = saved
             self._connected_at = 0.0
             self._reconnect_timer.start(1000)
@@ -2682,12 +2676,13 @@ class MainWindow(QMainWindow):
         show_toast(self, tr("mw.toast_mem_reset", n=self._mem_heal_count),
                    kind="info", duration_ms=4000)
         saved = self._active_config
-        self.manager.disconnect()
+        self.manager.disconnect(hold_killswitch=True)
         self._active_config = saved
         self._connected_at = 0.0
         self._reconnect_timer.start(1000)
 
-    def _do_disconnect(self, reason: str = "user_requested") -> None:
+    def _do_disconnect(self, reason: str = "user_requested",
+                       hold_killswitch: bool = False) -> None:
         # Disconnect with an HONEST reason. Default 'user_requested' — this is
         # only called from the user's connect/disconnect button and the tray
         # server-switch; auto paths (memory/DNS/socket/crash) tear down via
@@ -2704,7 +2699,9 @@ class MainWindow(QMainWindow):
         self._reconnect_history = []
         self._sock_exhaust_bursts = 0
         self._last_sock_exhaust_ts = 0.0
-        self.manager.disconnect()
+        # A user disconnect releases the kill-switch; the one caller that is
+        # about to connect again straight away (server switch) keeps it.
+        self.manager.disconnect(hold_killswitch=hold_killswitch)
         self._connected_at = 0.0
         self.logs_page.append("[*] Отключено, системный прокси восстановлен")
         app_log.log(f"[disconnect] reason={reason}")
@@ -3020,6 +3017,10 @@ class MainWindow(QMainWindow):
         self._join_workers()
         if self.manager.is_connected():
             self.manager.disconnect()
+        elif self.manager.killswitch_held:
+            # Not connected, but still blocking: never leave the machine
+            # without internet after the app is gone.
+            self.manager.release_killswitch()
         self.tray.hide()
         from PySide6.QtWidgets import QApplication
         QApplication.quit()
@@ -3059,7 +3060,9 @@ class MainWindow(QMainWindow):
         self._active_config = cfg
         self.manager.update_settings(last_config_name=cfg.name)
         if self.manager.is_connected():
-            self._do_disconnect()
+            # Switching servers: the tunnel is down for a moment by design, so
+            # the kill-switch stays up across it.
+            self._do_disconnect(hold_killswitch=True)
         self._do_connect()
         self._refresh_home()
 
@@ -3089,10 +3092,46 @@ class MainWindow(QMainWindow):
             return False
 
     def _killswitch_holding(self) -> bool:
-        """Always False since v3.1.0: sing-box is a single process — when it dies
-        the TUN is gone too, so there's no 'helper died but TUN still up' state the
-        old classic xray+tun2socks engine had."""
-        return False
+        """True while the kill-switch is blocking traffic with no tunnel up:
+        the client is between reconnect attempts, or gave up and is waiting for
+        the user. (Hard-wired to False from v3.1.0 to v3.8.3, when every
+        teardown removed the rules.)"""
+        return bool(self.manager.killswitch_held) and not self.manager.is_connected()
+
+    def warn_killswitch_stuck(self) -> None:
+        """Startup: kill-switch rules from a session that died are still in the
+        firewall and this launch could not delete them (not elevated). Without
+        this the user has no internet and nothing on screen to connect it to
+        KaproTUN."""
+        app_log.log("[protection] stale kill_switch rules survived startup (not elevated)")
+        self.logs_page.append(
+            "[!] Правила kill-switch от прошлой сессии остались в файрволе и "
+            "блокируют интернет. Снять их может только запуск от администратора."
+        )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(tr("mw.killswitch_stuck_title"))
+        box.setText(tr("mw.killswitch_stuck_body"))
+        relaunch = box.addButton(tr("mw.relaunch_admin"), QMessageBox.AcceptRole)
+        box.addButton(tr("mw.killswitch_stuck_later"), QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is relaunch:
+            self.settings_page._on_relaunch_admin()
+
+    def _note_killswitch_hold(self) -> None:
+        """Auto-recovery has stopped with the kill-switch still armed. Say
+        plainly that the internet is blocked on purpose and how to lift it —
+        otherwise it just looks like the network died."""
+        if not self._killswitch_holding():
+            return
+        self.logs_page.append(
+            "[!] Kill-switch держит блокировку: VPN не восстановился, поэтому "
+            "интернета нет. Нажми «ВКЛЮЧИТЬ», чтобы переподключиться, или сними "
+            "галочку Kill-switch в настройках, чтобы вернуть интернет без VPN."
+        )
+        app_log.log("[protection] kill_switch holding with no tunnel")
+        show_toast(self, tr("mw.toast_killswitch_hold"),
+                   kind="error", duration_ms=15000)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         """Persist size to settings + reposition the 8 edge resize-handles.
@@ -3133,6 +3172,8 @@ class MainWindow(QMainWindow):
             self._join_workers()
             if self.manager.is_connected():
                 self.manager.disconnect()
+            elif self.manager.killswitch_held:
+                self.manager.release_killswitch()
             event.accept()
         else:
             # Frameless mode doesn't show an X button, but Alt+F4 still

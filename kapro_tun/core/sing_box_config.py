@@ -517,6 +517,7 @@ def build_config(
     log_level: str = "warn",
     on_log=None,
     upstream_dns: str = "",
+    lockdown: bool = False,
 ) -> dict[str, Any]:
     """Full sing-box config dict for TUN mode. Raises UnsupportedBySingBox if
     the proxy can't be faithfully reproduced. `on_log` (optional) receives
@@ -529,7 +530,16 @@ def build_config(
     `dns_option` / `dns_leak_protection` are accepted for call-site
     compatibility but IGNORED as of v3.1.1: DNS is always the system resolver
     (see _dns_block). They stay in the signature so older callers/tests don't
-    break, not because they do anything."""
+    break, not because they do anything.
+
+    `lockdown` (v4.0.0): a kill-switch session. The firewall then drops
+    everything that leaves outside the tunnel except the VPN server and the
+    LAN (see killswitch.py), and a `direct` route IS traffic outside the
+    tunnel — so nothing is routed direct and nothing but the LAN is excluded
+    from the TUN; it all goes through the proxy instead of timing out."""
+    if lockdown:
+        direct_domains, route_ru_direct = [], False
+        games_direct, bypass_apps = False, None
     outbound = dict(proxy.outbound)
     ensure_supported(outbound)
     # Transport gate: reject XHTTP/splithttp etc. that the parser can't render
@@ -704,6 +714,7 @@ def write_config(
     games_direct: bool = False,
     bypass_apps: list | None = None,
     on_log=None,
+    lockdown: bool = False,
 ) -> str:
     """Build + atomically write the runtime config (user-only perms; it carries
     the server UUID/password). Deleted on disconnect via
@@ -718,7 +729,7 @@ def write_config(
         dns_leak_protection=dns_leak_protection, block_ads=block_ads,
         route_ru_direct=route_ru_direct, high_speed=high_speed,
         games_direct=games_direct, bypass_apps=bypass_apps, on_log=on_log,
-        upstream_dns=upstream,
+        upstream_dns=upstream, lockdown=lockdown,
     )
     target = paths.write_secure_text(
         paths.sing_box_runtime_config_file(),

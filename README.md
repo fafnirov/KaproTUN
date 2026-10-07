@@ -126,8 +126,10 @@ interface and straight into the block they're being tunnelled to avoid.
 - 📥 **Subscription URL import** — paste one URL, get every config from your
   provider. Background auto-refresh every 12 h (additive only, never deletes
   working configs).
-- 🛡 **Real firewall kill-switch** — if the tunnel dies, Windows Firewall blocks
-  all outbound except `sing-box.exe`. No silent leak of your real IP.
+- 🛡 **Firewall kill-switch** (Windows, optional) — while it is on, nothing but
+  the connection to the VPN server and your local network leaves outside the
+  tunnel, including while the client is reconnecting. Split routing is off for
+  such a session: Russian sites and games go through the VPN too.
 - 🔁 **Self-healing** — auto-reconnect with backoff if the engine dies, and an
   automatic clean reconnect when you roam **Ethernet ↔ Wi-Fi** (the tunnel is
   pinned to the interface it was created on and would otherwise leak or stall).
@@ -137,7 +139,8 @@ interface and straight into the block they're being tunnelled to avoid.
 - 🔒 **Encrypted-on-disk configs** — Windows DPAPI (the mechanism Chrome uses
   for saved passwords). Old plaintext configs auto-upgrade on first launch.
 - 🚫 **Leak protection** — IPv6 rejected in-tunnel (no `ERR_NETWORK_ACCESS_DENIED`
-  fallout), WebRTC/STUN blocked, DNS hijacked into the tunnel's resolver.
+  fallout; an unreachable route on Linux), WebRTC/STUN blocked on Windows, DNS
+  hijacked into the tunnel's resolver.
 - 📡 **Tray quick-connect** — top-3 fastest configs by ping, one click to switch.
 - 🌍 **EN / RU localisation**, light/dark themes, live traffic graph, per-config
   ping.

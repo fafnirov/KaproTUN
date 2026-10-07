@@ -160,10 +160,17 @@ returns are exposed to anyone on the path.
 
 ## Leak protection
 
-- **IPv6.** The TUN carries an IPv6 address, so `::/0` is captured into the
-  tunnel; global-unicast v6 (`2000::/3`) is then **rejected in-tunnel** with a
-  clean RST/ICMP, so Happy Eyeballs falls back to IPv4 instantly and v6 never
-  egresses your real interface. LAN/ULA/link-local v6 stays direct.
+- **IPv6.** On Windows and macOS the TUN carries an IPv6 address, so `::/0` is
+  captured into the tunnel; global-unicast v6 (`2000::/3`) is then **rejected
+  in-tunnel** with a clean RST/ICMP, so Happy Eyeballs falls back to IPv4
+  instantly and v6 never egresses your real interface. LAN/ULA/link-local v6
+  stays direct. On Linux the tunnel is IPv4-only, so while connected the client
+  lays an `unreachable` route for `2000::/3` instead, with the same effect.
+  **Correction:** through v3.8.3 Linux had no IPv6 handling at all — global
+  IPv6 left on the real interface — and this document did not say so. The
+  Settings checkbox for this protection also did nothing on any OS: it wrote a
+  value no code read. From v4.0.0 the protection is always on and the checkbox
+  is a fixed indicator, not a switch.
 - **WebRTC/STUN.** A firewall rule blocks outbound UDP to the common STUN
   ports (3478, 5349, 19302, 19305-19309). It matters even with a full TUN:
   split routing sends Russian destinations direct, so a page's script could
@@ -172,9 +179,10 @@ returns are exposed to anyone on the path.
   installed — the call was lost when the legacy engines were removed, while the
   setting, the Settings hint and this document all kept describing it. Fixed in
   v3.7.5, which also closes an off-by-one that left port 19309 open.
-- **Protections that fail to arm are reported.** If kill-switch or the STUN
-  block is switched on but its firewall rule can't be installed, the app says
-  so after connecting instead of leaving a ticked box to imply it works.
+- **Protections that fail to arm are reported.** If the STUN block is switched
+  on but its firewall rule can't be installed, the app says so after connecting
+  instead of leaving a ticked box to imply it works. A kill-switch whose rules
+  can't be installed stops the connection altogether (v4.0.0).
 - **QUIC.** On the default userspace stack, tunnelled QUIC (UDP/443) is
   rejected so browsers fall back to TCP, which the tunnel carries reliably.
 
@@ -216,16 +224,62 @@ coverage as on Windows minus the Windows-only firewall protections.
 
 ## Kill-switch
 
-Optional (Settings), **Windows-only**, needs admin. When on, Windows Firewall
-blocks all outbound except your LAN (printers / NAS / router UI) and
-**`sing-box.exe`** — the only process that reaches the public internet. If the
-tunnel process dies, traffic stops instead of silently falling back to your ISP.
-All KaproTUN firewall rules are removed on disconnect, and swept on the next
-launch if the app crashed.
+Optional (Settings), **Windows-only**, needs admin. While it is armed, Windows
+Firewall drops everything that leaves the machine outside the tunnel except:
 
-Note the interaction with split routing: destinations excluded from the tunnel
-(games, RU IPs) are carried by `sing-box.exe` too, so they keep working under
-the kill-switch — by design.
+- the connection to **your VPN server's IP address**;
+- your **local network** — private ranges, multicast and broadcast (printers,
+  NAS, the router UI);
+- the network's own DNS servers when they are public addresses, on **port 53
+  only** (the engine needs them to resolve names, and so does a reconnect).
+
+Traffic that goes through the tunnel is not touched. Global IPv6 from anything
+but the tunnel's own address is dropped as well.
+
+If Windows refuses the rules, the connection is **not made**: the client stops
+with an error instead of connecting without the protection you asked for.
+
+What it does not cover — so you can decide whether it is enough for you:
+
+- **DNS names still reach your network's resolver** (port 53), tunnel up or
+  down. That is how the client resolves by design (see "DNS" above); the
+  kill-switch does not change it.
+- **The VPN server's IP is reachable on every port.** If your server sits behind
+  a shared CDN address, other sites on that same address are reachable too.
+- **Traffic Windows forwards for others** — WSL2 and Hyper-V guests, Mobile
+  Hotspot clients — is not filtered by these rules. Neither are replies on
+  connections that came in from outside (for example an RDP session).
+- **Other VPNs and overlay networks** (Tailscale, a work WireGuard) are blocked
+  like any other traffic outside the tunnel.
+- **A crash followed by an unelevated start.** The rules outlive a crash and a
+  reboot, and only an elevated process can delete them. If KaproTUN starts
+  without administrator rights and finds them, it tells you and offers to
+  relaunch elevated.
+
+**It stays armed while the client reconnects.** If the engine dies, the DNS
+watchdog trips or the network changes, the rules stay in place through the
+reconnect attempts, and stay if the client gives up: the internet is then
+blocked until you reconnect, untick the setting or quit the app. A normal
+disconnect removes the rules. If KaproTUN itself is killed they remain until
+its next launch, which sweeps every KaproTUN rule.
+
+**It turns split routing off for the session.** A site routed "direct" leaves
+through your real interface, and a firewall rule cannot tell that apart from a
+leak. So with the kill-switch on, Russian sites, the direct list, the games
+bypass and bypass apps all go through the VPN; only the local network stays
+direct.
+
+**Correction (v4.0.0).** Through v3.8.3 this section described a kill-switch
+that did not do what it said, for two independent reasons. The rules were
+"block all outbound" plus "allow `sing-box.exe`"; Windows Firewall applies
+block rules before allow rules, so by Microsoft's documented rule order that
+pair blocks the engine too. And every automatic reconnect path removed the
+rules before reconnecting, so they were absent exactly while the tunnel was
+down. v4.0.0 replaces the rule set with block-only rules scoped by address (as
+listed above) and keeps them through reconnects. The generated rules are
+covered by automated tests; they cannot test your machine's firewall, so if
+you rely on the kill-switch, check it once: connect, end `sing-box.exe` in
+Task Manager, and confirm that sites stop loading until the client reconnects.
 
 ## Downloads
 

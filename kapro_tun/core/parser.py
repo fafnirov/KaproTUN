@@ -74,6 +74,23 @@ def _truthy(value: str) -> bool:
     return value.lower() in ("1", "true", "yes")
 
 
+def _reality_keys(qs: dict[str, list[str]], security: str) -> tuple[str, str]:
+    """(public key, short id) for a REALITY link, ("", "") for anything else.
+
+    REALITY without its public key is not "TLS with a missing extra": the
+    outbound would come out as ordinary TLS to the camouflage host, the
+    handshake would succeed against that site's real certificate, and the
+    client would hand its credentials to a server that is not the VPN. So a
+    link that says reality and carries no key is refused, not downgraded."""
+    if security != "reality":
+        return "", ""
+    pbk = _first_qs(qs, "pbk")
+    if not pbk:
+        raise ParseError("REALITY-ссылка без публичного ключа (pbk) — "
+                         "без него соединение ушло бы обычным TLS не на VPN-сервер")
+    return pbk, _first_qs(qs, "sid")
+
+
 def _build_tls(
     server_name: str,
     insecure: bool = False,
@@ -155,8 +172,7 @@ def parse_trojan(url: str) -> ProxyConfig:
     # uses it). Without reading pbk/sid the outbound came out as plain TLS and
     # could never complete the handshake — the server simply looked broken.
     security = _first_qs(qs, "security", default="tls").lower()
-    reality_pbk = _first_qs(qs, "pbk") if security == "reality" else ""
-    reality_sid = _first_qs(qs, "sid") if security == "reality" else ""
+    reality_pbk, reality_sid = _reality_keys(qs, security)
 
     outbound: dict[str, Any] = {
         "type": "trojan",
@@ -202,9 +218,14 @@ def parse_vless(url: str) -> ProxyConfig:
     if flow:
         outbound["flow"] = flow
 
+    if security not in ("", "none", "tls", "reality"):
+        # Anything unrecognised used to fall through to "no TLS at all" — the
+        # UUID in clear text over TCP. That includes the retired `xtls`, which
+        # the engine cannot speak. Refuse rather than quietly drop encryption.
+        raise ParseError(f"vless: неподдерживаемое значение security={security!r} "
+                         "(поддерживаются none, tls, reality)")
     if security in ("tls", "reality"):
-        reality_pbk = _first_qs(qs, "pbk") if security == "reality" else ""
-        reality_sid = _first_qs(qs, "sid") if security == "reality" else ""
+        reality_pbk, reality_sid = _reality_keys(qs, security)
         outbound["tls"] = _build_tls(
             sni, insecure=insecure, alpn=alpn,
             utls_fp=utls_fp,
@@ -242,7 +263,15 @@ def parse_vmess(url: str) -> ProxyConfig:
     alter_id = int(data.get("aid") or 0)
     security = str(data.get("scy") or "auto")
     net = str(data.get("net") or "tcp")
-    tls_flag = str(data.get("tls") or "").lower() == "tls"
+    # "tls" is the documented value; panels also emit booleans. Anything else
+    # used to mean "no TLS" — including values that plainly ask for encryption.
+    tls_raw = str(data.get("tls") or "").strip().lower()
+    if tls_raw in ("tls", "true", "1"):
+        tls_flag = True
+    elif tls_raw in ("", "none", "false", "0"):
+        tls_flag = False
+    else:
+        raise ParseError(f"vmess: неподдерживаемое значение tls={tls_raw!r}")
     sni = str(data.get("sni") or data.get("host") or server)
     alpn = _split_alpn(str(data.get("alpn") or ""))
     utls_fp = str(data.get("fp") or "")
@@ -359,7 +388,11 @@ def parse_hysteria2(url: str) -> ProxyConfig:
         raise ParseError("hysteria2 URL needs host:port")
 
     qs = parse_qs(u.query)
-    password = unquote(u.username) if u.username else _first_qs(qs, "auth")
+    # The whole userinfo is the auth string. urlparse splits it at the first
+    # ':' into username/password, so `user:secret@` (userpass auth) used to be
+    # sent as just `user` — a wrong, and much weaker, credential.
+    userinfo = u.netloc.rpartition("@")[0]
+    password = unquote(userinfo) if userinfo else _first_qs(qs, "auth")
     sni = _first_qs(qs, "sni", "peer", default=u.hostname)
     alpn = _split_alpn(_first_qs(qs, "alpn", default="h3"))
     insecure = _truthy(_first_qs(qs, "insecure", default="0"))
@@ -378,6 +411,34 @@ def parse_hysteria2(url: str) -> ProxyConfig:
 
     name = unquote(u.fragment) or f"hy2-{u.hostname}"
     return ProxyConfig(name=name, protocol="hysteria2", raw_url=url, outbound=outbound)
+
+
+# --- what the link asks for, said out loud -------------------------------
+
+def security_warnings(config: ProxyConfig) -> list[str]:
+    """Human-readable notes for a server whose link asks for less than a user
+    would assume. Shown in the log at connect; empty for an ordinary server.
+
+    These are things the parser must honour (the provider chose them) or
+    cannot enforce (the 1.12 engine has no certificate pinning), so the only
+    honest option left is to say so instead of connecting in silence."""
+    notes: list[str] = []
+    tls = config.outbound.get("tls") or {}
+    pinned = "pinsha256=" in (config.raw_url or "").lower()
+    if config.protocol == "vless" and not tls:
+        # VLESS has no encryption of its own; TLS is all there is.
+        notes.append(
+            "Этот сервер подключён без TLS (в ссылке security=none) — трафик до "
+            "сервера не шифруется.")
+    if tls.get("insecure"):
+        notes.append(
+            "Сертификат этого сервера не проверяется (так задано в ссылке: "
+            "insecure) — соединение можно перехватить.")
+    if pinned:
+        notes.append(
+            "Ссылка просит сверять отпечаток сертификата (pinSHA256), но движок "
+            "sing-box 1.12 этого не умеет — отпечаток не проверяется.")
+    return notes
 
 
 # --- dispatcher -----------------------------------------------------------

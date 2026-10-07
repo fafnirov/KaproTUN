@@ -268,12 +268,10 @@ class LeakTestDialog(QDialog):
                 self._fix_btn.setText(tr("leak.fix_enable_named", names=names))
                 self._fix_caption.setVisible(True)
                 self._fix_btn.setVisible(True)
-            elif (not report.ipv6.ipv6_blocked
-                  and self._manager.settings.get("ipv6_leak_protection", True)):
-                # Leaking even though the toggle is ON — the firewall rule
-                # didn't take effect on this system (the rare "protection on
-                # but still leaks" case). Offer a diagnostics bundle for
-                # support instead of a toggle (it's already on).
+            elif not report.ipv6.ipv6_blocked:
+                # IPv6 protection is built into the tunnel and has no switch,
+                # so a leak here is a fault, not a setting. Offer a
+                # diagnostics bundle for support.
                 self._action = "diag"
                 self._fix_caption.setText(tr("leak.diag_caption"))
                 self._fix_btn.setText(tr("leak.diag_copy_btn"))

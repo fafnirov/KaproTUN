@@ -21,6 +21,8 @@ import json
 import logging
 import os
 import sys
+import threading
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
@@ -310,7 +312,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # resolver (sing-box type:local). Stale keys in an old settings.json are
     # simply ignored by build_config (it accepts but ignores those kwargs).
     "public_ip_probe": True,  # fetch & show "Ваш IP: X (страна)" after connect
-    "ipv6_leak_protection": True,  # block global-unicast IPv6 outbound in TUN mode
     "webrtc_leak_protection": True,  # block STUN UDP (3478/5349/19302/19305-19309) so browsers can't leak real IP via WebRTC
     "hysteria_auto_bandwidth": True,  # auto-measure link speed for hy2 brutal CC (no manual entry). v1.20.0
     "hysteria_up_mbps": 0,    # uplink Mbps for hy2 brutal CC — auto-measured (auto mode) or manual; 0 = BBR
@@ -402,6 +403,20 @@ def _migrate_settings(raw: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     return raw, notes
 
 
+def _read_settings_checked() -> tuple[dict[str, Any], bool]:
+    """(parsed settings.json, readable). An absent file is ({}, True); a file
+    that exists but cannot be read or parsed is ({}, False) — the caller must
+    not mistake that for "the user has no settings"."""
+    f = paths.settings_file()
+    if not f.is_file():
+        return {}, True
+    try:
+        parsed = json.loads(f.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return {}, False
+    return (parsed, True) if isinstance(parsed, dict) else ({}, False)
+
+
 def _read_settings_file() -> dict[str, Any]:
     """Read + parse the on-disk settings.json, or {} if absent/corrupt.
 
@@ -410,18 +425,11 @@ def _read_settings_file() -> dict[str, Any]:
     window ever opens — and a startup crash means the in-app auto-updater
     never runs. So a parse error falls back to defaults, never raises.
     """
-    f = paths.settings_file()
-    if not f.is_file():
-        return {}
-    try:
-        parsed = json.loads(f.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    return _read_settings_checked()[0]
 
 
-def load_settings() -> dict[str, Any]:
-    raw_data = _read_settings_file()
+def load_settings(_raw: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    raw_data = _read_settings_file() if _raw is None else dict(_raw)
     raw_data, migration_notes = _migrate_settings(raw_data)
     for note in migration_notes:
         _log.info("settings migration: %s", note)
@@ -451,6 +459,60 @@ def load_settings() -> dict[str, Any]:
         except Exception as e:  # never let migration crash startup
             _record_error(f"settings migration deferred: {e}")
     return merged
+
+
+# One lock around every read-modify-write of settings.json: the GUI thread
+# toggles settings while a subscription worker may be creating the device id.
+_settings_lock = threading.RLock()
+_session_device_id = ""
+
+
+def update_settings(changes: dict[str, Any],
+                    fallback: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Apply `changes` on top of what is on disk right now and save. Returns
+    the merged settings.
+
+    This is the way to change a setting. save_settings() writes a WHOLE dict,
+    so a caller holding an old copy silently reverted every key someone else
+    had written since — which is how a settings toggle kept erasing the
+    subscription device id (v4.0.0).
+
+    `fallback` is the caller's in-memory copy, used instead of the disk only
+    when the file is unreadable, so a corrupt settings.json costs nothing more
+    than what was not in memory."""
+    with _settings_lock:
+        # ONE read decides both "is it readable" and "what does it say": a
+        # second read that failed transiently would turn into pure defaults
+        # and be saved over the user's file.
+        raw, readable = _read_settings_checked()
+        if readable:
+            merged = load_settings(raw)
+        elif fallback is not None:
+            merged = dict(fallback)
+        else:
+            raise OSError("settings.json is unreadable and there is no in-memory copy")
+        merged.update(changes)
+        save_settings(merged)
+        return merged
+
+
+def ensure_device_id() -> str:
+    """The installation's stable random id, created and persisted on first
+    use. If it cannot be persisted it still works for this session."""
+    global _session_device_id
+    with _settings_lock:
+        current = str(load_settings().get("device_id") or "").strip()
+        if current:
+            return current
+        # Not on disk. Reuse the id already handed out in this run, so an
+        # unreadable settings.json does not look like a new device per fetch.
+        device_id = _session_device_id or str(uuid.uuid4())
+        _session_device_id = device_id
+        try:
+            update_settings({"device_id": device_id})
+        except Exception as e:
+            _record_error(f"device id not persisted: {e}")
+        return device_id
 
 
 def save_settings(settings: dict[str, Any]) -> None:
