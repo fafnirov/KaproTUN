@@ -118,6 +118,69 @@ elif mode == "paste-dialog":
 elif mode == "add-page":
     from kapro_tun.gui import add_server_v2
     p = add_server_v2.AddServerPage()
+elif mode.startswith("upd-"):
+    import pathlib
+    from kapro_tun.core.updater import UpdateInfo
+    from kapro_tun.gui import updater_dialog as ud
+    info = UpdateInfo(version="9.9.9", tag="v9.9.9", url="https://example.invalid", notes="x [l](https://a.example)")
+    if mode == "upd-notes":
+        n = ud._NotesBrowser()
+    elif mode == "upd-notes-md":
+        n = ud._NotesBrowser()
+        n.setMarkdown("x [l](https://a.example)")
+    elif mode == "upd-notes-loadres":
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QTextDocument
+        n = ud._NotesBrowser()
+        n.loadResource(QTextDocument.ImageResource, QUrl("file://attacker/share/a.png"))
+    elif mode == "upd-dialog":
+        d = ud.UpdaterDialog(info)
+    elif mode == "upd-dialog-reject":
+        d = ud.UpdaterDialog(info)
+        d.reject()
+    elif mode == "upd-dialog-failed":
+        d = ud.UpdaterDialog(info)
+        d._on_failed("boom")
+    elif mode == "upd-worker":
+        w = ud._DownloadWorker(["https://a/x.exe"], pathlib.Path("nonexistent.exe"))
+    elif mode == "upd-worker-signals":
+        w = ud._DownloadWorker(["https://a/x.exe"], pathlib.Path("nonexistent.exe"))
+        w.finished_ok.connect(lambda p: seen.append("ok"))
+        w.failed.connect(lambda m: seen.append("failed"))
+    elif mode == "upd-worker-run":
+        from kapro_tun.core import net_download as nd
+        w = ud._DownloadWorker(["https://a/x.exe"], pathlib.Path("nonexistent.exe"))
+        w.finished_ok.connect(lambda p: seen.append("ok"))
+        w.failed.connect(lambda m: seen.append("failed"))
+
+        def fake(url, dest, cap, progress=None, timeout=None, expect_sha256=None):
+            w.cancel()
+            progress(1024, 100000)
+
+        nd.download_to_file = fake
+        w.run()
+elif mode == "textbrowser-recolor":
+    from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
+    from PySide6.QtWidgets import QTextBrowser
+    b = QTextBrowser()
+    b.setMarkdown("x [l](https://a.example)")
+    doc = b.document()
+    c = QTextCursor(doc)
+    c.select(QTextCursor.Document)
+    fmt = QTextCharFormat()
+    fmt.setForeground(QColor("#ff0000"))
+    c.mergeCharFormat(fmt)
+elif mode == "lambda-on-plain":
+    src = Plain()
+    src.done.connect(lambda v: seen.append(v))
+elif mode == "lambda-on-background":
+    from kapro_tun.gui import background
+
+    class Job(background.Background):
+        done = Signal(object)
+
+    job = Job()
+    job.done.connect(lambda v: seen.append(v))
 
 print("probe", mode, "seen", seen, flush=True)
 sys.exit(0)
