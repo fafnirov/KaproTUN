@@ -1628,8 +1628,8 @@ def _window_fixed_and_handleless_by_default() -> None:
             raise AssertionError("default (fixed) mode must NOT create resize handles")
         if w.minimumSize() != w.maximumSize():
             raise AssertionError("fixed mode must lock min==max (no mouse resize)")
-        if (w.width(), w.height()) != (480, 870):
-            raise AssertionError(f"fixed mode must open at 480x870, got {w.width()}x{w.height()}")
+        if (w.width(), w.height()) != (460, 720):
+            raise AssertionError(f"fixed mode must open at 460x720, got {w.width()}x{w.height()}")
     finally:
         for attr in ("_poll", "_sub_autorefresh", "_tray_pinger"):
             obj = getattr(w, attr, None)
@@ -1811,8 +1811,8 @@ def _window_presets() -> None:
 
     std = build("standard")
     try:
-        if (std.width(), std.height()) != (480, 870):
-            raise AssertionError(f"standard must be 480x870, got {std.width()}x{std.height()}")
+        if (std.width(), std.height()) != (460, 720):
+            raise AssertionError(f"standard must be 460x720, got {std.width()}x{std.height()}")
         if std._compact_preset:
             raise AssertionError("standard must not be compact")
     finally:
@@ -1820,13 +1820,13 @@ def _window_presets() -> None:
 
     comp = build("compact")
     try:
-        if (comp.width(), comp.height()) != (460, 720):
-            raise AssertionError(f"compact must be 460x720, got {comp.width()}x{comp.height()}")
+        if (comp.width(), comp.height()) != (460, 640):
+            raise AssertionError(f"compact must be 460x640, got {comp.width()}x{comp.height()}")
         if not comp._compact_preset:
             raise AssertionError("compact preset flag must be set")
         if comp.home_page.circle.property("compact") != "true":
             raise AssertionError("compact hero circle must carry compact=true")
-        for b in ("btn_home", "btn_stats", "btn_settings", "btn_add"):
+        for b in ("btn_home", "btn_servers", "btn_stats", "btn_settings"):
             if not hasattr(comp.nav, b):
                 raise AssertionError(f"compact nav missing {b} (navigation must not break)")
     finally:
@@ -2654,7 +2654,7 @@ check("crash: picker joins ping thread on close, no QThread-destroy abort (v3.4.
 check("ui: typography tokens present + letter-spacing 0", _typography_tokens_in_qss)
 check("ui: traffic legend keeps fixed-width values (no jitter)", _traffic_legend_fixed_width)
 check("ui: sparkline Y-scale eases (hysteresis, no snap)", _sparkline_scale_hysteresis)
-check("ui: window presets standard 480x870 / compact 460x720", _window_presets)
+check("ui: window presets standard 460x720 / compact 460x640", _window_presets)
 
 
 def _settings_no_overlong_controls() -> None:
@@ -8584,8 +8584,13 @@ def _v401_provider_text_is_never_markup() -> None:
     for mod, needle in ((add_page, "esc("), (updater_dialog, "esc("), (updater_dialog, "link(")):
         if needle not in inspect.getsource(mod):
             raise AssertionError(f"{mod.__name__} builds rich text without {needle})")
-    if "esc(ip)" not in inspect.getsource(main_window.HomePage):
-        raise AssertionError("the public-IP line shows a remote service's reply as markup")
+    home = main_window.HomePage()
+    home.set_config(cfg)
+    home.set_state("connected")
+    home.set_public_ip("<b>1.2.3.4</b>", "<i>NL</i>", "<img src=x>")
+    for label in home.findChildren(QLabel):
+        if "<" in label.text() and label.textFormat() != Qt.PlainText:
+            raise AssertionError(f"home screen renders {label.text()[:30]!r} as markup")
 
 
 check("subscription: cannot replace another source's server by its name (v4.0.1)",
@@ -8664,6 +8669,192 @@ def _v402_macos_tun_lets_the_system_name_the_interface() -> None:
 
 check("macOS: the system names the TUN device; it is found by address (v4.0.2, #13)",
       _v402_macos_tun_lets_the_system_name_the_interface)
+
+
+# ---------------------------------------------------------------------------
+# v4.1.0 — the v2 interface, phase 1: tokens, icons, chrome, home
+# ---------------------------------------------------------------------------
+
+section("v4.1.0: interface v2 — tokens, icons, navigation, home")
+
+
+def _v41_app():
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+def _v41_tokens_and_icons() -> None:
+    """Every colour has a value in both themes, every icon is valid SVG, and
+    the stylesheet of each theme is built from that theme's tokens."""
+    import dataclasses
+    import re
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtSvg import QSvgRenderer
+    from kapro_tun.gui import icons_v2, styles, tokens
+    _v41_app()
+    for name, colors in (("dark", tokens.DARK), ("light", tokens.LIGHT)):
+        for field in dataclasses.fields(colors):
+            value = getattr(colors, field.name)
+            ok = (re.fullmatch(r"#[0-9a-f]{6}", value) if isinstance(value, str)
+                  else len(value) == 4 and all(0 <= v <= 255 for v in value))
+            if not ok:
+                raise AssertionError(f"{name}.{field.name} is not a colour: {value!r}")
+    if tokens.DARK.bg == tokens.LIGHT.bg or tokens.DARK.text == tokens.LIGHT.text:
+        raise AssertionError("the two themes share background or text colour")
+    if tokens.DARK.accent != "#f59e0b" or tokens.LIGHT.accent != "#f59e0b":
+        raise AssertionError("the brand amber must be the same in both themes")
+
+    for name in icons_v2.PATHS:
+        if not QSvgRenderer(QByteArray(icons_v2._svg(name, "#ffffff", 20))).isValid():
+            raise AssertionError(f"icon {name!r} is not valid SVG")
+        pm = icons_v2.pixmap(name, 20, "#ffffff", 1.0)
+        if pm.isNull() or not any(pm.toImage().pixelColor(x, y).alpha()
+                                  for x in range(0, 20, 2) for y in range(0, 20, 2)):
+            raise AssertionError(f"icon {name!r} renders empty")
+
+    if styles.get_qss("light") is not styles.LIGHT_QSS or tokens.theme() != "light":
+        raise AssertionError("asking for the light sheet does not switch the tokens")
+    if styles.get_qss("dark") is not styles.DARK_QSS or tokens.theme() != "dark":
+        raise AssertionError("asking for the dark sheet does not switch the tokens")
+    if tokens.LIGHT.surface not in styles.LIGHT_QSS.split("v2: window chrome")[1]:
+        raise AssertionError("the light sheet's v2 block is not built from light tokens")
+
+    # The rule the redesign exists for: no colour literal outside the tokens.
+    import inspect
+    from kapro_tun.gui import home_v2
+    stray = re.findall(r"#[0-9a-fA-F]{6}\b", inspect.getsource(home_v2))
+    if stray:
+        raise AssertionError(f"home_v2 hard-codes colours: {sorted(set(stray))}")
+
+
+def _v41_navigation() -> None:
+    from kapro_tun.gui import widgets
+    _v41_app()
+    nav = widgets.NavBar()
+    if list(nav._items) != ["home", "servers", "stats", "settings"]:
+        raise AssertionError(f"navigation tabs are {list(nav._items)}")
+    fired = []
+    nav.servers_clicked.connect(lambda: fired.append("servers"))
+    nav.btn_servers.click()
+    if fired != ["servers"]:
+        raise AssertionError("the Servers tab does not emit its signal")
+    for key in ("home", "servers", "stats", "settings"):
+        nav.set_active(key)
+        if nav.active() != key or sum(b.is_active() for b in nav._items.values()) != 1:
+            raise AssertionError(f"exactly one tab must be active for {key!r}")
+    nav.set_active("logs")
+    if nav.active():
+        raise AssertionError("a page without a tab must clear the highlight")
+    if hasattr(nav, "btn_add"):
+        raise AssertionError("the Add tab is gone in v2; adding starts from Servers")
+
+
+def _v41_home_states() -> None:
+    from kapro_tun.core import i18n as _i18n
+    prev = _i18n._current
+    _i18n.set_locale("ru")
+    try:
+        _v41_home_states_ru()
+    finally:
+        _i18n.set_locale(prev)
+
+
+def _v41_home_states_ru() -> None:
+    """The home screen says what is going on in every state, and never
+    leaves a control that does nothing."""
+    from kapro_tun.gui import connection_state as cs
+    from kapro_tun.gui import home_v2
+    _v41_app()
+    with _v4_fresh_data_dir():
+        home = home_v2.HomePage()
+        cfg = _v401_cfg("🇳🇱 Нидерланды", "127.0.0.1")
+        clicks = []
+        for sig in ("add_clicked", "card_clicked", "settings_clicked", "logs_clicked"):
+            getattr(home, sig).connect(lambda s=sig: clicks.append(s))
+
+        # No server at all: the ring cannot be pressed, the card adds one.
+        if home.circle.isEnabled() or home.empty_card.isHidden() or not home.info_card.isHidden():
+            raise AssertionError("empty state: ring enabled or wrong card shown")
+        if home.status_label.text() != "Нет серверов":
+            raise AssertionError(f"empty state says {home.status_label.text()!r}")
+        home._on_server_card()
+        if clicks != ["add_clicked"]:
+            raise AssertionError("tapping the empty server card must start adding one")
+
+        home.set_config(cfg)
+        if not home.circle.isEnabled() or home.info_card.isHidden() or not home.empty_card.isHidden():
+            raise AssertionError("with a server the ring must work and the info card show")
+        if home.server_card.chip.text() != "NL" or home.server_card.name.full_text() != "Нидерланды":
+            raise AssertionError("server card must show the country code and the bare name: "
+                                 f"{home.server_card.chip.text()!r} {home.server_card.name.full_text()!r}")
+        home._on_server_card()
+        if clicks[-1] != "card_clicked":
+            raise AssertionError("tapping the server card must open the server list")
+
+        expect = {
+            cs.DISCONNECTED: ("Не подключено", False),
+            cs.CONNECTING: ("Подключение…", False),
+            cs.CONNECTED: ("Подключено", False),
+            cs.RECONNECTING: ("Переподключение…", False),
+            cs.ERROR: ("Ошибка подключения", True),
+            cs.KILLSWITCH_ACTIVE: ("Kill-switch: интернет заблокирован", True),
+        }
+        for state, (text, notice) in expect.items():
+            home.set_state(state, "00:01:02" if state == cs.CONNECTED else "")
+            if home.status_label.text() != text:
+                raise AssertionError(f"{state}: status reads {home.status_label.text()!r}")
+            if home.notice.isHidden() == notice:
+                raise AssertionError(f"{state}: notice banner visibility is wrong")
+        home.set_state(cs.KILLSWITCH_ACTIVE)
+        home._on_notice_action()
+        home.set_state(cs.ERROR)
+        home._on_notice_action()
+        if clicks[-2:] != ["settings_clicked", "logs_clicked"]:
+            raise AssertionError(f"notice actions lead to the wrong place: {clicks[-2:]}")
+
+        # Live values appear only while connected and are cleared after.
+        home.set_state(cs.CONNECTED, "00:00:05")
+        home.set_public_ip("185.107.56.21", "Нидерланды", "Amsterdam", "NL")
+        home.set_traffic(1024.0, 2048.0, 0, 0)
+        card = home.info_card
+        if card.ip.value.full_text() != "185.107.56.21" or "Amsterdam" not in card.location.value.full_text():
+            raise AssertionError("connected: IP / location not shown")
+        if card.down.value.full_text() in ("", "—") or card.up.value.full_text() in ("", "—"):
+            raise AssertionError("connected: speeds not shown")
+        home.set_state(cs.DISCONNECTED)
+        if card.ip.value.full_text() != "—" or card.down.value.full_text() != "—":
+            raise AssertionError("stale IP or speed left on screen after disconnect")
+
+        # IP lookup switched off: no permanently empty cells.
+        from kapro_tun.core import storage as _st
+        _st.update_settings({"public_ip_probe": False})
+        home.refresh_ip_setting()
+        if not card.ip.isHidden() or card.ip_hidden_row.isHidden():
+            raise AssertionError("IP cells must give way to a note when the lookup is off")
+
+        ping = home.server_card.ping
+        for ms, known, proto, kind in ((42, True, "vless", "good"), (131, True, "vless", "mid"),
+                                       (264, True, "vless", "bad"), (None, True, "vless", "na"),
+                                       (None, False, "vless", "pending"), (5, True, "hysteria2", "udp")):
+            ping.set_ping(ms, proto, known)
+            if ping.kind() != kind:
+                raise AssertionError(f"ping {ms!r}/{proto}: kind {ping.kind()!r}, expected {kind!r}")
+
+    for n, word in ((1, "1 домен"), (2, "2 домена"), (5, "5 доменов"), (11, "11 доменов"),
+                    (21, "21 домен"), (168, "168 доменов")):
+        if home_v2.plural_domains(n) != word:
+            raise AssertionError(f"{n}: {home_v2.plural_domains(n)!r}")
+    for name, code in (("🇩🇪 Germany #1", "DE"), ("NL Server", "NL"), ("[FI] Helsinki", "FI"),
+                       ("Home", "HO")):
+        got = home_v2.chip_code(_v401_cfg(name, "127.0.0.1"))
+        if got != code:
+            raise AssertionError(f"chip for {name!r} is {got!r}, expected {code!r}")
+
+
+check("ui v2: tokens are complete, icons are valid, sheets follow the theme (v4.1.0)",
+      _v41_tokens_and_icons)
+check("ui v2: navigation has four tabs, Servers among them (v4.1.0)", _v41_navigation)
+check("ui v2: home shows every state and clears stale values (v4.1.0)", _v41_home_states)
 
 
 # ---------------------------------------------------------------------------

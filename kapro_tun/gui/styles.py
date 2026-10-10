@@ -551,9 +551,129 @@ QFrame[frameShape="4"] {{      /* HLine */
 """
 
 
+def _build_qss_v2(c) -> str:
+    """Styles of the v2 widgets (home_v2, navigation, title bar), generated
+    from tokens.Colors. Sizes are logical pixels, as in the design."""
+    from . import tokens as t
+    return f"""
+/* ===== v2: window chrome ===== */
+QWidget#appShell {{
+    background-color: {c.bg};
+    border: 1px solid {c.line};
+    border-radius: {t.R_WINDOW}px;
+}}
+QWidget#page {{ background-color: {c.bg}; }}
+QFrame#titleBar {{
+    background-color: {c.bg};
+    border: none;
+    border-top-left-radius: {t.R_WINDOW}px;
+    border-top-right-radius: {t.R_WINDOW}px;
+}}
+QLabel#titleBarText {{ color: {c.text}; font-size: {t.FS_SM}px; font-weight: 600; }}
+QPushButton#titleBarBtn, QPushButton#titleBarCloseBtn {{
+    background-color: transparent; border: none; border-radius: 0; padding: 0;
+    min-height: 0;
+}}
+QPushButton#titleBarBtn:hover {{ background-color: {c.surface_hover}; }}
+QPushButton#titleBarCloseBtn {{ border-top-right-radius: {t.R_WINDOW - 1}px; }}
+QPushButton#titleBarCloseBtn:hover {{ background-color: {c.danger}; }}
+QFrame#ktNav {{ background-color: {c.bg}; border: none; border-top: 1px solid {c.line}; }}
+
+/* ===== v2: server card ===== */
+QFrame#ktServer {{
+    background-color: {c.surface};
+    border: 1px solid {c.line};
+    border-radius: {t.R_LG}px;
+}}
+QFrame#ktServer:hover {{ background-color: {c.surface_2}; border-color: {c.line_strong}; }}
+QFrame#ktServer[empty="true"] {{ background-color: transparent; border: 1px dashed {c.line_strong}; }}
+QLabel#ktFlag {{
+    background-color: {c.surface_2}; border-radius: {t.R_MD}px; color: {c.text};
+    font-size: {t.FS_MD}px; font-weight: 600; letter-spacing: 0.5px;
+}}
+QLabel#ktFlag[add="true"] {{ background-color: {c.accent_soft}; }}
+QLabel#ktServerName {{ background: transparent; color: {c.text}; font-size: {t.FS_LG}px; font-weight: 600; }}
+QLabel#ktServerMeta {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; }}
+
+/* ===== v2: status line ===== */
+QLabel#ktStatusLabel {{ color: {c.text}; font-size: {t.FS_LG}px; font-weight: 600; }}
+QLabel#ktStatusLabel[tone="idle"] {{ color: {c.text_secondary}; }}
+QLabel#ktStatusLabel[tone="connected"] {{ color: {c.accent_text}; }}
+QLabel#ktStatusLabel[tone="error"] {{ color: {c.danger_text}; }}
+QLabel#ktStatusSep {{ color: {c.text_tertiary}; font-size: {t.FS_LG}px; }}
+QLabel#ktStatusMeta {{ color: {c.text_secondary}; font-size: {t.FS_MD}px; }}
+QLabel#ktStatusMeta[mono="true"] {{ font-family: {t.FONT_MONO}; }}
+
+/* ===== v2: cards ===== */
+QFrame#ktCard {{
+    background-color: {c.surface};
+    border: 1px solid {c.line};
+    border-radius: {t.R_LG}px;
+}}
+QFrame#ktCell {{ background: transparent; border: none; }}
+QFrame#ktCell[br="true"] {{ border-right: 1px solid {c.line}; }}
+QFrame#ktCell[bb="true"] {{ border-bottom: 1px solid {c.line}; }}
+QFrame#ktCell[br="true"][bb="true"] {{
+    border-right: 1px solid {c.line}; border-bottom: 1px solid {c.line};
+}}
+QLabel#ktCellLabel {{ background: transparent; color: {c.text_tertiary}; font-size: {t.FS_XS}px; }}
+QLabel#ktCellValue {{ background: transparent; color: {c.text}; font-size: {t.FS_MD}px; font-weight: 600; }}
+QLabel#ktCellValue[muted="true"] {{ color: {c.text_tertiary}; font-weight: 400; }}
+QLabel#ktCellValue[mono="true"] {{ font-family: {t.FONT_MONO}; }}
+QFrame#ktCardLink {{
+    background-color: {c.surface_2}; border: none; border-top: 1px solid {c.line};
+}}
+QFrame#ktCardLink[last="true"] {{
+    border-bottom-left-radius: {t.R_LG - 1}px; border-bottom-right-radius: {t.R_LG - 1}px;
+}}
+QFrame#ktCardLink:hover {{ background-color: {c.surface_hover}; }}
+QLabel#ktCardLinkText {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; }}
+QLabel#ktCardLinkValue {{ background: transparent; color: {c.text}; font-size: {t.FS_SM}px; font-weight: 600; }}
+
+/* ===== v2: banners ===== */
+QFrame#ktBanner {{
+    background-color: {c.surface_2}; border: 1px solid {c.line}; border-radius: {t.R_MD}px;
+}}
+QFrame#ktBanner[kind="warning"] {{ background-color: {c.accent_soft}; border-color: {c.accent_line}; }}
+QFrame#ktBanner[kind="danger"] {{ background-color: {c.danger_soft}; border-color: {c.danger_line}; }}
+QFrame#ktBanner[kind="success"] {{ background-color: {c.success_soft}; border-color: {c.success_line}; }}
+QLabel#ktBannerTitle {{ background: transparent; color: {c.text}; font-size: {t.FS_SM}px; font-weight: 600; }}
+QLabel#ktBannerText {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; }}
+QPushButton#ktBannerAction {{
+    background: transparent; border: none; padding: 0 {t.SP_1}px; min-height: 0;
+    color: {c.accent_text}; font-size: {t.FS_SM}px; font-weight: 600;
+}}
+QPushButton#ktBannerAction[kind="danger"] {{ color: {c.danger_text}; }}
+QPushButton#ktBannerAction:hover {{ text-decoration: underline; background: transparent; }}
+
+/* ===== v2: empty state ===== */
+QLabel#ktEmptyIcon {{ background-color: {c.surface_2}; border-radius: 28px; }}
+QLabel#ktEmptyTitle {{ background: transparent; color: {c.text}; font-size: {t.FS_LG}px; font-weight: 600; }}
+QLabel#ktEmptyText {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; }}
+
+/* ===== v2: buttons ===== */
+QPushButton#ktBtnPrimary, QPushButton#ktBtnSecondary {{
+    min-height: {t.CONTROL_H - 2}px; max-height: {t.CONTROL_H - 2}px;
+    padding: 0 {t.SP_4}px; border-radius: {t.R_MD}px;
+    font-size: {t.FS_MD}px; font-weight: 600;
+}}
+QPushButton#ktBtnPrimary {{ background-color: {c.accent}; color: {c.on_accent}; border: 1px solid transparent; }}
+QPushButton#ktBtnPrimary:hover {{ background-color: {c.accent_hover}; }}
+QPushButton#ktBtnPrimary:pressed {{ background-color: {c.accent_pressed}; }}
+QPushButton#ktBtnPrimary:disabled {{ background-color: {c.surface_hover}; color: {c.text_disabled}; }}
+QPushButton#ktBtnSecondary {{ background-color: {c.surface_2}; color: {c.text}; border: 1px solid {c.line_strong}; }}
+QPushButton#ktBtnSecondary:hover {{ background-color: {c.surface_hover}; border-color: {c.line_hover}; }}
+QPushButton#ktBtnSecondary:pressed {{ background-color: {c.surface_pressed}; }}
+QPushButton#ktBtnSecondary:disabled {{ background-color: {c.surface}; color: {c.text_disabled}; border-color: {c.line}; }}
+"""
+
+
 # Pre-built sheets — module import time, no per-call build cost.
-DARK_QSS = _build_qss(DARK_PALETTE)
-LIGHT_QSS = _build_qss(LIGHT_PALETTE)
+from . import tokens as _tokens  # noqa: E402 — after Palette, before the sheets
+
+# The v2 block comes last so that, where both define a rule, v2 wins.
+DARK_QSS = _build_qss(DARK_PALETTE) + _build_qss_v2(_tokens.DARK)
+LIGHT_QSS = _build_qss(LIGHT_PALETTE) + _build_qss_v2(_tokens.LIGHT)
 
 
 # Backward-compat module-level constants. widgets.py and onboarding.py
@@ -608,12 +728,9 @@ def get_qss(theme: str = "auto") -> str:
     theme: "auto" (follow OS), "dark", "light". Unknown values fall
     back to dark (forgiving: a bad/missing setting never errors the UI).
     """
-    if theme == "light":
-        return LIGHT_QSS
-    if theme == "dark":
-        return DARK_QSS
-    # auto / anything else
-    return LIGHT_QSS if _detect_system_theme() == "light" else DARK_QSS
+    # Whoever asks for the sheet is about to apply it: record the theme so the
+    # custom-painted v2 widgets (ring, icons, dots) draw in the same one.
+    return LIGHT_QSS if _tokens.set_theme(theme) == "light" else DARK_QSS
 
 
 def get_active_palette(theme: str = "auto") -> Palette:

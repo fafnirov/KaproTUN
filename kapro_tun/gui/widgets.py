@@ -242,68 +242,106 @@ class IconButton(QPushButton):
         self.style().polish(self)
 
 
-class NavBar(QWidget):
-    """Bottom navigation: Home / Stats / Settings / Add.
+class NavItem(QPushButton):
+    """One tab of the bottom navigation: an outline icon over a caption. The
+    tab in view is amber with a short bar on the top edge."""
 
-    All glyphs use the U+FE0E text-style variation selector so Windows
-    doesn't render them as color emoji (the gear was coming through
-    bold and purple-grey, the others as thin outlines).
+    def __init__(self, icon: str, label: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._icon, self._label, self._active = icon, label, False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setAttribute(Qt.WA_Hover, True)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setToolTip(label)
 
-    v1.15.0 added the Stats button (chart glyph) between Home and
-    Settings — that's the natural left-to-right reading order: home
-    state → look at history → tweak settings → add new config.
+    def set_active(self, active: bool) -> None:
+        self._active = bool(active)
+        self.setProperty("active", "true" if active else "false")
+        self.update()
+
+    def is_active(self) -> bool:
+        return self._active
+
+    def label(self) -> str:
+        return self._label
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QFont, QPainter
+        from . import icons_v2, tokens
+        c = tokens.colors()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        if self.isDown():
+            p.fillRect(self.rect(), QColor(c.surface_2))
+        elif self.underMouse():
+            p.fillRect(self.rect(), QColor(c.surface))
+        fg = c.accent_text if self._active else (c.text if self.underMouse() else c.text_tertiary)
+        font = QFont(self.font())
+        font.setPixelSize(tokens.FS_XS)
+        font.setWeight(QFont.DemiBold if self._active else QFont.Normal)
+        p.setFont(font)
+        text_h = p.fontMetrics().height()
+        icon = tokens.ICON_LG
+        top = (self.height() - (icon + tokens.SP_1 + text_h)) / 2
+        p.drawPixmap(int((self.width() - icon) / 2), int(top), icons_v2.pixmap(self._icon, icon, fg))
+        p.setPen(QColor(fg))
+        p.drawText(QRectF(0, top + icon + tokens.SP_1, self.width(), text_h),
+                   Qt.AlignHCenter | Qt.AlignVCenter, self._label)
+        if self._active:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(c.accent))
+            w = tokens.NAV_IND_W
+            p.drawRoundedRect(QRectF((self.width() - w) / 2, 0, w, tokens.NAV_IND_H), 1, 1)
+        p.end()
+
+
+class NavBar(QFrame):
+    """Bottom navigation: Home / Servers / Statistics / Settings.
+
+    v2 (4.1): the server list is a tab of its own instead of a separate
+    window, and takes the slot "Add" used to have — adding a server now
+    starts from the Servers tab.
     """
 
     home_clicked = Signal()
+    servers_clicked = Signal()
     stats_clicked = Signal()
     settings_clicked = Signal()
-    add_clicked = Signal()
-
-    # v1.15.1 — switched STATS glyph from 📊 (emoji, rendered colored
-    # and at a different metrics by Segoe UI Emoji regardless of the
-    # U+FE0E text-variation selector) to ▤ U+25A4 (SQUARE WITH
-    # HORIZONTAL FILL — a box-drawing char from the same family as
-    # ⌂ and ⚙, rendered monochrome and at matching cap-height by
-    # Segoe UI Symbol). Visually reads as a horizontal bar-chart,
-    # which fits the "Статистика" tab semantics.
-    HOME_GLYPH = "⌂"      # U+2302 HOUSE
-    STATS_GLYPH = "▤"     # U+25A4 SQUARE WITH HORIZONTAL FILL — bar-chart-ish
-    SETTINGS_GLYPH = "⚙"  # U+2699 GEAR
-    ADD_GLYPH = "+"       # plain ASCII plus, scales better than ＋
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        from . import tokens
+        self.setObjectName("ktNav")
+        self.setFixedHeight(tokens.NAV_H)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setContentsMargins(0, 1, 0, 0)
         layout.setSpacing(0)
 
-        self.btn_home = IconButton(self.HOME_GLYPH, tr("wid.nav_home"))
-        self.btn_stats = IconButton(self.STATS_GLYPH, tr("wid.nav_stats"))
-        self.btn_settings = IconButton(self.SETTINGS_GLYPH, tr("wid.nav_settings"))
-        self.btn_add = IconButton(self.ADD_GLYPH, tr("wid.nav_add"))
+        self.btn_home = NavItem("home", tr("wid.nav_home"))
+        self.btn_servers = NavItem("globe", tr("wid.nav_servers"))
+        self.btn_stats = NavItem("chart", tr("wid.nav_stats"))
+        self.btn_settings = NavItem("sliders", tr("wid.nav_settings"))
 
         self.btn_home.clicked.connect(self.home_clicked)
+        self.btn_servers.clicked.connect(self.servers_clicked)
         self.btn_stats.clicked.connect(self.stats_clicked)
         self.btn_settings.clicked.connect(self.settings_clicked)
-        self.btn_add.clicked.connect(self.add_clicked)
 
-        # Four equal columns — perfect visual alignment regardless of
-        # window width. Stretch wrappers under each button centre them.
-        for btn in (self.btn_home, self.btn_stats, self.btn_settings, self.btn_add):
-            cell = QWidget()
-            cell_layout = QHBoxLayout(cell)
-            cell_layout.setContentsMargins(0, 0, 0, 0)
-            cell_layout.addStretch(1)
-            cell_layout.addWidget(btn)
-            cell_layout.addStretch(1)
-            layout.addWidget(cell, stretch=1)
+        self._items = {"home": self.btn_home, "servers": self.btn_servers,
+                       "stats": self.btn_stats, "settings": self.btn_settings}
+        for btn in self._items.values():
+            layout.addWidget(btn, stretch=1)
 
     def set_active(self, name: str) -> None:
-        """name ∈ {'home', 'stats', 'settings', 'add'}"""
-        self.btn_home.set_active(name == "home")
-        self.btn_stats.set_active(name == "stats")
-        self.btn_settings.set_active(name == "settings")
-        self.btn_add.set_active(name == "add")
+        """name ∈ {'home', 'servers', 'stats', 'settings'}; anything else
+        (a page with no tab of its own) clears the highlight."""
+        for key, btn in self._items.items():
+            btn.set_active(key == name)
+
+    def active(self) -> str:
+        return next((k for k, b in self._items.items() if b.is_active()), "")
 
 
 class StatusLabel(QLabel):

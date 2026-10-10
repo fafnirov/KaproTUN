@@ -63,6 +63,7 @@ from .configs_picker import ConfigsPickerDialog
 from .installer_dialog import (ensure_geoip_ru_cached, ensure_sing_box_installed)
 from .sites_dialog import SitesDialog
 from .sparkline import TrafficSparkline
+from .home_v2 import HomePage
 from .titlebar import TitleBar
 from .toast import show_toast
 from .tray import TrayManager
@@ -71,248 +72,6 @@ from . import connection_state
 
 
 # ----- Pages ---------------------------------------------------------------
-
-class HomePage(QWidget):
-    """Connect circle + active config card."""
-
-    connect_clicked = Signal()
-    card_clicked = Signal()
-    banner_clicked = Signal()  # expiry banner → open subscription import
-
-    def __init__(self, parent: Optional[QWidget] = None, compact: bool = False):
-        super().__init__(parent)
-        self.setObjectName("page")
-        self._compact = compact
-        # Compact preset (low-height screens): tighter vertical rhythm + a
-        # smaller hero circle / graph. Every key action stays reachable.
-        pad_v = 10 if compact else 16
-        self._gap_circle = 14 if compact else 28
-        self._gap_map = 8 if compact else 14
-        self._gap_bottom = 12 if compact else 24
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, pad_v, 24, pad_v)
-        layout.setSpacing(0)
-
-        # Title
-        title = QLabel("KaproTUN")
-        title.setObjectName("title")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
-
-        # Subscription expiry/quota banner — only shown when the provider's
-        # Subscription-Userinfo says the sub is low/expired (<=3 days or <=10%
-        # traffic). Clickable → opens the subscription import to renew.
-        self.sub_banner = QLabel()
-        self.sub_banner.setTextFormat(Qt.RichText)
-        self.sub_banner.setWordWrap(True)
-        self.sub_banner.setAlignment(Qt.AlignCenter)
-        self.sub_banner.setOpenExternalLinks(False)
-        self.sub_banner.linkActivated.connect(lambda _l: self.banner_clicked.emit())
-        self.sub_banner.setVisible(False)
-        layout.addSpacing(6)
-        layout.addWidget(self.sub_banner)
-        self.refresh_sub_banner()
-
-        layout.addStretch(1)
-
-        # Connect button — centered with surrounding stretchers
-        self.circle = CircleConnectButton()
-        self.circle.set_compact(compact)
-        self.circle.clicked.connect(self.connect_clicked)
-        circle_row = QHBoxLayout()
-        circle_row.addStretch(1)
-        circle_row.addWidget(self.circle)
-        circle_row.addStretch(1)
-        layout.addLayout(circle_row)
-        layout.addSpacing(self._gap_circle)
-
-        self.status_label = StatusLabel()
-        layout.addWidget(self.status_label)
-
-        # Public IP / country reveal — shown ~2 seconds after a successful
-        # connect, hidden when idle or connecting. Empty when the probe
-        # fails (so we don't show a misleading "fetching..." that might
-        # never finish). v1.10.0.
-        self.public_ip_label = QLabel("")
-        self.public_ip_label.setAlignment(Qt.AlignCenter)
-        self.public_ip_label.setTextFormat(Qt.RichText)
-        self.public_ip_label.setObjectName("secondary")
-        self.public_ip_label.setVisible(False)
-        layout.addSpacing(2)
-        layout.addWidget(self.public_ip_label)
-
-        # World map with a pin on the active VPN country (v1.14.0).
-        # Centered, hidden until the IP probe resolves a known country
-        # code. Theme follows the user's choice — getter reads settings
-        # at paint time so it auto-updates on theme switch.
-        # v1.14.1: bumped the leading addSpacing from 4 to 14 so the
-        # map visually separates from the IP label above (user reported
-        # they looked merged together — no overlap, just no breathing
-        # room).
-        self.world_map = WorldMapWidget()
-        self.world_map.setVisible(False)
-        map_row = QHBoxLayout()
-        map_row.addStretch(1)
-        map_row.addWidget(self.world_map)
-        map_row.addStretch(1)
-        layout.addSpacing(self._gap_map)
-        layout.addLayout(map_row)
-        layout.addSpacing(8)
-
-        # Live traffic legend — colour-matched ↑/↓ rates (doubles as the
-        # sparkline legend) with fixed-width values so the numbers don't shift
-        # the layout, plus a session-total caption. Visible only while connected.
-        self.traffic = TrafficLegend()
-        self.traffic.setVisible(False)
-        layout.addSpacing(6)
-        layout.addWidget(self.traffic)
-
-        # Sparkline — 1-minute bandwidth history, shown under the numbers when
-        # connected. Hidden when idle.
-        self.sparkline = TrafficSparkline()
-        self.sparkline.set_compact(compact)
-        self.sparkline.setVisible(False)
-        layout.addSpacing(4)
-        layout.addWidget(self.sparkline)
-
-        # v1.14.6: bottom stretch replaced with a small fixed gap so
-        # the map sits right above "Прямые сайты". Previously the
-        # stretch ate ~100 px of empty space when sparkline + traffic
-        # rows were hidden (most of the time — xray Stats API often
-        # returns nothing on TUN-mode connections). Result: a huge
-        # void between the map and "Прямые сайты", which the user
-        # rightly called out. Free vertical space now all goes to the
-        # top stretch (line 83) between the title and the connect
-        # circle — pushes the circle down to vertical centre and the
-        # status/IP/map block hugs the "Прямые сайты" line below.
-        layout.addSpacing(self._gap_bottom)
-
-        # Info row about split routing
-        self._info_label = QLabel()
-        self._info_label.setAlignment(Qt.AlignCenter)
-        self._info_label.setTextFormat(Qt.RichText)
-        self.refresh_sites_count()
-        layout.addWidget(self._info_label)
-        layout.addSpacing(12)
-
-        # Active config card
-        self.config_card = ConfigCard()
-        self.config_card.clicked.connect(self.card_clicked)
-        layout.addWidget(self.config_card)
-
-    def set_state(self, state: str, detail: str = "") -> None:
-        self.circle.set_state(state)
-        self.status_label.set_state(state, detail)
-        if connection_state.normalize(state) != connection_state.CONNECTED:
-            self.traffic.clear()
-            self.traffic.setVisible(False)
-            self.sparkline.setVisible(False)
-            self.sparkline.reset()
-            # Public IP banner + map only make sense while connected;
-            # clear immediately on disconnect/connecting so the user
-            # doesn't briefly see stale data from the previous session.
-            self.public_ip_label.clear()
-            self.public_ip_label.setVisible(False)
-            self.world_map.set_country(None)
-            self.world_map.setVisible(False)
-
-    def set_public_ip(
-        self,
-        ip: str,
-        country_name: str,
-        city: Optional[str] = None,
-        country_code: str = "",
-    ) -> None:
-        """Render the just-fetched public IP + plant a map pin.
-
-        v1.14.0: country_code added so the WorldMapWidget can place
-        the pin. Empty/unknown code → map stays hidden but IP label
-        still shows (graceful degradation when the IP-probe fallback
-        returned a hit without country info — e.g. ipify-only path).
-        """
-        if not ip:
-            self.public_ip_label.clear()
-            self.public_ip_label.setVisible(False)
-            self.world_map.set_country(None)
-            self.world_map.setVisible(False)
-            return
-        # Single line: "Ваш IP: 1.2.3.4 · Нидерланды (Amsterdam)". City
-        # is the optional bit since ipinfo free tier sometimes omits it.
-        place = country_name if country_name else "—"
-        if city:
-            place = f"{country_name} · {city}" if country_name else city
-        self.public_ip_label.setText(
-            f"<span style='color:#71717a'>{tr('mw.your_ip')} </span>"
-            f"<span style='color:#fafafa'>{esc(ip)}</span>"
-            f"<span style='color:#71717a'>  ·  {esc(place)}</span>"
-        )
-        self.public_ip_label.setVisible(True)
-        # Map gets shown only when we have a known country — silent
-        # hide when the probe fallback gave IP-only (httpbin.org).
-        from .world_map import COUNTRY_COORDS
-        if country_code and country_code.upper() in COUNTRY_COORDS:
-            self.world_map.set_country(country_code)
-            self.world_map.setVisible(True)
-        else:
-            self.world_map.set_country(None)
-            self.world_map.setVisible(False)
-
-    def set_traffic(self, up_rate: float, down_rate: float,
-                    up_total: int, down_total: int) -> None:
-        """Refresh the live traffic legend + sparkline. Called once per second."""
-        self.traffic.set_values(up_rate, down_rate, up_total, down_total)
-        self.traffic.setVisible(True)
-        self.sparkline.setVisible(True)
-        self.sparkline.add_sample(up_rate, down_rate)
-
-    def set_config(self, cfg: Optional[ProxyConfig]) -> None:
-        self.config_card.set_config(cfg)
-
-    def refresh_sites_count(self) -> None:
-        sites_count = len(storage.load_sites())
-        self._info_label.setText(
-            f"<span style='color:#a1a1aa'>{tr('mw.direct_sites_prefix')} </span>"
-            f"<span style='color:#fafafa'>{sites_count}</span> "
-            f"<span style='color:#a1a1aa'>{tr('mw.direct_sites_suffix')}</span>"
-        )
-
-    def refresh_sub_banner(self) -> None:
-        """Show a prominent banner only when the subscription is low/expired,
-        per the cached Subscription-Userinfo. Hidden otherwise so a healthy
-        sub adds no clutter. Reads storage at call time so MainWindow can
-        refresh it after every fetch."""
-        banner = getattr(self, "sub_banner", None)
-        if banner is None:
-            return
-        data = storage.load_settings().get("subscription_userinfo")
-        info = None
-        if data:
-            try:
-                from ..core.subscription import SubscriptionInfo
-                info = SubscriptionInfo.from_dict(data)
-            except Exception:
-                info = None
-        if info is None or not info.is_low():
-            banner.setVisible(False)
-            return
-        expired = info.is_expired()
-        text = info.banner_text() or (tr("mw.sub_expired") if expired else tr("mw.sub_expiring"))
-        icon = "⛔" if expired else "⏳"
-        # Red for expired, amber for "running low". Inline style so it works
-        # regardless of the active QSS theme.
-        bg = "#7f1d1d" if expired else "#78350f"
-        fg = "#fecaca" if expired else "#fde68a"
-        link = tr("mw.sub_renew") if expired else tr("mw.sub_extend")
-        banner.setStyleSheet(
-            f"QLabel {{ background:{bg}; color:{fg}; border-radius:8px;"
-            f" padding:8px 12px; font-weight:600; }}"
-        )
-        banner.setText(
-            f"{icon} {text} · "
-            f"<a href='#renew' style='color:#fef3c7'>{link}</a>"
-        )
-        banner.setVisible(True)
-
 
 class SettingsPage(QWidget):
     """Listen port, auto-proxy toggle, sites editor link, log viewer, about."""
@@ -1290,10 +1049,12 @@ class MainWindow(QMainWindow):
         # Size preset: 'standard' (full) or 'compact' (shorter + a touch
         # narrower, for low-resolution / low-DPI screens). 'auto' (default)
         # picks compact when the screen can't comfortably fit standard.
-        _PRESETS = {"standard": (480, 870), "compact": (460, 720)}
+        # v2 (4.1): the window is 460 x 720 as designed; "compact" is the same
+        # layout with a smaller ring for screens that cannot fit 720.
+        _PRESETS = {"standard": (460, 720), "compact": (460, 640)}
         preset = str(saved_settings.get("window_size_preset", "auto")).strip().lower()
         if preset not in _PRESETS:
-            preset = "compact" if self._screen_too_short_for(870) else "standard"
+            preset = "compact" if self._screen_too_short_for(720) else "standard"
         self._compact_preset = (preset == "compact")
         DEFAULT_W, DEFAULT_H = _PRESETS[preset]
         MIN_W, MIN_H = DEFAULT_W, DEFAULT_H - 90  # floor for advanced resizable mode
@@ -1447,16 +1208,9 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.home_page = HomePage(compact=self._compact_preset)
-        # World-map needs to know the current theme on every paint —
-        # hand it a closure that reads settings live, so a theme switch
-        # immediately reflects in the next map paint (no explicit
-        # refresh wiring per widget).
-        # Custom-painted widgets (read palette per paint) need a getter
-        # that returns the live theme setting. One closure, multiple
-        # widgets — keeps theme propagation one-line per widget.
+        # Custom-painted widgets that still take a theme getter (stats charts)
+        # read the live setting through this closure.
         _theme = lambda: str(self.manager.settings.get("theme", "auto"))
-        self.home_page.world_map.set_theme_getter(_theme)
-        self.home_page.sparkline.set_theme_getter(_theme)
         self.settings_page = SettingsPage(self.manager)
         self.logs_page = LogsPage()
         self.add_page = AddConfigPage()
@@ -1472,10 +1226,6 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.onboarding_page)  # index 4
         self.stack.addWidget(self.stats_page)       # index 5
         root.addWidget(self.stack, stretch=1)
-
-        nav_sep = QFrame()
-        nav_sep.setFrameShape(QFrame.HLine)
-        root.addWidget(nav_sep)
 
         self.nav = NavBar()
         root.addWidget(self.nav)
@@ -1545,6 +1295,10 @@ class MainWindow(QMainWindow):
         self.settings_page.bypass_apps_clicked.connect(self._on_edit_bypass_apps)
         self.settings_page.subscription_clicked.connect(self._on_import_subscription)
         self.home_page.banner_clicked.connect(self._on_import_subscription)
+        self.home_page.sites_clicked.connect(self._on_edit_sites)
+        self.home_page.settings_clicked.connect(lambda: self._goto("settings"))
+        self.home_page.logs_clicked.connect(lambda: self._goto("logs"))
+        self.home_page.add_clicked.connect(self._on_open_add_page)
         # v1.14.0: nudge custom-painted widgets to repaint after any
         # setting flip (esp. theme — stylesheet change doesn't trigger
         # paintEvent on QPainter-drawn widgets, only on QSS-styled ones).
@@ -1565,7 +1319,9 @@ class MainWindow(QMainWindow):
         self.nav.home_clicked.connect(lambda: self._goto("home"))
         self.nav.stats_clicked.connect(lambda: self._goto("stats"))
         self.nav.settings_clicked.connect(lambda: self._goto("settings"))
-        self.nav.add_clicked.connect(self._on_open_add_page)
+        # Until the Servers page lands (phase 2) the tab opens the server list
+        # the way the home card does.
+        self.nav.servers_clicked.connect(self._on_open_picker)
         self.log_received.connect(self.logs_page.append)
         # v2.2.0: also scan helper logs for socket-exhaustion so we treat it as
         # its own root cause (not a memory leak to reconnect-loop on).
@@ -1593,7 +1349,7 @@ class MainWindow(QMainWindow):
             "home":     (0, "home"),
             "settings": (1, "settings"),
             "logs":     (2, None),     # no nav highlight for logs
-            "add":      (3, "add"),
+            "add":      (3, "servers"),
             "stats":    (5, "stats"),  # v1.15.0
         }.get(name, (0, "home"))
         if target_index == self.stack.currentIndex():
@@ -1861,7 +1617,11 @@ class MainWindow(QMainWindow):
             mm, ss = divmod(elapsed, 60)
             hh, mm = divmod(mm, 60)
             timer = f"{hh:d}:{mm:02d}:{ss:02d}" if hh else f"{mm:02d}:{ss:02d}"
-            self.home_page.set_state("connected", f"{timer} · {self._engine_tag()}")
+            # The timer alone in full-TUN mode; proxy mode is worth naming,
+            # since not every app is covered there.
+            detail = timer if self.manager.current_mode() == MODE_TUN \
+                else f"{timer} · {self._engine_tag()}"
+            self.home_page.set_state("connected", detail)
             self.tray.set_state("connected", active_name)
             # v1.15.3: flip the Stats live-block badge based on the
             # connection-manager truth BEFORE attempting to poll xray
@@ -1880,7 +1640,8 @@ class MainWindow(QMainWindow):
             if self._reconnect_timer.isActive():
                 self.home_page.set_state(
                     connection_state.RECONNECTING,
-                    f"#{self._reconnect_attempts}/{self._reconnect_max}")
+                    tr("home.attempt", n=self._reconnect_attempts,
+                       total=self._reconnect_max))
                 self.tray.set_state("connecting", active_name)
             elif self._killswitch_holding():
                 self.home_page.set_state(connection_state.KILLSWITCH_ACTIVE)
@@ -1897,6 +1658,8 @@ class MainWindow(QMainWindow):
             self.stats_page.set_live_connected(False)
 
         self.home_page.set_config(self._active_config)
+        self.home_page.set_ping(self._tray_pings.get(active_name),
+                                known=active_name in self._tray_pings)
         self.tray.set_configs(self.configs, active_name, self._tray_pings)
 
     def _poll_traffic(self) -> None:
@@ -1923,9 +1686,6 @@ class MainWindow(QMainWindow):
             up_rate, down_rate,
             sample.uplink_bytes, sample.downlink_bytes,
         )
-        # v1.21.0: drive the world-map pulse speed/brightness from the live
-        # total throughput — the pin "breathes" with your traffic.
-        self.home_page.world_map.set_traffic(up_rate + down_rate)
         # v1.15.2: same per-second sample feeds the Stats page live block.
         # Cheap when Stats isn't visible — the widget just updates a few
         # labels and appends to a deque(maxlen=60); no repaint happens
@@ -2916,9 +2676,10 @@ class MainWindow(QMainWindow):
         paintEvent isn't auto-triggered by a stylesheet change.
         update() schedules one.
         """
-        self.home_page.world_map.update()
-        self.home_page.sparkline.update()
+        self.home_page.refresh_ip_setting()
         self.home_page.circle.update()
+        self.home_page.update()
+        self.nav.update()
 
     def _on_open_diagnostics(self) -> None:
         """Network Diagnostics — adapters, routes, MTU, server, TCP/UDP tests."""

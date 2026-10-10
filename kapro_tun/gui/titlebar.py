@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import icons
+from ..core.i18n import tr
+from . import icons, icons_v2, tokens
 
 
 class TitleBar(QFrame):
@@ -31,7 +32,7 @@ class TitleBar(QFrame):
         self.setFixedHeight(36)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 0, 0)
+        layout.setContentsMargins(tokens.SP_3H, 0, 0, 0)
         layout.setSpacing(8)
 
         # App icon mini
@@ -47,21 +48,36 @@ class TitleBar(QFrame):
         layout.addStretch(1)
 
         # Window controls
-        self.btn_min = QPushButton("—")
+        self.btn_min = QPushButton()
         self.btn_min.setObjectName("titleBarBtn")
+        self.btn_min.setToolTip(tr("wid.titlebar_minimize"))
         self.btn_min.setFixedSize(44, 36)
         self.btn_min.setFocusPolicy(Qt.NoFocus)
         self.btn_min.clicked.connect(self.minimize_clicked)
         layout.addWidget(self.btn_min)
 
-        self.btn_close = QPushButton("✕")
+        self.btn_close = QPushButton()
         self.btn_close.setObjectName("titleBarCloseBtn")
+        self.btn_close.setToolTip(tr("wid.titlebar_close"))
         self.btn_close.setFixedSize(44, 36)
         self.btn_close.setFocusPolicy(Qt.NoFocus)
         self.btn_close.clicked.connect(self.close_clicked)
         layout.addWidget(self.btn_close)
 
         self._drag_offset: Optional[QPoint] = None
+        self._render_icons()
+
+    def _render_icons(self) -> None:
+        from PySide6.QtCore import QSize
+        color = tokens.colors().text_secondary
+        for btn, name in ((self.btn_min, "minus"), (self.btn_close, "x")):
+            btn.setIcon(icons_v2.icon(name, tokens.ICON_SM, color))
+            btn.setIconSize(QSize(tokens.ICON_SM, tokens.ICON_SM))
+
+    def changeEvent(self, event) -> None:  # noqa: N802 — Qt override
+        if event.type() == event.Type.StyleChange and hasattr(self, "btn_min"):
+            self._render_icons()
+        super().changeEvent(event)
 
     # --- drag-to-move -----------------------------------------------------
 
