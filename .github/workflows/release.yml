@@ -45,7 +45,14 @@ jobs:
         # -u and faulthandler: when the suite dies in native code (a Qt
         # abort, a segfault) the log otherwise stops a screenful early and
         # names no test.
-        run: python -u -X faulthandler -m kapro_tun.scripts.smoke_test
+        run: |
+          # TEMPORARY: find which check breaks interpreter exit on Linux.
+          for f in "ui v2: tokens" "ui v2: navigation" "ui v2: home" "ui v2: Servers" "ui v2: add page" "ui v2: dialogs open" "ui v2: the window" "ui v2: settings" "ui v2: switch" "ui v2: statistics" "ui v2: sites" "ui v2: leak" "ui v2: the old" "(v4.0.1)" "StatsPage" "updater"; do
+            KAPROTUN_SMOKE_ONLY="$f" python -u -X faulthandler -m kapro_tun.scripts.smoke_test > out.txt 2> err.txt
+            echo "RESULT [$f] => $?"
+            tail -n 3 err.txt
+          done
+          python -u -X faulthandler -m kapro_tun.scripts.smoke_test
 
   build:
     name: Build (${{ matrix.os }})
