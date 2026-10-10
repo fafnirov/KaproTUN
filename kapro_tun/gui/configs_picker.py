@@ -24,8 +24,10 @@ from PySide6.QtWidgets import (
 from ..core import storage
 from ..core.i18n import tr
 from ..core.parser import ProxyConfig
+from ..core.safe_text import no_markup
 from . import flags, styles, world_map
 from .config_dialog import AddConfigDialog
+from .merge_prompt import ask_replace_conflicts, merge_with_prompt
 from .subscription_dialog import SubscriptionDialog
 
 
@@ -410,6 +412,8 @@ class ConfigsPickerDialog(QDialog):
         top = QHBoxLayout()
         top.setSpacing(6)
         name = QLabel(flags.prefix_with_flag(cfg))  # name already carries the flag emoji
+        # Name and host are the sender's text: plain, never markup.
+        name.setTextFormat(Qt.PlainText)
         name.setStyleSheet(f"color:{p.TEXT}; font-weight:600;")
         top.addWidget(name)
         top.addStretch(1)
@@ -427,6 +431,7 @@ class ConfigsPickerDialog(QDialog):
             f"border-radius:4px; padding:1px 6px; font-size:8pt; font-weight:600;")
         bot.addWidget(proto)
         srv = QLabel(f"{cfg.outbound.get('server','?')}:{cfg.outbound.get('server_port','?')}")
+        srv.setTextFormat(Qt.PlainText)
         srv.setStyleSheet(f"color:{p.TEXT_MUTED}; font-size:9pt;")
         bot.addWidget(srv)
         bot.addStretch(1)
@@ -544,15 +549,12 @@ class ConfigsPickerDialog(QDialog):
         new_cfg = dlg.result_config()
         if new_cfg is None:
             return
-        # Replace existing by name, else append
-        for i, c in enumerate(self._configs):
-            if c.name == new_cfg.name:
-                self._configs[i] = new_cfg
-                break
-        else:
-            self._configs.append(new_cfg)
+        # Through the same merge as a subscription: a pasted link whose name
+        # matches a saved server must not replace it without a question.
+        self._merge_incoming([new_cfg])
         storage.save_configs(self._configs)
-        self._current_name = new_cfg.name
+        self._current_name = next(
+            (c.name for c in self._configs if c.outbound == new_cfg.outbound), new_cfg.name)
         self._refresh()
 
     def _on_import_subscription(self, prefill_url: Optional[str] = None) -> None:
@@ -562,17 +564,7 @@ class ConfigsPickerDialog(QDialog):
         imported = dlg.imported_configs()
         if not imported:
             return
-        # Merge — name conflicts overwrite existing entries
-        existing_by_name = {c.name: i for i, c in enumerate(self._configs)}
-        added = replaced = 0
-        for cfg in imported:
-            if cfg.name in existing_by_name:
-                self._configs[existing_by_name[cfg.name]] = cfg
-                replaced += 1
-            else:
-                self._configs.append(cfg)
-                existing_by_name[cfg.name] = len(self._configs) - 1
-                added += 1
+        added, replaced = self._merge_incoming(imported)
         storage.save_configs(self._configs)
         self._refresh()
         self._start_pings()
@@ -581,6 +573,17 @@ class ConfigsPickerDialog(QDialog):
             tr("picker.import_done_title"),
             tr("picker.import_done_body", added=added, replaced=replaced),
         )
+
+    def _merge_incoming(self, incoming: list[ProxyConfig]) -> tuple[int, int]:
+        """Merge servers into the list; returns (added, updated). A source
+        updates its own servers silently; taking over a server that came from
+        somewhere else is the user's call (see merge_prompt)."""
+        self._configs, added, updated = merge_with_prompt(
+            self, self._configs, incoming, ask=self._ask_replace_conflicts)
+        return added, updated
+
+    def _ask_replace_conflicts(self, conflicts: list) -> bool:
+        return ask_replace_conflicts(self, conflicts)
 
     def _all_subscription_urls(self) -> list[str]:
         """Every subscription URL we've imported from.
@@ -628,17 +631,7 @@ class ConfigsPickerDialog(QDialog):
         # rotate IPs/keys). Never delete — a single failed or partial fetch
         # must not wipe a working server list. Placeholders (0.0.0.0 stubs)
         # are already filtered out upstream in result_from_body.
-        existing_by_name = {c.name: i for i, c in enumerate(self._configs)}
-        added = updated = 0
-        for cfg in agg["configs"]:
-            idx = existing_by_name.get(cfg.name)
-            if idx is not None:
-                self._configs[idx] = cfg
-                updated += 1
-            else:
-                self._configs.append(cfg)
-                existing_by_name[cfg.name] = len(self._configs) - 1
-                added += 1
+        added, updated = self._merge_incoming(agg["configs"])
 
         # Any successful fetch stamps the freshness + refreshes traffic/expiry
         # so Settings' "обновлено N назад" and the home banner stay current,
@@ -667,7 +660,7 @@ class ConfigsPickerDialog(QDialog):
             lines.append(tr("picker.refresh_failed", n=len(errors)))
             for url, info in errors[:5]:
                 short = url if len(url) <= 48 else url[:45] + "…"
-                lines.append(f"• {short} — {info.title}")
+                lines.append(no_markup(f"• {short} — {info.title}"))
             if len(errors) > 5:
                 lines.append(tr("picker.and_more", n=len(errors) - 5))
         QMessageBox.information(self, tr("picker.refresh_report_title"), "\n".join(lines))
@@ -677,7 +670,7 @@ class ConfigsPickerDialog(QDialog):
         if cfg is None:
             return
         confirm = QMessageBox.question(
-            self, tr("picker.remove_title"), tr("picker.remove_confirm", name=cfg.name)
+            self, tr("picker.remove_title"), tr("picker.remove_confirm", name=no_markup(cfg.name))
         )
         if confirm != QMessageBox.Yes:
             return

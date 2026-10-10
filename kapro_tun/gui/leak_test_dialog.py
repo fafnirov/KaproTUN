@@ -236,7 +236,8 @@ class LeakTestDialog(QDialog):
             self._row_dns.set_fail(
                 tr("leak.dns_suspected", n=len(dns.resolvers))
             )
-            self._dns_detail.setText(self._format_dns_resolvers(dns))
+            # Resolver hostnames come from PTR records: text, never markup.
+            self._dns_detail.setPlainText(self._format_dns_resolvers(dns))
             self._dns_detail.setVisible(True)
         else:
             self._row_dns.set_pass(
@@ -386,6 +387,8 @@ class _ResultRow(QWidget):
         layout.addWidget(self._name)
 
         self._detail = QLabel("…")
+        # Shows what remote services answered (IP, country, error text).
+        self._detail.setTextFormat(Qt.PlainText)
         self._detail.setWordWrap(True)
         layout.addWidget(self._detail, stretch=1)
 

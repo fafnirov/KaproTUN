@@ -7,6 +7,8 @@ loose .py files at runtime is fragile.
 """
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -70,7 +72,10 @@ def latest_release(timeout: tuple[float, float] = (5, 10)) -> Optional[UpdateInf
     except (requests.exceptions.RequestException, ValueError):
         return None
     tag = str(data.get("tag_name") or "").strip()
-    if not tag:
+    # The version is shown in labels and becomes part of a file name. A tag
+    # that is not plain `vX.Y.Z` is not one of ours — ignore the release rather
+    # than carry its text around.
+    if not re.fullmatch(r"v?\d+\.\d+(\.\d+){0,2}", tag):
         return None
     # The digest travels with the version discovery, deliberately: the same
     # request that tells us an update exists also tells us what it must hash

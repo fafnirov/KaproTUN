@@ -282,7 +282,7 @@ _RU: dict[str, str] = {
     'picker.empty': 'Ничего не найдено',
     'picker.header': 'Конфиги',
     'picker.import': 'Импорт по подписке',
-    'picker.import_done_body': 'Добавлено новых: {added}\nЗаменено существующих: {replaced}',
+    'picker.import_done_body': 'Добавлено новых: {added}\nОбновлено существующих: {replaced}',
     'picker.import_done_title': 'Импорт завершён',
     'picker.no_selection_body': 'Выбери конфиг из списка.',
     'picker.no_selection_title': 'Конфиг',
@@ -388,7 +388,7 @@ _RU: dict[str, str] = {
     'sub.result_found': "<span style='color:#16a34a; font-weight:600'>✓ Найдено {n} конфигов</span>",
     'sub.result_no_share_url': "<span style='color:#ef4444'>✕ В ответе не найдено ни одного share-URL (vless://, trojan://, vmess://, ss://, hysteria2://). Проверь, что скопировал страницу полностью.</span>",
     'sub.result_only_stub': "<span style='color:#ef4444'>✕ Провайдер вернул только заглушку ({n}), а не рабочие серверы.</span><br><span style='color:#fbbf24'>Обычно это значит: подписка не активирована / не оплачена, либо провайдер не отдаёт конфиги стороннему клиенту (нужен их Clash / официальное приложение). Проверь статус подписки у провайдера.</span>",
-    'sub.result_stub_provider': "<br><span style='color:#a1a1aa'>Провайдер сообщает: «{note}». Поддержка: <a style='color:#fbbf24' href='{support}'>{support}</a> · Личный кабинет: <a style='color:#fbbf24' href='{account}'>{account}</a></span>",
+    'sub.result_stub_provider': "<br><span style='color:#a1a1aa'>Провайдер сообщает: «{note}». Поддержка: {support} · Личный кабинет: {account}</span>",
     'sub.result_skipped_lines': "<br><span style='color:#a1a1aa'>Пропущено {n} строк (нераспознанный формат)</span>",
     'sub.result_skipped_stub': "<br><span style='color:#a1a1aa'>Пропущена заглушка от провайдера ({n} шт., нерабочий сервер)</span>",
     'sub.result_source': "<br><span style='color:#a1a1aa'>Источник: {source}.</span>",
@@ -476,6 +476,11 @@ _RU: dict[str, str] = {
     'mw.killswitch_stuck_title': 'Kill-switch всё ещё блокирует интернет',
     'mw.killswitch_stuck_body': "Прошлая сессия KaproTUN завершилась аварийно, и правила kill-switch остались в файрволе Windows — пока они там, интернета нет.\n\nСнять их можно только с правами администратора. Перезапусти KaproTUN от администратора: при запуске он уберёт свои правила.\n\nВручную (PowerShell от администратора):\nGet-NetFirewallRule -DisplayName 'KaproTUN-*' | Remove-NetFirewallRule",
     'mw.killswitch_stuck_later': 'Позже',
+    'picker.conflict_title': 'Совпадают имена серверов',
+    'picker.conflict_body': 'У новых серверов те же имена, что у уже сохранённых, но это другие серверы (адрес или параметры отличаются):\n\n{items}\n\nЕсли источник тот же и провайдер просто сменил адреса — замени. Если источник другой, оставь оба: иначе сохранённый сервер будет подменён чужим под прежним именем.',
+    'picker.conflict_more': '…и ещё {n}',
+    'picker.conflict_keep': 'Оставить оба',
+    'picker.conflict_replace': 'Заменить сохранённые',
 }
 
 _EN: dict[str, str] = {
@@ -727,7 +732,7 @@ _EN: dict[str, str] = {
     'picker.empty': 'Nothing found',
     'picker.header': 'Configs',
     'picker.import': 'Import by subscription',
-    'picker.import_done_body': 'Added new: {added}\nReplaced existing: {replaced}',
+    'picker.import_done_body': 'Added new: {added}\nUpdated existing: {replaced}',
     'picker.import_done_title': 'Import complete',
     'picker.no_selection_body': 'Select a config from the list.',
     'picker.no_selection_title': 'Config',
@@ -833,7 +838,7 @@ _EN: dict[str, str] = {
     'sub.result_found': "<span style='color:#16a34a; font-weight:600'>✓ Found {n} configs</span>",
     'sub.result_no_share_url': "<span style='color:#ef4444'>✕ No share URL found in the response (vless://, trojan://, vmess://, ss://, hysteria2://). Make sure you copied the whole page.</span>",
     'sub.result_only_stub': "<span style='color:#ef4444'>✕ The provider returned only a stub ({n}), not working servers.</span><br><span style='color:#fbbf24'>This usually means: the subscription isn't activated / paid, or the provider won't serve configs to a third-party client (you need their Clash / official app). Check your subscription status with the provider.</span>",
-    'sub.result_stub_provider': "<br><span style='color:#a1a1aa'>The provider says: «{note}». Support: <a style='color:#fbbf24' href='{support}'>{support}</a> · Account: <a style='color:#fbbf24' href='{account}'>{account}</a></span>",
+    'sub.result_stub_provider': "<br><span style='color:#a1a1aa'>The provider says: «{note}». Support: {support} · Account: {account}</span>",
     'sub.result_skipped_lines': "<br><span style='color:#a1a1aa'>Skipped {n} lines (unrecognized format)</span>",
     'sub.result_skipped_stub': "<br><span style='color:#a1a1aa'>Skipped a provider stub ({n} total, dead server)</span>",
     'sub.result_source': "<br><span style='color:#a1a1aa'>Source: {source}.</span>",
@@ -921,6 +926,11 @@ _EN: dict[str, str] = {
     'mw.killswitch_stuck_title': 'The kill-switch is still blocking the internet',
     'mw.killswitch_stuck_body': "The previous KaproTUN session ended abnormally and its kill-switch rules were left in Windows Firewall — while they are there, there is no internet.\n\nOnly an administrator can remove them. Relaunch KaproTUN as administrator: it clears its rules on start.\n\nBy hand (PowerShell as administrator):\nGet-NetFirewallRule -DisplayName 'KaproTUN-*' | Remove-NetFirewallRule",
     'mw.killswitch_stuck_later': 'Later',
+    'picker.conflict_title': 'Server names collide',
+    'picker.conflict_body': "The new servers have the same names as ones you already saved, but they are different servers (the address or the settings differ):\n\n{items}\n\nIf the source is the same and the provider just changed addresses, replace them. If the source is different, keep both: otherwise a saved server is swapped for someone else's under its old name.",
+    'picker.conflict_more': '…and {n} more',
+    'picker.conflict_keep': 'Keep both',
+    'picker.conflict_replace': 'Replace saved',
 }
 
 

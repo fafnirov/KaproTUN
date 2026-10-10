@@ -43,6 +43,8 @@ from ..core import (
 )
 from ..core import controller as _controller
 from ..core.controller import MODE_TUN
+from ..core.safe_text import esc, no_markup
+from .merge_prompt import merge_with_prompt
 from ..core.controller import ConnectionManager as _CM
 _HEALTH_OK, _HEALTH_DEGRADED, _HEALTH_DEAD = (
     _CM.HEALTH_OK, _CM.HEALTH_DEGRADED, _CM.HEALTH_DEAD)
@@ -241,8 +243,8 @@ class HomePage(QWidget):
             place = f"{country_name} · {city}" if country_name else city
         self.public_ip_label.setText(
             f"<span style='color:#71717a'>{tr('mw.your_ip')} </span>"
-            f"<span style='color:#fafafa'>{ip}</span>"
-            f"<span style='color:#71717a'>  ·  {place}</span>"
+            f"<span style='color:#fafafa'>{esc(ip)}</span>"
+            f"<span style='color:#71717a'>  ·  {esc(place)}</span>"
         )
         self.public_ip_label.setVisible(True)
         # Map gets shown only when we have a known country — silent
@@ -2266,7 +2268,9 @@ class MainWindow(QMainWindow):
                 self._note_killswitch_hold()
                 self._refresh_home()
             return
-        QMessageBox.critical(self, tr("mw.connect_failed_title"), msg)
+        # The message can quote the engine's log; keep it from being sniffed
+        # as rich text.
+        QMessageBox.critical(self, tr("mw.connect_failed_title"), no_markup(msg))
 
     def _arm_reconnect(self, reason: str, attempt: int, total: int) -> bool:
         """Gate + log EVERY auto-reconnect initiation. Returns True if the
@@ -2797,13 +2801,11 @@ class MainWindow(QMainWindow):
 
     def _on_add_page_saved(self, new_cfg: ProxyConfig) -> None:
         """User filled out AddConfigPage and clicked Save."""
-        for i, c in enumerate(self.configs):
-            if c.name == new_cfg.name:
-                self.configs[i] = new_cfg
-                break
-        else:
-            self.configs.append(new_cfg)
+        merged, _added, _updated = merge_with_prompt(self, self.configs, [new_cfg])
+        self.configs[:] = merged
         storage.save_configs(self.configs)
+        # As stored: under "keep both" the new server lives under its own name.
+        new_cfg = next((c for c in self.configs if c.outbound == new_cfg.outbound), new_cfg)
         self._active_config = new_cfg
         self.manager.update_settings(last_config_name=new_cfg.name)
         self._goto("home")
@@ -2822,16 +2824,10 @@ class MainWindow(QMainWindow):
         imported = dlg.imported_configs()
         if not imported:
             return
-        existing_by_name = {c.name: i for i, c in enumerate(self.configs)}
-        added = replaced = 0
-        for cfg in imported:
-            if cfg.name in existing_by_name:
-                self.configs[existing_by_name[cfg.name]] = cfg
-                replaced += 1
-            else:
-                self.configs.append(cfg)
-                existing_by_name[cfg.name] = len(self.configs) - 1
-                added += 1
+        # The same source-aware merge as the picker's import: a subscription
+        # may update its own servers, never silently another source's.
+        merged, added, replaced = merge_with_prompt(self, self.configs, imported)
+        self.configs[:] = merged
         storage.save_configs(self.configs)
         # Same as a single add: freshly imported servers have no ping, so they
         # were missing from the tray's quick-connect list until a restart.
@@ -2856,9 +2852,13 @@ class MainWindow(QMainWindow):
             kind="success",
             duration_ms=4000,
         )
-        # Auto-pick the fastest server out of what we just imported.
-        # Done in background — toast appears when the sweep finishes.
-        self._auto_pick_fastest(imported)
+        # Auto-pick the fastest server out of what we just imported — as they
+        # are stored NOW (a "keep both" may have renamed some), so a ping
+        # measured against one server can never select another by its name.
+        from ..core.subscription import endpoint_key
+        landed = {(c.source, endpoint_key(c)) for c in imported}
+        self._auto_pick_fastest(
+            [c for c in self.configs if (c.source, endpoint_key(c)) in landed])
 
     def _auto_pick_fastest(self, candidates: list[ProxyConfig]) -> None:
         """TCP-ping each candidate; once all results in, switch to min-latency."""

@@ -4608,13 +4608,17 @@ def _picker_subs_refresh_merge_and_url_list() -> None:
     try:
         existing = [
             PC(name="🇩🇪 Германия", protocol="vless", raw_url="vless://x@127.0.0.1:1",
-               outbound={"server": "127.0.0.1", "server_port": 1}),
+               outbound={"server": "127.0.0.1", "server_port": 1}, source="sub:u1"),
             PC(name="🇳🇱 Нидерланды", protocol="trojan", raw_url="trojan://x@127.0.0.1:2",
                outbound={"server": "127.0.0.1", "server_port": 2}),
         ]
         dlg = ConfigsPickerDialog(existing, current_name="🇩🇪 Германия")
         if dlg._pinger is not None:
             dlg._pinger.wait(3000)
+
+        def _no_question(_conflicts):
+            raise AssertionError("a subscription updating its own server asked the user")
+        dlg._ask_replace_conflicts = _no_question
 
         # (a) URL-list: de-dupe preserving order …
         storage.load_settings = lambda: {
@@ -4629,9 +4633,9 @@ def _picker_subs_refresh_merge_and_url_list() -> None:
 
         # (b) merge: one same-name update + one brand-new server.
         updated = PC(name="🇩🇪 Германия", protocol="vless", raw_url="vless://x@127.0.0.1:443",
-                     outbound={"server": "127.0.0.1", "server_port": 443})
+                     outbound={"server": "127.0.0.1", "server_port": 443}, source="sub:u1")
         brand_new = PC(name="🇫🇷 Франция", protocol="vless", raw_url="vless://x@127.0.0.1:3",
-                       outbound={"server": "127.0.0.1", "server_port": 3})
+                       outbound={"server": "127.0.0.1", "server_port": 3}, source="sub:u1")
         dlg._on_subs_refreshed({
             "configs": [updated, brand_new], "userinfo": None,
             "ok": 1, "errors": [], "total": 1,
@@ -8189,6 +8193,413 @@ check("parser: never downgrades a server's transport security (v4.0.0)",
       _v4_parser_never_downgrades_security)
 check("firewall sandbox: the suite cannot reach the real firewall (v4.0.0)",
       _v4_firewall_sandbox_is_in_place)
+
+
+# ---------------------------------------------------------------------------
+# v4.0.1 — what a subscription, a downloaded list or a provider may not do
+# ---------------------------------------------------------------------------
+
+section("v4.0.1: untrusted input — subscriptions, geoip list, provider text")
+
+
+def _v401_cfg(name: str, host: str, source: str = "", secret: str = "pw"):
+    from kapro_tun.core.parser import parse
+    cfg = parse(f"trojan://{secret}@{host}:443?security=tls#x")
+    cfg.name, cfg.source = name, source
+    return cfg
+
+
+def _v401_subscription_cannot_hijack_a_server() -> None:
+    """Servers were merged by NAME alone, so any subscription could silently
+    replace another source's server (address, keys and all) just by reusing
+    its name — and the user would keep connecting to "🇩🇪 Germany"."""
+    from kapro_tun.core import storage as _st
+    from kapro_tun.core import subscription as _sub
+    a, b = _sub.source_id("https://a.example/sub"), _sub.source_id("https://b.example/sub")
+    if not a or a == b or "a.example" in a:
+        raise AssertionError(f"source ids must be distinct and opaque: {a!r} {b!r}")
+
+    saved = [
+        _v401_cfg("🇩🇪 Germany", "de.a.example", a),      # from subscription A
+        _v401_cfg("Home", "home.example"),                # added by hand
+        _v401_cfg("Legacy", "legacy.example"),            # saved before sources existed
+    ]
+    hostile = [
+        _v401_cfg("🇩🇪 Germany", "evil.example", b),
+        _v401_cfg("Home", "evil.example", b),
+        _v401_cfg("Legacy", "legacy.example", b),         # same server: nothing to hijack
+        _v401_cfg("Fresh", "new.b.example", b),
+    ]
+    res = _sub.merge_configs(saved, hostile)
+    by_name = {c.name: c for c in res.configs}
+    if by_name["🇩🇪 Germany"].outbound["server"] != "de.a.example" \
+            or by_name["Home"].outbound["server"] != "home.example":
+        raise AssertionError("another subscription replaced a server by reusing its name")
+    if [inc.name for _old, inc in res.conflicts] != ["🇩🇪 Germany", "Home"]:
+        raise AssertionError(f"conflicts not reported for the user to decide: {res.conflicts}")
+    if "Fresh" not in by_name or res.added != 1:
+        raise AssertionError("a genuinely new server was not added")
+    if by_name["Legacy"].source != b:
+        raise AssertionError("an identical legacy server was not adopted by its subscription")
+    if saved[0].outbound["server"] != "de.a.example" or len(saved) != 3:
+        raise AssertionError("merge_configs modified its input")
+
+    # A subscription updating its OWN entry (rotated address) needs no question.
+    own = _sub.merge_configs(saved, [_v401_cfg("🇩🇪 Germany", "de2.a.example", a)])
+    if own.conflicts or {c.name: c for c in own.configs}["🇩🇪 Germany"].outbound["server"] \
+            != "de2.a.example" or own.updated != 1:
+        raise AssertionError("a subscription could not update its own server")
+
+    # "Keep both": the newcomer gets its own name, and the next refresh of the
+    # same subscription recognises it instead of asking again.
+    kept = res.keep_both()
+    names = [c.name for c in kept]
+    if len(kept) != 6 or len(set(names)) != 6 or names.count("🇩🇪 Germany") != 1:
+        raise AssertionError(f"keep-both produced {names}")
+    again = _sub.merge_configs(kept, hostile)
+    if again.conflicts or len(again.configs) != 6:
+        raise AssertionError("the same subscription asks about the same servers every refresh")
+
+    replaced = {c.name: c for c in res.replace()}
+    if replaced["Home"].outbound["server"] != "evil.example" or len(replaced) != 4:
+        raise AssertionError("an explicit 'replace' did not replace")
+
+    # The source survives a save/load, or every restart would forget it.
+    with _v4_fresh_data_dir():
+        _st.save_configs(kept)
+        if sorted(c.source for c in _st.load_configs()) != sorted(c.source for c in kept):
+            raise AssertionError("config sources are not persisted")
+
+    # And a fetched subscription stamps its entries.
+    body = "\n".join(u for _p, u in SAMPLE_URLS)
+    with _v4_patched(_sub, _fetch=lambda *_a, **_k: (body, None)):
+        got = _sub.import_subscription("https://a.example/sub")
+    if not got.configs or {c.source for c in got.configs} != {a}:
+        raise AssertionError("imported servers do not carry their subscription's id")
+    if any(c.source for c in _sub.result_from_body(body).configs):
+        raise AssertionError("a pasted body must not claim a subscription source")
+
+    import inspect
+    from kapro_tun.gui import configs_picker as _cp
+    for fn in ("_on_import_subscription", "_on_subs_refreshed"):
+        src = inspect.getsource(getattr(_cp.ConfigsPickerDialog, fn))
+        if "_merge_incoming" not in src or "existing_by_name" in src:
+            raise AssertionError(f"{fn} still merges by name alone")
+    if "merge_with_prompt" not in inspect.getsource(_cp.ConfigsPickerDialog._merge_incoming):
+        raise AssertionError("the picker does not use the source-aware merge")
+
+
+def _v401_merge_has_no_side_doors() -> None:
+    """Follow-ups from the security review of the first cut: paths that still
+    merged by name, a "same server" test that ignored everything but the
+    address and the key, and names that only look different."""
+    import inspect
+    import time
+    from dataclasses import replace as _dc_replace
+    from kapro_tun.core import subscription as _sub
+    from kapro_tun.gui import configs_picker as _cp
+    from kapro_tun.gui import main_window as _mw
+    from kapro_tun.gui import merge_prompt as _mp
+    a, b = _sub.source_id("https://a.example/sub"), _sub.source_id("https://b.example/sub")
+
+    # Same host, port and password — but the TLS block is not the same server.
+    trusted = _v401_cfg("Home", "h.example", a)
+    stripped = _v401_cfg("Home", "h.example", b)
+    stripped.outbound = dict(stripped.outbound, tls={"enabled": True, "insecure": True,
+                                                    "server_name": "evil.example"})
+    res = _sub.merge_configs([trusted], [stripped])
+    if not res.conflicts or res.configs[0].outbound["tls"].get("insecure"):
+        raise AssertionError("an entry with the same address but weaker TLS replaced silently")
+    legacy = _v401_cfg("Old", "o.example")
+    twisted = _dc_replace(_v401_cfg("Old", "o.example", b),
+                          outbound=dict(legacy.outbound, tls={"enabled": False}))
+    if not _sub.merge_configs([legacy], [twisted]).conflicts:
+        raise AssertionError("a legacy entry was taken over by a look-alike with other TLS")
+
+    # Names that render the same are the same name.
+    for fake in ("Home ", "Home\u200b", " Home", "Ho\u00adme"):
+        res = _sub.merge_configs([trusted], [_v401_cfg(fake, "evil.example", b)])
+        if not res.conflicts:
+            raise AssertionError(f"{fake!r} slipped in beside the saved server as a twin")
+
+    # One list repeating a name must not leave two entries with that name.
+    twins = [_v401_cfg("Home", "e1.example", b), _v401_cfg("Home", "e2.example", b)]
+    for resolved in (_sub.merge_configs([trusted], twins).replace(),
+                     _sub.merge_configs([trusted], twins).keep_both()):
+        names = [c.name for c in resolved]
+        if len(names) != len(set(names)):
+            raise AssertionError(f"duplicate names after resolving conflicts: {names}")
+
+    big = [_v401_cfg(f"n{i}", f"h{i}.example", b) for i in range(3000)]
+    t0 = time.perf_counter()
+    _sub.merge_configs(big, big + [_v401_cfg(f"n{i}", f"x{i}.example", a) for i in range(3000)])
+    if time.perf_counter() - t0 > 3.0:
+        raise AssertionError("merging a large subscription freezes the UI")
+
+    # The dialog shows sender-controlled hosts: one line each, bounded.
+    shown = _mp.one_line("1.2.3.4\n\nAll good. Press Replace\t" + "x" * 300)
+    if "\n" in shown or "\t" in shown or len(shown) > 64:
+        raise AssertionError(f"a host can write its own paragraph into the prompt: {shown!r}")
+
+    merged, added, updated = _mp.merge_with_prompt(
+        None, [trusted], [_v401_cfg("Home", "evil.example", b)], ask=lambda _c: False)
+    if len(merged) != 2 or merged[0].outbound["server"] != "h.example" or (added, updated) != (1, 0):
+        raise AssertionError("'keep both' did not keep the saved server")
+    merged, added, updated = _mp.merge_with_prompt(
+        None, [trusted], [_v401_cfg("Home", "new.example", b)], ask=lambda _c: True)
+    if len(merged) != 1 or merged[0].outbound["server"] != "new.example" or (added, updated) != (0, 1):
+        raise AssertionError("'replace' did not replace")
+
+    # Every way a server gets into the list goes through it.
+    for owner, fn in ((_mw.MainWindow, "_on_import_subscription"),
+                      (_mw.MainWindow, "_on_add_page_saved"),
+                      (_cp.ConfigsPickerDialog, "_on_add"),
+                      (_cp.ConfigsPickerDialog, "_merge_incoming")):
+        src = inspect.getsource(getattr(owner, fn))
+        if "merge_with_prompt" not in src and "_merge_incoming" not in src:
+            raise AssertionError(f"{owner.__name__}.{fn} still replaces by name alone")
+        if "existing_by_name" in src or "c.name == new_cfg.name" in src:
+            raise AssertionError(f"{owner.__name__}.{fn} still has the by-name loop")
+
+
+def _v401_remaining_dialogs_show_text_as_text() -> None:
+    import inspect
+    from PySide6.QtCore import Qt, QUrl
+    from PySide6.QtGui import QTextDocument
+    from PySide6.QtWidgets import QApplication
+    from kapro_tun.core import updater as _upd
+    from kapro_tun.gui import config_dialog, installer_dialog, leak_test_dialog, updater_dialog
+    if QApplication.instance() is None:
+        QApplication([])
+
+    dlg = config_dialog.AddConfigDialog()
+    if dlg.detected_label.textFormat() != Qt.PlainText:
+        raise AssertionError("the add-server dialog renders the parsed host as markup")
+    if "no_markup(" not in inspect.getsource(config_dialog):
+        raise AssertionError("a parse error quoting the pasted link is shown as markup")
+    row = leak_test_dialog._ResultRow("IPv4")
+    if row._detail.textFormat() != Qt.PlainText:
+        raise AssertionError("leak-test rows render remote services' replies as markup")
+    if "_dns_detail.setPlainText(" not in inspect.getsource(leak_test_dialog):
+        raise AssertionError("resolver hostnames in the leak test are rendered as markup")
+    if "no_markup(" not in inspect.getsource(installer_dialog):
+        raise AssertionError("a download error is shown as markup")
+
+    notes = updater_dialog._NotesBrowser()
+    if notes.loadResource(QTextDocument.ImageResource, QUrl("file://attacker/share/a.png")) \
+            is not None or notes.openExternalLinks() or notes.openLinks():
+        raise AssertionError("release notes can load images or open arbitrary links")
+
+    class _Reply:
+        def __init__(self, tag):
+            self._tag = tag
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"tag_name": self._tag, "html_url": "https://github.com/x", "body": "",
+                    "assets": []}
+
+    def latest(tag):
+        with _v4_patched(_upd.requests, get=lambda *_a, **_k: _Reply(tag)):
+            return _upd.latest_release()
+
+    for bad in ("v9.9.9/../x", "9.9.9<img src=x>", "v9.9.9 beta", "..", "v1"):
+        if latest(bad) is not None:
+            raise AssertionError(f"a release tagged {bad!r} was accepted as a version")
+    ok = latest("v4.2.0")
+    if ok is None or ok.version != "4.2.0":
+        raise AssertionError("an ordinary release tag was rejected")
+
+
+def _v401_geoip_list_is_validated() -> None:
+    """The RU list decides which destinations bypass the tunnel. It was taken
+    as-is: `0.0.0.0/0` in it sent everything direct, and one malformed line
+    made the engine reject the config on every connect, forever."""
+    import ipaddress
+    from kapro_tun.core import geoip_ru as g
+    from kapro_tun.core import sing_box_config as sbc
+
+    good = [f"{5 + i // 256}.{i % 256}.0.0/16" for i in range(1100)]      # 72M addresses
+
+    def cached(lines: list) -> list:
+        g.cache_file().write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return g.load_cidrs()
+
+    with _v4_fresh_data_dir():
+        if len(cached(good)) != 1100:
+            raise AssertionError("a normal list was not accepted")
+        cidrs = sbc._ru_cidrs()
+        if len(cidrs) != 1100 or any(ipaddress.ip_network(c).version != 4 for c in cidrs):
+            raise AssertionError("the config builder did not get the list")
+
+        junk = ["garbage-host/8", "1.2.3.4/33", "2a00::/12", "5.300.0.0/16", "# note", ""]
+        if len(cached(good + junk)) != 1100 or len(sbc._ru_cidrs()) != 1100:
+            raise AssertionError("malformed lines reached the engine config")
+
+        # Too little is as wrong as too much: an almost-empty list would be
+        # cached, never replaced, and silently switch RU-direct off for good.
+        for stub, why in ((["# nothing here"] * 400, "only comments"),
+                          (["8.8.8.8/32"] + ["# pad"] * 1200, "a single address")):
+            if cached(stub) or g.cache_file().exists():
+                raise AssertionError(f"a list with {why} was accepted and kept")
+
+        for poison, why in (("0.0.0.0/0", "everything"), ("8.0.0.0/7", "a huge block")):
+            if cached(good + [poison]) or sbc._ru_cidrs():
+                raise AssertionError(f"a list routing {why} past the tunnel was accepted")
+            if g.cache_file().exists():
+                raise AssertionError("a rejected list stays cached, so it is never replaced")
+        wide = [f"{a}.{b}.0.0/16" for a in range(20, 28) for b in range(256)]   # 134M addresses
+        if cached([f"{20 + i}.0.0.0/11" for i in range(40)] + good[:1000]):
+            raise AssertionError("networks wider than any real RU block were accepted")
+        if cached(wide):
+            raise AssertionError("a list covering far more than Russia was accepted")
+
+        # download(): nothing unvalidated is ever written to the cache.
+        class _Resp:
+            def __init__(self, payload: bytes):
+                self.payload, self.headers = payload, {"Content-Length": str(len(payload))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+            def raise_for_status(self):
+                pass
+
+            def iter_content(self, chunk_size=8192):
+                for i in range(0, len(self.payload), chunk_size):
+                    yield self.payload[i:i + chunk_size]
+
+        def fetch_as(payload: bytes) -> bool:
+            with _v4_patched(g.requests, get=lambda *_a, **_k: _Resp(payload)):
+                try:
+                    g.download(attempts=1)
+                except Exception:
+                    return False
+            return True
+
+        if fetch_as(("\n".join(good + ["0.0.0.0/0"])).encode()) or g.cache_file().exists():
+            raise AssertionError("a poisoned download was written to the cache")
+        if fetch_as(b"5.0.0.0/24\n" * 400_000) or g.cache_file().exists():
+            raise AssertionError("an oversized download was accepted")
+        if fetch_as(b"# maintenance\n" * 500) or g.cache_file().exists():
+            raise AssertionError("a download with no networks in it was cached")
+        if not fetch_as(("\n".join(good)).encode()) or len(g.load_cidrs()) != 1100:
+            raise AssertionError("a valid download was not cached")
+
+
+def _v401_stale_runtime_config_is_removed_at_startup() -> None:
+    """The runtime config holds the server's UUID/password in clear text. It is
+    deleted on disconnect — but after a crash or power loss it stayed on disk
+    until the next disconnect, defeating the encryption of configs.json."""
+    import inspect
+    from kapro_tun import main as _main
+    with _v4_fresh_data_dir():
+        f = _sbx_paths.sing_box_runtime_config_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text('{"outbounds":[{"password":"secret"}]}', encoding="utf-8")
+        _main._remove_stale_runtime_configs()
+        if f.exists():
+            raise AssertionError("the credential-bearing runtime config survived startup")
+        _main._remove_stale_runtime_configs()            # nothing there: must not raise
+    src = inspect.getsource(_main)
+    if not 0 < src.find("_kill_orphan_helpers()\n") < src.rfind("_remove_stale_runtime_configs()"):
+        raise AssertionError("startup must remove the file only after orphan engines are gone")
+
+
+def _v401_provider_text_is_never_markup() -> None:
+    """Server names, hosts, provider notes and error texts come from outside.
+    Qt labels render HTML by default, so `<img src=//host/share>` in a server
+    name was fetched, and a provider's "support" link could carry any scheme."""
+    import types
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QLabel, QWidget
+    from kapro_tun.core import safe_text as st
+    from kapro_tun.core import subscription as _sub
+    if QApplication.instance() is None:
+        QApplication([])
+
+    if st.esc("<img src=x onerror='a'>&") != "&lt;img src=x onerror=&#x27;a&#x27;&gt;&amp;":
+        raise AssertionError("esc() does not neutralise markup")
+    for bad in ("file://host/share/x.exe", "javascript:alert(1)", "ms-msdt:/id", "",
+                "https://ok.example/' onclick='x", "https://", "http://a b.example/",
+                "\\\\host\\share", "https://ok.example/\npath"):
+        if st.http_url(bad):
+            raise AssertionError(f"{bad!r} accepted as a web link")
+        if "<a " in st.link(bad):
+            raise AssertionError(f"{bad!r} was turned into a clickable link")
+    if "<" in st.no_markup("<img src=x>") or st.no_markup("🇩🇪 Germany #1") != "🇩🇪 Germany #1":
+        raise AssertionError("no_markup() must defuse tags and leave ordinary names alone")
+    if st.http_url("https://support.example/help?a=1") != "https://support.example/help?a=1":
+        raise AssertionError("an ordinary https link was rejected")
+    if "<a href='https://support.example/'" not in st.link("https://support.example/"):
+        raise AssertionError("a safe link is not clickable")
+
+    evil = "<img src='file://attacker/share/a.png'>Germany"
+    cfg = _v401_cfg(evil, "h.example")
+    cfg.outbound["server"] = "<b>h.example</b>"
+
+    from kapro_tun.gui import configs_picker as _cp
+    from kapro_tun.gui import widgets as _w
+    from kapro_tun.gui.toast import Toast
+    host = types.SimpleNamespace(_current_name="", _ping_labels={}, _pings={},
+                                 _style_pill=lambda *_a: None)
+    row = _cp.ConfigsPickerDialog._make_row(host, cfg)
+    card = _w.ConfigCard()
+    card.set_config(cfg)
+    toast_parent = QWidget()
+    toast = Toast(toast_parent, f"Подключено: {evil}", "info")
+    for where, widget in (("picker row", row), ("home card", card), ("toast", toast)):
+        for label in widget.findChildren(QLabel):
+            if ("<" in label.text() or "&lt;" in label.text()) \
+                    and label.textFormat() != Qt.PlainText:
+                raise AssertionError(f"{where}: {label.text()[:40]!r} is rendered as markup")
+
+    from kapro_tun.gui.subscription_dialog import SubscriptionDialog
+    dlg = SubscriptionDialog()
+    stub = _sub.SubscriptionResult(configs=[], errors=[], raw_lines=1, placeholders=["x"])
+    stub.provider_note = "<img src='file://attacker/s/a.png'>"
+    stub.support_url = "file://attacker/share/run.exe"
+    stub.account_url = "https://panel.example/me' style='x"
+    dlg._show_result(stub)
+    shown = dlg.status_label.text()
+    if "<img" in shown or "href='file:" in shown or "href='https://panel.example/me'" in shown:
+        raise AssertionError(f"provider text reached the dialog as markup: {shown[-200:]}")
+    stub.support_url = "https://support.example/help"
+    dlg._show_result(stub)
+    if "href='https://support.example/help'" not in dlg.status_label.text():
+        raise AssertionError("a legitimate support link is no longer clickable")
+    dlg._on_fetch_failed(_sub.FetchError(category="unknown", raw="<img src=x>",
+                                         title="<b>t</b>", detail="<i>d</i>",
+                                         suggest_manual=False))
+    if any(tag in dlg.status_label.text() for tag in ("<b>t", "<i>d", "<img")):
+        raise AssertionError("a fetch error is rendered as markup")
+
+    import inspect
+    from kapro_tun.gui import add_page, main_window, updater_dialog
+    for mod, needle in ((add_page, "esc("), (updater_dialog, "esc("), (updater_dialog, "link(")):
+        if needle not in inspect.getsource(mod):
+            raise AssertionError(f"{mod.__name__} builds rich text without {needle})")
+    if "esc(ip)" not in inspect.getsource(main_window.HomePage):
+        raise AssertionError("the public-IP line shows a remote service's reply as markup")
+
+
+check("subscription: cannot replace another source's server by its name (v4.0.1)",
+      _v401_subscription_cannot_hijack_a_server)
+check("subscription: every path into the server list is source-aware (v4.0.1)",
+      _v401_merge_has_no_side_doors)
+check("ui: add-server, leak-test, updater and installer dialogs show text (v4.0.1)",
+      _v401_remaining_dialogs_show_text_as_text)
+check("geoip: the RU list is validated before it can bypass the tunnel (v4.0.1)",
+      _v401_geoip_list_is_validated)
+check("runtime config: a leftover with credentials is removed at startup (v4.0.1)",
+      _v401_stale_runtime_config_is_removed_at_startup)
+check("ui: names, hosts and provider text are never rendered as markup (v4.0.1)",
+      _v401_provider_text_is_never_markup)
 
 
 # ---------------------------------------------------------------------------

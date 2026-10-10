@@ -28,9 +28,12 @@ DPI fallback:
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import socket
 import time
-from dataclasses import dataclass, field
+import unicodedata
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Optional
 
@@ -566,6 +569,165 @@ def result_from_body(body: str, via_proxy: bool = False) -> SubscriptionResult:
     )
 
 
+def source_id(url: str) -> str:
+    """Opaque, stable id of a subscription, recorded on every server it
+    delivers. A hash, not the URL: the URL is a bearer credential and has no
+    business being copied into each server record."""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    return "sub:" + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def endpoint_key(cfg: ProxyConfig) -> tuple:
+    """What makes two records the same server: where it is and how we
+    authenticate to it. The display name is deliberately not part of it."""
+    ob = cfg.outbound
+    return (cfg.protocol, str(ob.get("server", "")).strip().lower(),
+            ob.get("server_port"), str(ob.get("uuid") or ob.get("password") or ""))
+
+
+def _same_server(a: ProxyConfig, b: ProxyConfig) -> bool:
+    """True only when two records describe the SAME connection in every
+    detail — not just the address and the key. An entry that keeps the host,
+    port and UUID but drops TLS, sets `insecure`, or swaps the REALITY key is
+    a different (weaker) server, and must not pass as "nothing changed"."""
+    return a.protocol == b.protocol and (
+        json.dumps(a.outbound, sort_keys=True, default=str)
+        == json.dumps(b.outbound, sort_keys=True, default=str))
+
+
+def _name_key(name: str) -> str:
+    """A name as the eye reads it, for collision checks: compatibility forms
+    folded, invisible characters and surrounding/duplicate spaces removed.
+    "Home", "Home " and "Ho\u200bme" are one name — otherwise a twin could be
+    added right beside a trusted server and be told apart only by luck."""
+    text = unicodedata.normalize("NFKC", str(name))
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    return " ".join(text.split())
+
+
+def _unique_name(base: str, taken: set) -> str:
+    n = 2
+    while _name_key(f"{base} ({n})") in taken:
+        n += 1
+    name = f"{base} ({n})"
+    taken.add(_name_key(name))
+    return name
+
+
+@dataclass
+class MergeResult:
+    """Outcome of merge_configs(). `configs` already holds everything that was
+    safe to apply; `conflicts` are the (saved, incoming) pairs that need the
+    user: same name, different server, different origin."""
+    configs: list[ProxyConfig]
+    added: int = 0
+    updated: int = 0
+    conflicts: list[tuple[ProxyConfig, ProxyConfig]] = field(default_factory=list)
+
+    def replace(self) -> list[ProxyConfig]:
+        """The user said: these are the same servers, take the new ones."""
+        out = list(self.configs)
+        taken = {_name_key(c.name) for c in out}
+        for saved, incoming in self.conflicts:
+            at = next((i for i, c in enumerate(out) if c is saved), None)
+            if at is None:
+                # A second newcomer claimed the same saved name: it cannot
+                # also become that entry, so it gets a name of its own.
+                out.append(replace(incoming, name=_unique_name(incoming.name, taken)))
+            else:
+                out[at] = incoming
+        return out
+
+    def keep_both(self) -> list[ProxyConfig]:
+        """The user said: different servers. The newcomers get their own names
+        and the saved ones stay exactly as they were."""
+        out = list(self.configs)
+        taken = {_name_key(c.name) for c in out}
+        for _saved, incoming in self.conflicts:
+            out.append(replace(incoming, name=_unique_name(incoming.name, taken)))
+        return out
+
+
+def merge_configs(existing: list[ProxyConfig],
+                  incoming: list[ProxyConfig]) -> MergeResult:
+    """Merge servers from a subscription (or a pasted list, or one added by
+    hand) into the saved ones.
+
+    The saved list used to be keyed by NAME alone: any subscription could
+    replace any saved server — address, keys and all — by shipping an entry
+    with the same name, and the user would go on connecting to "🇩🇪 Germany"
+    without knowing it now pointed somewhere else. Names are chosen by the
+    sender; they prove nothing.
+
+    So an incoming server replaces a saved one only when that is provably the
+    same thing:
+      * the saved one came from the SAME subscription (it is updating its own
+        entry — providers rotate addresses and keys), or
+      * it is the same connection in every detail (_same_server): nothing
+        changes but the bookkeeping. This is also how servers saved before
+        sources were recorded get attributed.
+    Same name, different server, different or unknown origin is a conflict:
+    nothing is touched and the caller asks the user. Never deletes. Does not
+    modify `existing`. Linear in the size of the lists.
+    """
+    out = list(existing)
+    result = MergeResult(configs=out)
+    by_name: dict[str, int] = {}      # name as read        -> first index
+    by_own: dict[tuple, int] = {}     # (source, name)      -> index
+    by_endpoint: dict[tuple, int] = {}  # (source, endpoint) -> index
+
+    def keys(c: ProxyConfig) -> list[tuple[dict, object]]:
+        nk = _name_key(c.name)
+        found: list[tuple[dict, object]] = [(by_name, nk)]
+        if c.source:
+            found += [(by_own, (c.source, nk)), (by_endpoint, (c.source, endpoint_key(c)))]
+        return found
+
+    def index(i: int) -> None:
+        for table, key in keys(out[i]):
+            table.setdefault(key, i)
+
+    def put(i: int, cfg: ProxyConfig) -> None:
+        for table, key in keys(out[i]):
+            if table.get(key) == i:
+                del table[key]
+        out[i] = cfg
+        index(i)
+
+    for i in range(len(out)):
+        index(i)
+
+    for cfg in incoming:
+        src, nk = cfg.source, _name_key(cfg.name)
+        own = by_own.get((src, nk)) if src else None
+        if own is not None:
+            put(own, cfg)
+            result.updated += 1
+            continue
+        named = by_name.get(nk)
+        if named is None:
+            out.append(cfg)
+            index(len(out) - 1)
+            result.added += 1
+            continue
+        if _same_server(out[named], cfg):
+            put(named, replace(cfg, source=src or out[named].source))
+            result.updated += 1
+            continue
+        # The name is taken by a different server from elsewhere. If an earlier
+        # "keep both" already stored ours under another name, that is the one
+        # to refresh — otherwise the same question would come back every time.
+        ours = by_endpoint.get((src, endpoint_key(cfg))) if src else None
+        if ours is not None:
+            put(ours, replace(cfg, name=out[ours].name))
+            result.updated += 1
+            continue
+        result.conflicts.append((out[named], cfg))
+    return result
+
+
 def import_subscription(
     url: str,
     timeout: tuple[float, float] = (10, 20),
@@ -583,6 +745,8 @@ def import_subscription(
                             minimal_metadata=minimal_metadata)
     headers = dict(_last_headers)
     result = result_from_body(body, via_proxy=bool(proxy_url))
+    for cfg in result.configs:
+        cfg.source = source_id(url)
     result.userinfo = userinfo
     result.support_url = str(headers.get("Support-Url", "") or "")
     result.account_url = str(headers.get("Profile-Web-Page-Url", "") or "")

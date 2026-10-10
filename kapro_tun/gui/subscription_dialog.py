@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from ..core import storage
 from ..core.i18n import tr
 from ..core.parser import ProxyConfig
+from ..core.safe_text import esc, link
 from ..core.subscription import (
     FetchError,
     SubscriptionResult,
@@ -315,9 +316,9 @@ class SubscriptionDialog(QDialog):
     def _on_fetch_failed(self, info: FetchError) -> None:
         self.fetch_btn.setEnabled(True)
         self.status_label.setText(
-            f"<span style='color:#ef4444'>✕ {info.title}</span><br>"
-            f"<span style='color:#fbbf24'>{info.detail}</span><br>"
-            f"<span style='color:#a1a1aa; font-size:9pt'>{info.raw}</span>"
+            f"<span style='color:#ef4444'>✕ {esc(info.title)}</span><br>"
+            f"<span style='color:#fbbf24'>{esc(info.detail)}</span><br>"
+            f"<span style='color:#a1a1aa; font-size:9pt'>{esc(info.raw)}</span>"
         )
         # Only push the manual-paste escape hatch when it could actually
         # help (DPI / whitelist / timeout). For a 404 or server error it
@@ -373,10 +374,14 @@ class SubscriptionDialog(QDialog):
             # us on purpose, and only the provider can lift that. A generic
             # error leaves the user guessing; their support link does not.
             if result.provider_note or result.support_url:
+                # All three are the provider's own strings. The note is shown
+                # as text; an address becomes a link only if it is a plain
+                # http(s) one — a "support link" may not be file:// or a
+                # custom URI handler.
                 text += tr("sub.result_stub_provider",
-                           note=result.provider_note or "—",
-                           support=result.support_url or "—",
-                           account=result.account_url or "—")
+                           note=esc(result.provider_note or "—"),
+                           support=link(result.support_url or "—", "color:#fbbf24"),
+                           account=link(result.account_url or "—", "color:#fbbf24"))
             self.status_label.setText(text)
             self.status_label.setOpenExternalLinks(True)
         else:

@@ -81,7 +81,7 @@ All app state is in `%LOCALAPPDATA%\KaproTUN\` on Windows,
 | `secrets.json` | Subscription URLs + last-seen usage (traffic/expiry) | **Same encryption.** A subscription URL is a bearer credential, so it is never kept in `settings.json` |
 | `settings.json` | Preferences only — **no secrets** | Plaintext, 0600 |
 | `sites.json` | Your direct-routing domains | Plaintext (hostnames only) |
-| `sing-box-runtime.json` | The sing-box config generated on connect — embeds the server UUID / password / keys | Written 0600, atomically; **deleted on every disconnect/exit**; never logged |
+| `sing-box-runtime.json` | The sing-box config generated on connect — embeds the server UUID / password / keys | Written 0600, atomically; **deleted on every disconnect/exit**, and at the next launch if a crash or power loss skipped that (v4.0.1 — before, it stayed until the next disconnect); never logged |
 | `app.log` (+ `.1`, `.2`) | Lifecycle events, watchdog verdicts, reconnect reasons. ~1 MB × 3 max | Plaintext, but every line passes a redactor that strips share-URLs and UUIDs. **Traffic contents are never written** |
 | `logs/runtime-crash-*.log` | Python tracebacks the app survived | Plaintext, no secrets |
 | `bandwidth_history.db` | Per-minute byte totals for the Stats page | Local only, no destinations |
@@ -120,7 +120,17 @@ invisible downgrade.
    WinTUN driver, with upstream fallback (github.com/SagerNet/sing-box,
    wintun.net). Downloaded once and cached.
 4. **`ipdeny.com`** — the aggregated RU geoip-CIDR zone file, fetched
-   directly. It is not mirrored.
+   directly. It is not mirrored. This list decides which destinations leave
+   the tunnel and it has no signature to pin (it changes hourly), so it is
+   validated instead: every line must be an IPv4 network no wider than /12,
+   and the whole list must hold at least 1,000 networks and cover between 10
+   and 90 million addresses (the real one: about 8,600 networks, 45 million).
+   A list that fails is discarded and the session runs with no RU rule —
+   everything through the VPN. **Correction:** through
+   v4.0.0 the list was used as received; a line such as `0.0.0.0/0` in it would
+   have sent all traffic outside the tunnel. What remains: whoever can alter
+   the list can still mark addresses of their choice as direct, within those
+   limits.
 5. **Your subscription URL** — on import, then every 12 hours if
    `subscription_auto_refresh` is on (default). Can be disabled.
 6. **A public IP probe** after connect (`public_ip_probe`, on by default) — one
@@ -157,6 +167,25 @@ regardless.
 **Subscriptions are HTTPS-only.** The import UI rejects `http://` links: the URL
 is a bearer credential, and over plaintext HTTP both it and the server list it
 returns are exposed to anyone on the path.
+
+**A subscription can update only its own servers** (v4.0.1). Every saved server
+records which subscription delivered it. An incoming entry replaces a saved one
+only if it comes from that same subscription, or is the very same connection in
+every detail — address, credentials, TLS and transport settings alike. Same
+name but a different server from a different (or unknown) origin is shown to
+you — old address, new address — and nothing is replaced unless you say so; the
+default keeps both. The same applies to a single server added by hand, and
+names that only look alike (a trailing space, an invisible character) count as
+the same name. **Correction:** through
+v4.0.0 servers were merged by name alone, so any subscription could silently
+replace a server you got elsewhere by reusing its name. Servers saved before
+v4.0.1 have no recorded origin; the first refresh attributes the unchanged ones
+and asks about the rest.
+
+**Provider text is shown as text.** Server names, hosts, provider notes and
+error messages are displayed literally, and a provider's support or account
+link is clickable only if it is a plain `http(s)` address (v4.0.1). Before,
+such strings were rendered as HTML.
 
 ## Leak protection
 

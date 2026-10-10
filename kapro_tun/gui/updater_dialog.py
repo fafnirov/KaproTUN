@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..core import app_log
 from ..core.i18n import tr
+from ..core.safe_text import esc, link
 from ..core.updater import UpdateInfo
 
 
@@ -66,6 +67,29 @@ def _setup_sources(version: str) -> list[str]:
 
 
 # --- download worker ------------------------------------------------------
+
+class _NotesBrowser(QTextBrowser):
+    """Release notes as formatted text and nothing more: no image is ever
+    loaded (a path in the notes could point at a network share), and a link is
+    opened only if it is a plain http(s) address."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setOpenExternalLinks(False)
+        self.setOpenLinks(False)
+        self.anchorClicked.connect(self._open_if_web)
+
+    def loadResource(self, _kind, _name):  # noqa: N802 — Qt override
+        return None
+
+    def _open_if_web(self, url) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from ..core.safe_text import http_url
+        safe = http_url(url.toString())
+        if safe:
+            QDesktopServices.openUrl(QUrl(safe))
+
 
 class _Cancelled(Exception):
     """Raised out of the progress callback to unwind an in-flight download.
@@ -179,6 +203,7 @@ class UpdaterDialog(QDialog):
         layout.setSpacing(12)
 
         title = QLabel(f"KaproTUN v{info.version}")
+        title.setTextFormat(Qt.PlainText)
         title.setObjectName("h1")
         layout.addWidget(title)
 
@@ -190,10 +215,9 @@ class UpdaterDialog(QDialog):
         notes_label.setObjectName("h2")
         layout.addWidget(notes_label)
 
-        # Render release notes — markdown via QTextBrowser. Limited
-        # rendering (no images, no JS) but enough for headings + lists.
-        self.notes = QTextBrowser()
-        self.notes.setOpenExternalLinks(True)
+        # Render release notes — markdown, headings + lists. _NotesBrowser
+        # loads no images and opens only web links.
+        self.notes = _NotesBrowser()
         self.notes.setMarkdown(info.notes or "_no release notes_")
         layout.addWidget(self.notes, stretch=1)
 
@@ -318,9 +342,10 @@ class UpdaterDialog(QDialog):
         if self._cancelled:
             return
         self.status_label.setText(
-            f"<span style='color:#ef4444'>{tr('upd.error_prefix', msg=msg)}</span><br>"
-            f"<a href='{self._info.url}' style='color:#f59e0b'>"
-            f"{tr('upd.open_release_page')}</a>"
+            # `msg` can quote a server's HTTP reason phrase; the release URL
+            # comes from an API response. Neither is markup of ours.
+            f"<span style='color:#ef4444'>{tr('upd.error_prefix', msg=esc(msg))}</span><br>"
+            + link(self._info.url, "color:#f59e0b", tr("upd.open_release_page"))
         )
         self.status_label.setTextFormat(Qt.RichText)
         self.status_label.setOpenExternalLinks(True)

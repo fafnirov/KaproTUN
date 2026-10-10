@@ -178,6 +178,7 @@ def load_configs() -> list[ProxyConfig]:
                 raw_url=raw_url,
                 outbound=dict(item.get("outbound", {})),
                 network=net,
+                source=str(item.get("source", "") or ""),
             ))
         except (KeyError, TypeError):
             continue

@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QMessageBox, QProgressDialog
 
 from ..core import geoip_ru, sing_box_installer
 from ..core.i18n import tr
+from ..core.safe_text import no_markup
 
 
 class _DownloadThread(QThread):
@@ -63,7 +64,7 @@ def _run_download(parent, label: str, installer_fn, on_fail_msg: str) -> bool:
 
     if error_holder:
         QMessageBox.critical(parent, tr("inst.download_failed_title", label=label),
-                             f"{error_holder[0]}\n\n{on_fail_msg}")
+                             no_markup(f"{error_holder[0]}\n\n{on_fail_msg}"))
         return False
     return True
 

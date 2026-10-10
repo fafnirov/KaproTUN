@@ -59,6 +59,8 @@ class Toast(QFrame):
         layout.addWidget(icon)
 
         label = QLabel(text)
+        # Toasts quote server names; never let one be read as markup.
+        label.setTextFormat(Qt.PlainText)
         label.setObjectName("toastText")
         label.setWordWrap(True)
         label.setMaximumWidth(280)

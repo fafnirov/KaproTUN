@@ -187,6 +187,8 @@ class ConfigCard(QFrame):
         outer.setSpacing(6)
 
         self.title = QLabel(tr("wid.card_no_config"))
+        # Server name / host come from a share link or a subscription.
+        self.title.setTextFormat(Qt.PlainText)
         self.title.setObjectName("cardTitle")
         self.title.setWordWrap(True)
         outer.addWidget(self.title)
@@ -196,6 +198,7 @@ class ConfigCard(QFrame):
         self.badge = QLabel("—")
         self.badge.setObjectName("cardBadge")
         self.sub = QLabel(tr("wid.card_sub_pick"))
+        self.sub.setTextFormat(Qt.PlainText)
         self.sub.setObjectName("cardSub")
         bottom_row.addWidget(self.badge)
         bottom_row.addWidget(self.sub, stretch=1)

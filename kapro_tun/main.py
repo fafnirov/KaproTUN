@@ -80,6 +80,26 @@ def _kill_orphan_helpers() -> None:
         pass
 
 
+def _remove_stale_runtime_configs() -> None:
+    """Delete a runtime engine config left by a session that did not end
+    cleanly.
+
+    It carries the server's UUID / password in clear text and is removed on
+    disconnect — but a crash, a kill or a power cut skips that, and the file
+    then sat on disk until the next disconnect, undoing the at-rest encryption
+    of the saved servers. Runs after the single-instance guard and the orphan
+    sweep, so no live engine can still be using it.
+    """
+    try:
+        from .core import paths
+        left = paths.remove_runtime_configs()
+    except Exception as e:
+        app_log.log(f"[startup] stale runtime config not removed: {e}")
+        return
+    if left:
+        app_log.log(f"[startup] stale runtime config could not be removed: {left}")
+
+
 def _clear_stale_system_proxy() -> None:
     """If the registry still says system-proxy points at 127.0.0.1:<our port>
     but nothing's listening there, clear it.
@@ -189,6 +209,7 @@ def _run_app() -> int:
     # instance guard already proved we're the only KaproTUN, so any
     # leftover helper process is by definition orphaned. Kill them.
     _kill_orphan_helpers()
+    _remove_stale_runtime_configs()
 
     # Linux: if a previous run was force-killed while connected, our manual TUN
     # routes + resolvectl DNS (the auto_route replacement) can survive and

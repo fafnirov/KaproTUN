@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from ..core.i18n import tr
 from ..core.parser import ParseError, ProxyConfig, parse
+from ..core.safe_text import no_markup
 
 
 class AddConfigDialog(QDialog):
@@ -45,6 +46,8 @@ class AddConfigDialog(QDialog):
         parse_row.addWidget(self.parse_btn)
         parse_row.addStretch(1)
         self.detected_label = QLabel("")
+        # Shows the host parsed from a pasted link: text, never markup.
+        self.detected_label.setTextFormat(Qt.PlainText)
         self.detected_label.setObjectName("muted")
         parse_row.addWidget(self.detected_label)
         layout.addLayout(parse_row)
@@ -95,7 +98,8 @@ class AddConfigDialog(QDialog):
         try:
             cfg = parse(text)
         except ParseError as e:
-            QMessageBox.critical(self, tr("cfg.parse_error_title"), str(e))
+            # The error quotes the pasted link back.
+            QMessageBox.critical(self, tr("cfg.parse_error_title"), no_markup(e))
             self.detected_label.setText("")
             return
         self._result = cfg

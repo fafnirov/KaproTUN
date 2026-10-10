@@ -46,6 +46,11 @@ class ProxyConfig:
     # plain-TCP outbound that mis-handshakes the server. Empty = not applicable
     # (Shadowsocks, Hysteria2).
     network: str = ""
+    # Where this server came from: an opaque id of the subscription
+    # (subscription.source_id), or "" for one added by hand or saved before
+    # sources were recorded. A subscription may update only its own servers —
+    # see subscription.merge_configs.
+    source: str = ""
 
 
 # --- helpers --------------------------------------------------------------

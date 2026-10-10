@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from ..core.i18n import tr
 from ..core.parser import ParseError, ProxyConfig, parse
+from ..core.safe_text import esc
 from .toast import show_toast
 
 
@@ -143,7 +144,7 @@ class AddConfigPage(QWidget):
             self.status_label.setText(
                 "<span style='color:#ef4444'>✕ " + tr("add.parse_failed")
                 + "</span> "
-                f"<span style='color:#a1a1aa'>{e}</span>"
+                f"<span style='color:#a1a1aa'>{esc(e)}</span>"
             )
             self.save_btn.setEnabled(False)
             return
@@ -154,9 +155,9 @@ class AddConfigPage(QWidget):
         srv = cfg.outbound.get("server", "?")
         port = cfg.outbound.get("server_port", "?")
         self.status_label.setText(
-            f"<span style='color:#16a34a'>✓ {cfg.protocol.upper()}</span>"
+            f"<span style='color:#16a34a'>✓ {esc(cfg.protocol.upper())}</span>"
             f" <span style='color:#71717a'>·</span>"
-            f" <span style='color:#fafafa'>{srv}:{port}</span>"
+            f" <span style='color:#fafafa'>{esc(srv)}:{esc(port)}</span>"
         )
         self.save_btn.setEnabled(True)
 
