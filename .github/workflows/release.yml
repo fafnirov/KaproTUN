@@ -47,11 +47,18 @@ jobs:
         # names no test.
         run: |
           # TEMPORARY: find which check breaks interpreter exit on Linux.
-          for f in "ui v2: tokens" "ui v2: navigation" "ui v2: home" "ui v2: Servers" "ui v2: add page" "ui v2: dialogs open" "ui v2: the window" "ui v2: settings" "ui v2: switch" "ui v2: statistics" "ui v2: sites" "ui v2: leak" "ui v2: the old" "(v4.0.1)" "StatsPage" "updater"; do
+          set +e
+          for m in plain-thread-emit plain-thread-emit-nodaemon background background-processevents background-no-deletelater queued-main-only deletelater-only window-shown clipboard overlay paste-dialog add-page; do
+            python -u -X faulthandler -m kapro_tun.scripts._exit_probe "$m" > out.txt 2> err.txt
+            echo "PROBE [$m] => $?"
+            tail -n 2 err.txt
+          done
+          for f in "ui v2: add page" "ui v2: dialogs open" "ui v2: the window" "ui v2: settings" "ui v2: switch" "ui v2: statistics" "ui v2: sites" "ui v2: leak" "ui v2: the old" "(v4.0.1)" "StatsPage" "updater"; do
             KAPROTUN_SMOKE_ONLY="$f" python -u -X faulthandler -m kapro_tun.scripts.smoke_test > out.txt 2> err.txt
             echo "RESULT [$f] => $?"
-            tail -n 3 err.txt
+            tail -n 2 err.txt
           done
+          set -e
           python -u -X faulthandler -m kapro_tun.scripts.smoke_test
 
   build:
