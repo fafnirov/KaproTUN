@@ -9804,6 +9804,45 @@ def _v41_leak_and_download_dialogs() -> None:
                    add_server_v2.PasteDialog(host))
     if any(d.scrim_dismisses for d in holders) or not kit.OverlayDialog(host).scrim_dismisses:
         raise AssertionError("a stray click would throw away what was typed into a dialog")
+    # Nothing may keep a widget alive behind our back. A connection to a
+    # closure over the widget does exactly that, and a widget without a
+    # parent then lives until the interpreter exits — where taking it apart
+    # crashed on Linux. So: drop the last reference, and it must be gone.
+    import gc
+    import weakref
+    from kapro_tun.gui import settings_v2
+
+    def must_die(make, what: str) -> None:
+        obj = make()
+        ref = weakref.ref(obj)
+        del obj
+        gc.collect()
+        if ref() is not None:
+            raise AssertionError(f"{what} is kept alive by its own signal connections")
+
+    with _v4_fresh_data_dir():
+        must_die(lambda: kit.confirm.__globals__["OverlayDialog"](None), "an empty dialog")
+
+        def with_actions():
+            d = kit.OverlayDialog(None)
+            d.head("trash", "t", "x")
+            d.add_actions([("a", "A", "secondary"), ("b", "B", "primary")], default="a",
+                          handlers={"a": d.reject})
+            return d
+
+        must_die(with_actions, "a dialog with buttons")
+        must_die(lambda: add_server_v2.PasteDialog(None), "the paste dialog")
+        must_die(lambda: add_server_v2.AddServerPage(), "the add-server page")
+        must_die(lambda: sites_dialog.SitesDialog(None), "the sites dialog")
+        must_die(lambda: bypass_apps_dialog.BypassAppsDialog(_V41Manager(bypass_apps=["a.exe"]), None),
+                 "the bypass dialog")
+        must_die(lambda: ud.UpdaterDialog(UpdateInfo(version="9", tag="v9", url="", notes="x")),
+                 "the updater dialog")
+        must_die(lambda: idlg.failure_dialog(None, "x", "e", "h"), "the download failure dialog")
+        must_die(lambda: kit.Segmented([("a", ""), ("b", "")]), "a segmented switch")
+        row_with_more = lambda: (lambda r: (r.add_more(), r)[1])(kit.SettingRow("zap", "t", "h", "full"))
+        must_die(row_with_more, "a settings row")
+
     # A window that is not on screen is not "covered": the card stands alone.
     lone = kit.OverlayDialog(host)
     lone._cover_host()

@@ -114,7 +114,8 @@ class BypassAppsDialog(kit.OverlayDialog):
             text.setObjectName("ktMono")
             line.addWidget(text, stretch=1)
             remove = kit.Button("", "ghost", icon="trash", size="sm", tooltip=tr("bypass.remove_tip"))
-            remove.clicked.connect(lambda _c=False, n=name: self._remove(n))
+            remove.app_name = name
+            remove.clicked.connect(self._on_remove_clicked)
             line.addWidget(remove)
             self._rows.insertWidget(i, row)
         self.count.setText(str(len(self._apps)))
@@ -128,6 +129,9 @@ class BypassAppsDialog(kit.OverlayDialog):
     def _remove(self, name: str) -> None:
         self._apps = [a for a in self._apps if a != name]
         self._rebuild()
+
+    def _on_remove_clicked(self) -> None:
+        self._remove(self.sender().app_name)
 
     def _on_add(self) -> None:
         if self.edit.text().strip():

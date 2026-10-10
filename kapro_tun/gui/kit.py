@@ -187,6 +187,9 @@ class Select(QPushButton):
             self._sync()
             self.changed.emit(index)
 
+    def _on_menu_action(self, action) -> None:
+        self.set_current(int(action.data()))
+
     def _sync(self) -> None:
         self._value.setText(self._options[self._current] if self._options else "")
         # As wide as the chosen option: next to a search field every pixel
@@ -209,7 +212,8 @@ class Select(QPushButton):
             action = menu.addAction(label)
             action.setCheckable(True)
             action.setChecked(i == self._current)
-            action.triggered.connect(lambda _checked=False, idx=i: self.set_current(idx))
+            action.setData(i)
+        menu.triggered.connect(self._on_menu_action)
         menu.setMinimumWidth(max(self.width(), 160))
         menu.exec(self.mapToGlobal(self.rect().bottomLeft()) + QPoint(0, tokens.SP_1))
         menu.deleteLater()
@@ -230,7 +234,8 @@ class Segmented(QFrame):
         self._buttons: list[_SegItem] = []
         for i, (label, icon) in enumerate(items):
             btn = _SegItem(label, icon)
-            btn.clicked.connect(lambda _c=False, idx=i: self.set_current(idx))
+            btn.index = i
+            btn.clicked.connect(self._on_item_clicked)
             row.addWidget(btn, stretch=1)
             self._buttons.append(btn)
         self._current = -1
@@ -238,6 +243,13 @@ class Segmented(QFrame):
 
     def current_index(self) -> int:
         return self._current
+
+    def _on_item_clicked(self) -> None:
+        # Slots are bound methods, never closures over self: a closure is
+        # held by the connection, holds the widget, and so keeps a widget
+        # without a parent alive until the interpreter exits — where taking
+        # it apart crashed on Linux.
+        self.set_current(self.sender().index)
 
     def set_current(self, index: int, emit: bool = True) -> None:
         changed = index != self._current
@@ -514,6 +526,7 @@ class OverlayDialog(QDialog):
         self.body.setContentsMargins(tokens.SP_5, tokens.SP_5, tokens.SP_5, tokens.SP_5)
         self.body.setSpacing(tokens.SP_4)
         self.buttons: dict[str, Button] = {}
+        self._handlers: dict = {}
 
     # --- building ---------------------------------------------------------
 
@@ -586,15 +599,14 @@ class OverlayDialog(QDialog):
         row = QHBoxLayout()
         row.setSpacing(tokens.SP_2)
 
+        self._handlers.update(handlers or {})
+
         def make(key: str, text: str, variant: str, size: str = "md") -> None:
             btn = Button(text, variant, icon=(icons or {}).get(key, ""), size=size)
             btn.setAutoDefault(key == default)
             btn.setDefault(key == default)
-            handler = (handlers or {}).get(key)
-            if handler is not None:
-                btn.clicked.connect(lambda _c=False, h=handler: h())
-            else:
-                btn.clicked.connect(lambda _c=False, k=key: self.finish(k))
+            btn.action_key = key
+            btn.clicked.connect(self._on_dialog_button)
             row.addWidget(btn)
             self.buttons[key] = btn
 
@@ -606,6 +618,14 @@ class OverlayDialog(QDialog):
         self.body.addLayout(row)
         if default in self.buttons:
             self.buttons[default].setFocus()
+
+    def _on_dialog_button(self) -> None:
+        key = self.sender().action_key
+        handler = self._handlers.get(key)
+        if handler is not None:
+            handler()
+        else:
+            self.finish(key)
 
     def finish(self, key: str) -> None:
         self.result_key = key
@@ -862,7 +882,7 @@ class SettingRow(QFrame):
         shows while folded (an "info" mark for rows that are only a note)."""
         self._more_icon = icon
         self.more = Button("", "ghost", icon=icon, size="sm")
-        self.more.clicked.connect(lambda: self.set_expanded(not self.is_expanded()))
+        self.more.clicked.connect(self._toggle_expanded)
         return self.add_control(self.more)
 
     def add_expanded_action(self, text: str) -> Button:
@@ -930,6 +950,9 @@ class SettingRow(QFrame):
 
     def is_expanded(self) -> bool:
         return not self.full.isHidden()
+
+    def _toggle_expanded(self) -> None:
+        self.set_expanded(not self.is_expanded())
 
     def set_expanded(self, expanded: bool) -> None:
         if not self._full_text or expanded == self.is_expanded():

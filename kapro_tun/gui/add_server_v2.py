@@ -154,7 +154,7 @@ class AddServerPage(QWidget):
                                   status, self.to_sub, kit.label(tr("add2.supported"), "hint")))
 
         self.name_edit = kit.Input(tr("add2.name_placeholder"))
-        self.name_edit.textChanged.connect(lambda _t: self.name_edit.set_error(False))
+        self.name_edit.textChanged.connect(self._on_name_edited)
         col.addLayout(self._field(kit.label(tr("add2.name_label"), "label"), self.name_edit))
 
         col.addStretch(1)
@@ -300,6 +300,9 @@ class AddServerPage(QWidget):
         proto, _sep, where = server_meta(cfg).partition(" · ")
         self._set_link_status(tr("add2.recognized", proto=proto, where=one_line(where, 80)), "success")
         self.save_btn.setEnabled(True)
+
+    def _on_name_edited(self) -> None:
+        self.name_edit.set_error(False)
 
     def _on_to_subscription(self) -> None:
         url = self.url_edit.toPlainText().strip()
