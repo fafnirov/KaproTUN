@@ -177,7 +177,7 @@ def collect(manager=None, quick: bool = False) -> Snapshot:
     try:
         snap.tun_stack = sing_box_config.TUN_STACK
         snap.tun_mtu = sing_box_config.TUN_MTU
-        tun_name = sing_box_config.TUN_DEVICE_NAME
+        tun_name = sing_box_config.tun_interface_name()
         snap.tun = IfaceInfo(name=tun_name, ipv4=_iface_ipv4(tun_name),
                              mtu=_iface_mtu(tun_name))
     except Exception as e:

@@ -30,6 +30,7 @@ from . import geoip_ru, paths
 # Linux runs sing-box with auto_route OFF (the kernel-7.0 netlink incompat breaks
 # it) and replicates routing via iproute2 — see core/linux_tun_route.py.
 _IS_LINUX = sys.platform.startswith("linux")
+_IS_MAC = sys.platform == "darwin"
 
 # TUN device + addressing — mirrors the classic engine so nothing else changes.
 TUN_DEVICE_NAME = "KaproTun"
@@ -449,6 +450,27 @@ def _dns_block(upstream_dns: str = "") -> dict[str, Any]:
 _NOT_AN_UPSTREAM = ("127.", "0.", "10.255.0.")
 
 
+def tun_interface_name() -> str:
+    """Name of the tunnel's network interface as the OS knows it.
+
+    Windows and Linux: the fixed TUN_DEVICE_NAME. macOS: the utunN the system
+    assigned, recognised by the tunnel's own IPv4 address — or "" while no
+    tunnel is up. Never a guess: counters read off the wrong utun would be
+    some other VPN's traffic."""
+    if not _IS_MAC:
+        return TUN_DEVICE_NAME
+    try:
+        import socket
+        import psutil
+        ours = TUN_INET4.split("/")[0]
+        for name, addrs in psutil.net_if_addrs().items():
+            if any(a.family == socket.AF_INET and a.address == ours for a in addrs):
+                return name
+    except Exception:
+        pass
+    return ""
+
+
 def windows_upstream_dns(server_ip: str = "") -> str:
     """IPv4 DNS server of the interface Windows would use to reach the VPN
     server, i.e. the real network's resolver — or "" when it can't be read.
@@ -655,6 +677,12 @@ def build_config(
         # manually-routed TUN at all.
         "endpoint_independent_nat": True,
     }
+    if _IS_MAC:
+        # macOS only has system-numbered utunN devices and sing-box refuses any
+        # other name ("bad tun name: KaproTun", issue #13). Leave the name out
+        # and the engine takes the next free utun; whatever needs the device
+        # afterwards finds it by address — tun_interface_name().
+        del tun_inbound["interface_name"]
     # True kernel bypass for game servers (v3.6.0) — see _GAME_DIRECT_CIDRS.
     # Without this the game's packets still cross the userspace stack even when
     # a rule sends them `direct`, which is what made the tunnel add multi-second

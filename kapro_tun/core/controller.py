@@ -427,7 +427,7 @@ class ConnectionManager:
             return xray_stats.query_clash_totals(
                 sing_box_config.PROXY_LISTEN_HOST,
                 sing_box_config.CLASH_API_PORT, self._api_secret)
-        return xray_stats.query_tun_iface_stats(sing_box_config.TUN_DEVICE_NAME)
+        return xray_stats.query_tun_iface_stats(sing_box_config.tun_interface_name())
 
     def tun_dns_guarded(self) -> bool:
         """True when the live sing-box TUN owns the system DNS path. sing-box

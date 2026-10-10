@@ -5236,7 +5236,7 @@ def _v3_config_structure() -> None:
             raise AssertionError("on Linux tun inbound must NOT auto_route")
     elif not inb[0].get("auto_route"):
         raise AssertionError("tun inbound must auto_route")
-    if inb[0].get("interface_name") != _sb_v3.TUN_DEVICE_NAME:
+    if not _sb_v3._IS_MAC and inb[0].get("interface_name") != _sb_v3.TUN_DEVICE_NAME:
         raise AssertionError("tun interface_name mismatch")
     obs = full["outbounds"]
     if obs[0].get("tag") != "proxy":
@@ -8600,6 +8600,70 @@ check("runtime config: a leftover with credentials is removed at startup (v4.0.1
       _v401_stale_runtime_config_is_removed_at_startup)
 check("ui: names, hosts and provider text are never rendered as markup (v4.0.1)",
       _v401_provider_text_is_never_markup)
+
+
+# ---------------------------------------------------------------------------
+# v4.0.2 — macOS TUN (issue #13)
+# ---------------------------------------------------------------------------
+
+section("v4.0.2: macOS TUN interface name")
+
+
+def _v402_macos_tun_lets_the_system_name_the_interface() -> None:
+    """Issue #13: on macOS a TUN device can only be called utunN, and sing-box
+    refuses anything else — "configure tun interface: bad tun name: KaproTun".
+    Full-TUN mode on a Mac could not start at all."""
+    import inspect
+    import socket
+    import types
+    from kapro_tun.core import controller as _c
+    from kapro_tun.core import net_diag
+    from kapro_tun.core import sing_box_config as sbc
+    from kapro_tun.core.parser import parse
+    proxy = parse(SAMPLE_URLS[0][1])
+
+    def tun_of(mac: bool, linux: bool = False) -> dict:
+        with _v4_patched(sbc, _IS_MAC=mac, _IS_LINUX=linux):
+            cfg = sbc.build_config(proxy, [], server_ip="1.2.3.4")
+        return next(i for i in cfg["inbounds"] if i.get("type") == "tun")
+
+    if "interface_name" in tun_of(mac=True):
+        raise AssertionError("macOS config still names the TUN device")
+    for label, kw in (("Windows", {}), ("Linux", {"linux": True})):
+        if tun_of(mac=False, **kw).get("interface_name") != sbc.TUN_DEVICE_NAME:
+            raise AssertionError(f"{label} must keep its named TUN device")
+    mac, win = tun_of(mac=True), tun_of(mac=False)
+    if {k: v for k, v in win.items() if k != "interface_name"} != mac:
+        raise AssertionError("macOS TUN differs from the others in more than the name")
+
+    # With no fixed name, whatever needs the device finds it by its address.
+    addr = types.SimpleNamespace
+    fake_ifaces = {
+        "en0": [addr(family=socket.AF_INET, address="192.168.1.5")],
+        "utun3": [addr(family=socket.AF_INET6, address="fe80::1")],
+        "utun7": [addr(family=socket.AF_INET, address="10.255.0.2")],
+    }
+    import psutil
+    with _v4_patched(sbc, _IS_MAC=True), _v4_patched(psutil, net_if_addrs=lambda: fake_ifaces):
+        if sbc.tun_interface_name() != "utun7":
+            raise AssertionError("the macOS TUN device is not found by its address")
+    with _v4_patched(sbc, _IS_MAC=True), \
+            _v4_patched(psutil, net_if_addrs=lambda: {"en0": fake_ifaces["en0"]}):
+        if sbc.tun_interface_name() != "":
+            raise AssertionError("no tunnel up must mean no interface, not a guess")
+    with _v4_patched(sbc, _IS_MAC=False):
+        if sbc.tun_interface_name() != sbc.TUN_DEVICE_NAME:
+            raise AssertionError("off macOS the device keeps its fixed name")
+
+    for owner, what in ((_c.ConnectionManager.traffic_sample, "traffic counters"),
+                        (net_diag.collect, "network diagnostics")):
+        src = inspect.getsource(owner)
+        if "tun_interface_name()" not in src:
+            raise AssertionError(f"{what} still look for a device called KaproTun")
+
+
+check("macOS: the system names the TUN device; it is found by address (v4.0.2, #13)",
+      _v402_macos_tun_lets_the_system_name_the_interface)
 
 
 # ---------------------------------------------------------------------------
