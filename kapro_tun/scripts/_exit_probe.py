@@ -181,6 +181,80 @@ elif mode == "lambda-on-background":
 
     job = Job()
     job.done.connect(lambda v: seen.append(v))
+elif mode.startswith("t-"):
+    from PySide6.QtCore import Qt, QUrl
+    from PySide6.QtGui import QTextDocument
+    from PySide6.QtWidgets import QLabel
+    from kapro_tun.core import updater as _upd
+    from kapro_tun.gui import installer_dialog, leak_test_dialog, updater_dialog
+
+    def stage(n: int) -> None:
+        def all_plain(root) -> None:
+            for lab in root.findChildren(QLabel):
+                _ = lab.text(), lab.textFormat()
+
+        row = leak_test_dialog._ResultRow("IPv4")
+        row.set_fail("<img src=x>")
+        if n == 1:
+            return
+        failed = installer_dialog.failure_dialog(None, "<b>engine</b>", "<img src=x>
+second line",
+                                                 "<i>do it by hand</i>")
+        all_plain(failed)
+        if n == 2:
+            return
+        upd = updater_dialog.UpdaterDialog(_upd.UpdateInfo(
+            version="9.9.9<b>", tag="v9.9.9", url="file:///c:/windows/system32/calc.exe", notes="x"))
+        _ = upd.release_link.url(), upd.release_link.isHidden()
+        if n == 3:
+            return
+        upd._on_failed("<img src=x>
+second line")
+        all_plain(upd)
+        if n == 4:
+            return
+        upd.reject()
+        if n == 5:
+            return
+        ok_link = updater_dialog.UpdaterDialog(_upd.UpdateInfo(
+            version="9.9.9", tag="v9.9.9", url="https://github.com/fafnirov/KaproTUN/releases", notes="x"))
+        ok_link.reject()
+        if n == 6:
+            return
+        notes = updater_dialog._NotesBrowser()
+        notes.loadResource(QTextDocument.ImageResource, QUrl("file://attacker/share/a.png"))
+
+    stage(int(mode[2:]))
+elif mode.startswith("u-"):
+    # the three older updater checks, in a function scope
+    import pathlib
+    from kapro_tun.core import net_download as nd
+    from kapro_tun.core.updater import UpdateInfo
+    from kapro_tun.gui import updater_dialog as ud
+
+    def stage(n: int) -> None:
+        w = ud._DownloadWorker(["https://a/x.exe", "https://b/x.exe"], pathlib.Path("nonexistent.exe"))
+        w.finished_ok.connect(lambda p: seen.append("ok"))
+        w.failed.connect(lambda m: seen.append("failed"))
+
+        def fake(url, dest, cap, progress=None, timeout=None, expect_sha256=None):
+            w.cancel()
+            progress(1024, 100000)
+
+        orig = nd.download_to_file
+        nd.download_to_file = fake
+        try:
+            w.run()
+        finally:
+            nd.download_to_file = orig
+        if n == 1:
+            return
+        dlg = ud.UpdaterDialog(UpdateInfo(version="9.9.9", tag="v9.9.9",
+                                          url="https://example.invalid", notes="x"))
+        dlg.reject()
+        dlg._on_downloaded("C:/nope/setup.exe")
+
+    stage(int(mode[2:]))
 
 print("probe", mode, "seen", seen, flush=True)
 sys.exit(0)

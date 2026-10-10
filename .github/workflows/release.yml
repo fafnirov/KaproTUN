@@ -48,9 +48,14 @@ jobs:
         run: |
           # TEMPORARY: find which check breaks interpreter exit on Linux.
           set +e
-          for m in upd-notes upd-notes-md upd-notes-loadres upd-dialog upd-dialog-reject upd-dialog-failed upd-worker upd-worker-signals upd-worker-run textbrowser-recolor lambda-on-plain lambda-on-background; do
+          for m in t-1 t-2 t-3 t-4 t-5 t-6 t-7 u-1 u-2; do
             python -u -X faulthandler -m kapro_tun.scripts._exit_probe "$m" > out.txt 2> err.txt
             echo "PROBE [$m] => $?"
+            tail -n 2 err.txt
+          done
+          for f in "updater: dismissing" "updater: mirror" "integrity: updater" "updater and installer dialogs" "geoip: the RU list" "runtime config: a leftover" "names, hosts and provider" "cannot replace another" "every path into"; do
+            KAPROTUN_SMOKE_ONLY="$f" python -u -X faulthandler -m kapro_tun.scripts.smoke_test > out.txt 2> err.txt
+            echo "RESULT [$f] => $?"
             tail -n 2 err.txt
           done
           set -e
