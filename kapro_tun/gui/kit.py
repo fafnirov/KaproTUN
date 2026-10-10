@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QUrl, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QRectF, QSize, Qt, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -27,8 +27,10 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QAbstractButton,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -90,6 +92,33 @@ class Button(QPushButton):
             self.click()
             return
         super().keyPressEvent(event)
+
+
+class ElidedLabel(QLabel):
+    """A single-line label that ends in "…" instead of pushing the layout."""
+
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._full = ""
+        self.setTextFormat(Qt.PlainText)        # server names are untrusted text
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 — Qt override
+        self._full = str(text)
+        self._apply()
+
+    def full_text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply()
+
+    def _apply(self) -> None:
+        width = max(0, self.width())
+        shown = self.fontMetrics().elidedText(self._full, Qt.ElideRight, width) if width else self._full
+        super().setText(shown)
 
 
 class Input(QLineEdit):
@@ -282,12 +311,14 @@ class TextArea(QPlainTextEdit):
 
 
 class Progress(QWidget):
-    """A thin bar for "working on it, no idea how long"."""
+    """A thin bar. Until set_fraction() is called it means "working on it, no
+    idea how long"; after, it shows how far along."""
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setFixedHeight(6)
         self._pos = 0.0
+        self._fraction: Optional[float] = None
         self._anim = QVariantAnimation(self)
         self._anim.setStartValue(0.0)
         self._anim.setEndValue(1.0)
@@ -299,8 +330,22 @@ class Progress(QWidget):
         self._pos = float(value)
         self.update()
 
+    def set_fraction(self, fraction: Optional[float]) -> None:
+        """0..1 for a known share done; None for "unknown"."""
+        self._fraction = None if fraction is None else max(0.0, min(1.0, float(fraction)))
+        if self._fraction is None:
+            if self.isVisible():
+                self._anim.start()
+        else:
+            self._anim.stop()
+        self.update()
+
+    def fraction(self) -> Optional[float]:
+        return self._fraction
+
     def showEvent(self, event) -> None:  # noqa: N802
-        self._anim.start()
+        if self._fraction is None:
+            self._anim.start()
         super().showEvent(event)
 
     def hideEvent(self, event) -> None:  # noqa: N802
@@ -317,10 +362,14 @@ class Progress(QWidget):
         track.addRoundedRect(QRectF(self.rect()), r, r)
         p.fillPath(track, QColor(c.surface_hover))
         p.setClipPath(track)
-        bar_w = self.width() * 0.4
-        x = -bar_w + (self.width() + bar_w) * self._pos
         p.setBrush(QColor(c.accent))
-        p.drawRoundedRect(QRectF(x, 0, bar_w, self.height()), r, r)
+        if self._fraction is None:
+            bar_w = self.width() * 0.4
+            x = -bar_w + (self.width() + bar_w) * self._pos
+            p.drawRoundedRect(QRectF(x, 0, bar_w, self.height()), r, r)
+        elif self._fraction > 0:
+            p.drawRoundedRect(QRectF(0, 0, max(self.height(), self.width() * self._fraction),
+                                     self.height()), r, r)
         p.end()
 
 
@@ -427,13 +476,21 @@ class OverlayDialog(QDialog):
 
     def __init__(self, parent: Optional[QWidget] = None, wide: bool = False):
         host = parent.window() if parent is not None else None
+        if isinstance(host, OverlayDialog):
+            # A question asked from inside a dialog covers the same window.
+            host = host._host or host
         super().__init__(host)
         self.setObjectName("ktOverlay")
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setModal(True)
         self._host = host
+        self._covering = False
         self.result_key = ""
+        # A click on the dimmed window around the card dismisses a question.
+        # A dialog holding something the user typed sets this to False: an
+        # accidental click must not throw that away.
+        self.scrim_dismisses = True
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(tokens.SP_6, tokens.SP_6, tokens.SP_6, tokens.SP_6)
@@ -474,11 +531,40 @@ class OverlayDialog(QDialog):
         row.addWidget(chip, 0, Qt.AlignTop)
         col = QVBoxLayout()
         col.setSpacing(tokens.SP_1)
-        col.addWidget(label(title, "dialogTitle", wrap=True))
-        if text:
-            col.addWidget(label(text, "dialogText", wrap=True))
+        self.head_title = label(title, "dialogTitle", wrap=True)
+        col.addWidget(self.head_title)
+        self.head_text = label(text, "dialogText", wrap=True)
+        self.head_text.setVisible(bool(text))
+        col.addWidget(self.head_text)
         row.addLayout(col, stretch=1)
         self.body.addLayout(row)
+
+    def set_head_text(self, text: str) -> None:
+        self.head_text.setText(text)
+        self.head_text.setVisible(bool(text))
+
+    def add_long_text(self, text: str, max_height: int = 220, role: str = "dialogText") -> QLabel:
+        """Text that may run to many lines (an error from the engine, manual
+        steps): it scrolls inside the card instead of pushing the buttons off
+        the window. Selectable, so it can be copied."""
+        from PySide6.QtWidgets import QScrollArea
+        w = label(text, role, wrap=True)
+        w.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        width = self.card.width() - 2 * tokens.SP_5 - tokens.SP_3
+        w.setFixedWidth(width)
+        # Polish first: until then the label has the application's default
+        # font, not the sheet's, and its height comes out lines short.
+        w.ensurePolished()
+        needed = w.heightForWidth(width) + tokens.SP_1
+        w.setFixedHeight(needed)
+        area = QScrollArea()
+        area.setObjectName("ktTextScroll")
+        area.setFrameShape(QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        area.setWidget(w)
+        area.setFixedHeight(min(needed, max_height))
+        self.body.addWidget(area)
+        return w
 
     def add_text(self, text: str) -> QLabel:
         w = label(text, "dialogText", wrap=True)
@@ -489,19 +575,34 @@ class OverlayDialog(QDialog):
         self.body.addWidget(widget)
 
     def add_actions(self, actions: list[tuple[str, str, str]], default: str = "",
-                    icons: Optional[dict[str, str]] = None) -> None:
-        """`actions`: (key, label, variant) left to right. `default` is the key
-        that Enter triggers and that has focus when the dialog opens."""
+                    icons: Optional[dict[str, str]] = None, left: tuple = (),
+                    handlers: Optional[dict] = None) -> None:
+        """`actions`: (key, label, variant) left to right, at the right edge;
+        `left`: the same, at the left edge (a side action such as "reset").
+        `default` is the key that Enter triggers and that has focus when the
+        dialog opens. A button closes the dialog with its key as the answer —
+        unless `handlers` has a function for the key, which is called instead
+        and decides for itself."""
         row = QHBoxLayout()
         row.setSpacing(tokens.SP_2)
-        row.addStretch(1)
-        for key, text, variant in actions:
-            btn = Button(text, variant, icon=(icons or {}).get(key, ""))
+
+        def make(key: str, text: str, variant: str, size: str = "md") -> None:
+            btn = Button(text, variant, icon=(icons or {}).get(key, ""), size=size)
             btn.setAutoDefault(key == default)
             btn.setDefault(key == default)
-            btn.clicked.connect(lambda _c=False, k=key: self.finish(k))
+            handler = (handlers or {}).get(key)
+            if handler is not None:
+                btn.clicked.connect(lambda _c=False, h=handler: h())
+            else:
+                btn.clicked.connect(lambda _c=False, k=key: self.finish(k))
             row.addWidget(btn)
             self.buttons[key] = btn
+
+        for key, text, variant in left:
+            make(key, text, variant, size="sm")
+        row.addStretch(1)
+        for key, text, variant in actions:
+            make(key, text, variant)
         self.body.addLayout(row)
         if default in self.buttons:
             self.buttons[default].setFocus()
@@ -514,21 +615,33 @@ class OverlayDialog(QDialog):
         """Show modally; returns the key of the button pressed, "" if the
         dialog was dismissed."""
         self.result_key = ""
-        self._cover_host()
         self.exec()
-        # One question, one dialog: do not leave it (and, for a paste dialog,
-        # the pasted links) hanging off the window for the rest of the session.
-        self.deleteLater()
         return self.result_key
+
+    def exec(self) -> int:  # noqa: A003 — QDialog's name
+        self._cover_host()
+        code = super().exec()
+        # One question, one dialog: do not leave it (and whatever was typed
+        # or pasted into it) hanging off the window for the rest of the
+        # session. What the caller reads right after exec() is still there —
+        # the deletion happens when control is back in the event loop.
+        self.deleteLater()
+        return code
 
     # --- behaviour --------------------------------------------------------
 
     def _cover_host(self) -> None:
         # Everything under the title bar: the window can still be recognised
-        # (and its close button seen) while the dialog is up.
-        if self._host is not None:
+        # (and its close button seen) while the dialog is up. A window that is
+        # not on screen (started minimized to the tray) has nothing to cover:
+        # the card then stands alone, centred by the system.
+        self._covering = self._host is not None and self._host.isVisible()
+        if self._covering:
             area = self._host.geometry()
             area.setTop(area.top() + tokens.TITLEBAR_H)
+            # In a short window give the card the room the margins would take.
+            edge = tokens.SP_6 if area.height() >= 620 else tokens.SP_2
+            self.layout().setContentsMargins(tokens.SP_6, edge, tokens.SP_6, edge)
             self.setGeometry(area)
 
     def showEvent(self, event) -> None:  # noqa: N802
@@ -536,11 +649,14 @@ class OverlayDialog(QDialog):
         super().showEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if not self.card.geometry().contains(event.position().toPoint()):
+        if self._covering and self.scrim_dismisses \
+                and not self.card.geometry().contains(event.position().toPoint()):
             self.reject()
         super().mousePressEvent(event)
 
     def paintEvent(self, _event) -> None:  # noqa: N802
+        if not self._covering:
+            return      # on its own (no window on screen to dim): just the card
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         # Square on top (it meets the title bar), rounded where the window is.
@@ -553,6 +669,17 @@ class OverlayDialog(QDialog):
         p.end()
 
 
+def notify(parent: Optional[QWidget], icon: str, title: str, text: str, ok_label: str,
+           tone: str = "") -> None:
+    """Something the user has to see and acknowledge: one button."""
+    dlg = OverlayDialog(parent)
+    dlg.head(icon, title, "", tone=tone)
+    if text:
+        dlg.add_long_text(text)
+    dlg.add_actions([("ok", ok_label, "primary")], default="ok")
+    dlg.ask()
+
+
 def confirm(parent: Optional[QWidget], icon: str, title: str, text: str,
             ok_label: str, cancel_label: str, danger: bool = False) -> bool:
     """A yes/no question over the window. Cancel is the default answer."""
@@ -562,3 +689,353 @@ def confirm(parent: Optional[QWidget], icon: str, title: str, text: str,
                      ("ok", ok_label, "danger" if danger else "primary")], default="cancel")
     return dlg.ask() == "ok"
 
+
+
+class Switch(QAbstractButton):
+    """An on/off switch. Same surface as a check box where the settings code
+    cares: isChecked / setChecked / toggled."""
+
+    W, H, KNOB, PAD = 36, 20, 14, 3
+
+    def __init__(self, checked: bool = False, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.setFixedSize(self.W, self.H)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.TabFocus)
+        self.setAttribute(Qt.WA_Hover, True)
+        self._pos = 1.0 if checked else 0.0
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(tokens.DUR_FAST)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim.valueChanged.connect(self._on_slide)
+        self.toggled.connect(self._slide_to)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self.W, self.H)
+
+    def _on_slide(self, value) -> None:
+        self._pos = float(value)
+        self.update()
+
+    def _slide_to(self, checked: bool) -> None:
+        self._anim.stop()
+        if not self.isVisible():
+            self._pos = 1.0 if checked else 0.0
+            self.update()
+            return
+        self._anim.setStartValue(self._pos)
+        self._anim.setEndValue(1.0 if checked else 0.0)
+        self._anim.start()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.click()
+            return
+        super().keyPressEvent(event)
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        if event.type() in (event.Type.StyleChange, event.Type.EnabledChange):
+            self.update()
+        super().changeEvent(event)
+
+    def _colors(self) -> tuple[str, str]:
+        """(track, knob) for the current state."""
+        c = tokens.colors()
+        on, hover, down = self.isChecked(), self.underMouse(), self.isDown()
+        if not self.isEnabled():
+            return (c.accent_line, c.surface) if on else (c.surface_hover, c.text_disabled)
+        if on:
+            return (c.accent_pressed if down else c.accent_hover if hover else c.accent), c.switch_knob
+        return (c.switch_off_hover if hover else c.switch_off), (c.surface_hover if down else c.switch_knob)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        if self._anim.state() != QVariantAnimation.Running:
+            # The knob is where the state says, whatever route the state took
+            # (a change made with signals blocked never reaches _slide_to).
+            self._pos = 1.0 if self.isChecked() else 0.0
+        track, knob = self._colors()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(track))
+        p.drawRoundedRect(QRectF(self.rect()), self.H / 2, self.H / 2)
+        travel = self.W - 2 * self.PAD - self.KNOB
+        p.setBrush(QColor(knob))
+        p.drawEllipse(QRectF(self.PAD + travel * self._pos, self.PAD, self.KNOB, self.KNOB))
+        if self.hasFocus():
+            pen = QColor(tokens.colors().focus)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(pen)
+            p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                              self.H / 2, self.H / 2)
+        p.end()
+
+
+class SettingRow(QFrame):
+    """One line of the settings: an icon, a title with a one-line hint, the
+    control on the right. A row with a longer explanation unfolds it in
+    place; a "link" row is a button as a whole."""
+
+    clicked = Signal()            # link rows
+    expanded_changed = Signal(bool)
+
+    def __init__(self, icon: str, title: str, hint: str = "", full: str = "",
+                 parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("ktSetting")
+        self.setAttribute(Qt.WA_Hover, True)
+        self._is_link = False
+        self._full_text = full
+        self._more_icon = "chevron-down"
+
+        col = QVBoxLayout(self)
+        col.setContentsMargins(tokens.SP_4, tokens.SP_3, tokens.SP_3, tokens.SP_3)
+        col.setSpacing(0)
+        main = QHBoxLayout()
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(tokens.SP_3)
+        self.icon = IconLabel(icon, tokens.ICON_MD, "text_tertiary")
+        main.addWidget(self.icon)
+        text = QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(tokens.SP_HALF)
+        self.title = ElidedLabel(title)
+        self.title.setObjectName("ktSettingTitle")
+        self.hint = ElidedLabel(hint)
+        self.hint.setObjectName("ktSettingHint")
+        self.hint.setVisible(bool(hint))
+        text.addStretch(1)
+        text.addWidget(self.title)
+        text.addWidget(self.hint)
+        text.addStretch(1)
+        main.addLayout(text, stretch=1)
+        self._controls = QHBoxLayout()
+        self._controls.setContentsMargins(0, 0, 0, 0)
+        self._controls.setSpacing(tokens.SP_1)
+        main.addLayout(self._controls)
+        holder = QWidget()
+        holder.setLayout(main)
+        holder.setMinimumHeight(tokens.CONTROL_H)
+        holder.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        col.addWidget(holder)
+
+        indent = tokens.ICON_MD + tokens.SP_3
+        self.full = label(full, "settingFull", wrap=True)
+        self.full.setContentsMargins(indent, tokens.SP_2, tokens.SP_8, 0)
+        self.full.setVisible(False)
+        col.addWidget(self.full)
+        self._actions = QHBoxLayout()
+        self._actions.setContentsMargins(indent, tokens.SP_2H, 0, 0)
+        self._actions.setSpacing(tokens.SP_2)
+        self._actions_box = QWidget()
+        self._actions_box.setLayout(self._actions)
+        self._actions_box.setVisible(False)
+        col.addWidget(self._actions_box)
+        self._has_actions = False
+
+        self.more: Optional[Button] = None
+        if full:
+            self.setCursor(Qt.PointingHandCursor)
+
+    # --- controls -----------------------------------------------------------
+
+    def add_control(self, widget: QWidget) -> QWidget:
+        self._controls.addWidget(widget)
+        return widget
+
+    def add_switch(self, checked: bool) -> Switch:
+        return self.add_control(Switch(checked))
+
+    def add_button(self, text: str, variant: str = "secondary") -> Button:
+        return self.add_control(Button(text, variant, size="sm"))
+
+    def add_select(self, options: list, current: int) -> Select:
+        return self.add_control(Select(options, current))
+
+    def add_value(self, text: str) -> QLabel:
+        return self.add_control(label(text, "settingValue"))
+
+    def add_more(self, icon: str = "chevron-down") -> Button:
+        """The button that unfolds the full explanation. `icon`: what it
+        shows while folded (an "info" mark for rows that are only a note)."""
+        self._more_icon = icon
+        self.more = Button("", "ghost", icon=icon, size="sm")
+        self.more.clicked.connect(lambda: self.set_expanded(not self.is_expanded()))
+        return self.add_control(self.more)
+
+    def add_expanded_action(self, text: str) -> Button:
+        btn = Button(text, "secondary", size="sm")
+        self._actions.addWidget(btn)
+        self._actions.addStretch(1)
+        self._has_actions = True
+        return btn
+
+    def make_link(self, external: bool = False) -> None:
+        """The whole row acts: it opens something."""
+        self._is_link = True
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.TabFocus)
+        self.add_control(IconLabel("external" if external else "chevron-right",
+                                   tokens.ICON_SM, "text_tertiary"))
+
+    # --- state --------------------------------------------------------------
+
+    def set_hint(self, text: str, tone: str = "") -> None:
+        self.hint.setText(text)
+        self.hint.setVisible(bool(text))
+        if self.hint.property("tone") != tone:
+            self.hint.setProperty("tone", tone)
+            self.hint.style().unpolish(self.hint)
+            self.hint.style().polish(self.hint)
+
+    def set_full(self, text: str) -> None:
+        self._full_text = text
+        self.full.setText(text)
+        self._fit_full()
+
+    def _fit_full(self) -> None:
+        """Give the explanation the height its text needs at this width. A
+        wrapping label inside nested layouts is otherwise sized for a width
+        it does not have, and loses its last lines."""
+        if self.full.isHidden():
+            return
+        m = self.layout().contentsMargins()
+        width = self.width() - m.left() - m.right()
+        if width > 0:
+            # Drop the previous fixed height first: heightForWidth() never
+            # answers below the label's own minimum, so it could only grow.
+            self.full.setMinimumHeight(0)
+            self.full.setMaximumHeight(16777215)
+            self.full.setFixedHeight(self.full.heightForWidth(width))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit_full()
+
+    def set_tone(self, tone: str, icon: str = "") -> None:
+        """`tone`: "" / success / warning — the icon colour, and for a
+        warning the row's background."""
+        token = {"success": "success_text", "warning": "accent_text"}.get(tone, "text_tertiary")
+        self.icon.set_icon(icon or None, token)
+        self.setProperty("warning", "true" if tone == "warning" else "false")
+        self._restyle()
+
+    def set_position(self, pos: str) -> None:
+        """first / middle / last / only — which corners of the card it owns.
+        (The property is "slot": "pos" is taken — it is every widget's position.)"""
+        self.setProperty("slot", pos)
+        self._restyle()
+
+    def is_expanded(self) -> bool:
+        return not self.full.isHidden()
+
+    def set_expanded(self, expanded: bool) -> None:
+        if not self._full_text or expanded == self.is_expanded():
+            return
+        self.full.setVisible(expanded)
+        self._fit_full()
+        self._actions_box.setVisible(expanded and self._has_actions)
+        self.setProperty("expanded", "true" if expanded else "false")
+        if self.more is not None:
+            self.more.set_icon("chevron-up" if expanded else self._more_icon)
+        self._restyle()
+        self.expanded_changed.emit(expanded)
+
+    def _restyle(self) -> None:
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def _activate(self) -> None:
+        if self._is_link:
+            self.clicked.emit()
+        elif self._full_text:
+            self.set_expanded(not self.is_expanded())
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
+            self._activate()
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if self._is_link and event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.clicked.emit()
+            return
+        super().keyPressEvent(event)
+
+
+class Group(QWidget):
+    """A titled card of setting rows."""
+
+    def __init__(self, title: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        col = QVBoxLayout(self)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(tokens.SP_2)
+        head = label(title, "sectionTitle")
+        head.setContentsMargins(tokens.SP_1, 0, tokens.SP_1, 0)
+        col.addWidget(head)
+        self.card = QFrame()
+        self.card.setObjectName("ktGroupCard")
+        self.card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self._rows_layout = QVBoxLayout(self.card)
+        self._rows_layout.setContentsMargins(1, 1, 1, 1)
+        self._rows_layout.setSpacing(0)
+        col.addWidget(self.card)
+        self.rows: list[SettingRow] = []
+
+    def add(self, row: SettingRow) -> SettingRow:
+        self.rows.append(row)
+        self._rows_layout.addWidget(row)
+        last = len(self.rows) - 1
+        for i, r in enumerate(self.rows):
+            r.set_position("only" if last == 0 else "first" if i == 0 else
+                           "last" if i == last else "middle")
+        return row
+
+
+class ResultLine(QFrame):
+    """One line of a check: a verdict icon, what was checked, what came of
+    it. The outcome text is whatever a remote service or the system said —
+    plain text."""
+
+    _VERDICT = {"ok": ("check-circle", "success_text"), "warn": ("alert-triangle", "accent_text"),
+                "fail": ("x-circle", "danger_text"), "wait": ("clock", "text_tertiary")}
+
+    def __init__(self, name: str, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("ktResult")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, tokens.SP_2H, 0, tokens.SP_2H)
+        row.setSpacing(tokens.SP_2H)
+        self.icon = IconLabel("clock", tokens.ICON_SM, "text_tertiary")
+        row.addWidget(self.icon, 0, Qt.AlignTop)
+        self.name = label(name, "resultName")
+        self.name.setFixedWidth(64)
+        row.addWidget(self.name, 0, Qt.AlignTop)
+        self.text = label("…", "resultText", wrap=True)
+        row.addWidget(self.text, stretch=1)
+        self.verdict = "wait"
+
+    def set_result(self, verdict: str, text: str) -> None:
+        """`verdict`: ok / warn / fail / wait."""
+        self.verdict = verdict
+        name, token = self._VERDICT.get(verdict, self._VERDICT["wait"])
+        self.icon.set_icon(name, token)
+        self.text.setText(text)
+        self.text.setProperty("tone", "fail" if verdict == "fail" else "")
+        self.text.style().unpolish(self.text)
+        self.text.style().polish(self.text)
+
+
+class Report(QPlainTextEdit):
+    """Read-only monospaced text: a diagnostics dump, a list of resolvers."""
+
+    def __init__(self, height: int = 320, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setObjectName("ktReport")
+        self.setReadOnly(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.setFixedHeight(height)

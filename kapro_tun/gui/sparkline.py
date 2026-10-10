@@ -32,7 +32,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
-from . import styles
+from . import tokens
 
 
 def _smooth(values: list[float], window: int = 3) -> list[float]:
@@ -146,10 +146,10 @@ class TrafficSparkline(QWidget):
         usable = max(bottom - top, 1.0)
         peak = max(self._scale, float(self.MIN_SCALE))
 
-        palette = styles.get_active_palette(self._theme_getter())
+        c = tokens.colors()
 
         # Soft horizontal grid — gives peaks a reference without competing.
-        p.setPen(QPen(QColor(palette.BORDER), 1.0, Qt.DotLine))
+        p.setPen(QPen(QColor(c.line), 1.0, Qt.DotLine))
         for i in range(1, self.GRID_LINES + 1):
             y = bottom - (i / (self.GRID_LINES + 1)) * usable
             p.drawLine(QPointF(0.0, y), QPointF(float(w), y))
@@ -178,18 +178,18 @@ class TrafficSparkline(QWidget):
 
         # Upload — drawn first (behind): calm muted grey, subtle gradient area.
         if up_pts:
-            p.setBrush(QBrush(grad(QColor(palette.TEXT_MUTED), 34)))
+            p.setBrush(QBrush(grad(QColor(c.chart_up), 34)))
             p.drawPath(area(up_path))
 
         # Download — headline amber with a richer gradient fill so a burst
         # reads as a glowing swell rather than a thin line.
-        accent = QColor(palette.ACCENT)
+        accent = QColor(c.accent)
         if down_pts:
             p.setBrush(QBrush(grad(accent, 96)))
             p.drawPath(area(down_path))
 
         # Lines on top of the fills.
-        pen_up = QPen(QColor(palette.TEXT_MUTED), 1.3)
+        pen_up = QPen(QColor(c.chart_up), 1.3)
         pen_up.setJoinStyle(Qt.RoundJoin)
         p.setBrush(Qt.NoBrush)
         p.setPen(pen_up)

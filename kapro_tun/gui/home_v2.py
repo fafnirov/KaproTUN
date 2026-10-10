@@ -30,6 +30,7 @@ from ..core.i18n import tr
 from ..core.parser import ProxyConfig
 from . import connection_state as cs
 from . import flags, icons_v2, kit, tokens
+from .kit import ElidedLabel  # noqa: F401 — home's labels; also imported from here
 from .icons_v2 import IconLabel
 from .widgets import CircleConnectButton
 
@@ -73,33 +74,6 @@ def plural_domains(n: int) -> str:
     return tr("home.domains_one" if n % 10 == 1 and n % 100 != 11 else
               "home.domains_few" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else
               "home.domains_many", n=n)
-
-
-class ElidedLabel(QLabel):
-    """A single-line label that ends in "…" instead of pushing the layout."""
-
-    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self._full = ""
-        self.setTextFormat(Qt.PlainText)        # server names are untrusted text
-        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.setText(text)
-
-    def setText(self, text: str) -> None:  # noqa: N802 — Qt override
-        self._full = str(text)
-        self._apply()
-
-    def full_text(self) -> str:
-        return self._full
-
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._apply()
-
-    def _apply(self) -> None:
-        width = max(0, self.width())
-        shown = self.fontMetrics().elidedText(self._full, Qt.ElideRight, width) if width else self._full
-        super().setText(shown)
 
 
 class PingLabel(QWidget):

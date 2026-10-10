@@ -1,9 +1,9 @@
 """The one way servers get into the saved list — with the user asked whenever
 an incoming server would take over a saved one that came from somewhere else.
 
-Every entry point uses merge_with_prompt(): subscription import (from the
-picker, Settings, the home banner, onboarding), subscription refresh, and
-adding a single server by hand. They used to carry their own copies of a
+Every entry point uses merge_with_prompt(): subscription import (from
+Servers, Settings, the home banner, the empty home screen), subscription
+refresh, and adding a single server by hand. They used to carry their own copies of a
 "replace by name" loop; migrating one and missing another left the hole open
 on the path most people actually use.
 """

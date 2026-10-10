@@ -259,7 +259,9 @@ kapro_tun/
 │   ├── main_window.py        # home / settings / logs, watchdogs, connect flow
 │   ├── diagnostics_dialog.py # Network Diagnostics screen
 │   ├── bypass_apps_dialog.py # user-defined apps that skip the VPN
-│   ├── configs_picker.py, subscription_dialog.py, sites_dialog.py
+│   ├── servers_page.py, add_server_v2.py, settings_v2.py, stats_page.py
+│   ├── kit.py, tokens.py, icons_v2.py  # shared widgets, design tokens, icons
+│   ├── sites_dialog.py, leak_test_dialog.py, updater_dialog.py
 │   ├── tray.py               # system tray with top-3 quick-connect
 │   └── widgets.py, styles.py
 ├── scripts/

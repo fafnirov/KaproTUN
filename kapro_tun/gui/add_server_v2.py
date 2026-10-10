@@ -53,6 +53,7 @@ class PasteDialog(kit.OverlayDialog):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent, wide=True)
+        self.scrim_dismisses = False
         self.head("paste", tr("add2.paste_title"), tr("add2.paste_text"), tone="accent")
         self.area = kit.TextArea(height=300)
         self.add_widget(self.area)
@@ -378,6 +379,8 @@ class AddServerPage(QWidget):
         # thread and must be delivered on this widget's own.
         fetcher.succeeded.connect(self._on_fetched)
         fetcher.failed.connect(self._on_fetch_failed)
+        if hasattr(fetcher, "crashed"):
+            fetcher.crashed.connect(self._on_fetch_crashed)
         self._fetcher = fetcher
         fetcher.start()
 
@@ -396,6 +399,12 @@ class AddServerPage(QWidget):
         url = getattr(self._fetcher, "url", "") or self.sub_edit.text().strip()
         self._fetcher = None
         self._show_result(result, url=url)
+
+    def _on_fetch_crashed(self, text: str) -> None:
+        """The fetch job itself broke: still an answer — show it as a failure
+        rather than loading forever."""
+        from ..core.subscription import classify_fetch_error
+        self._on_fetch_failed(classify_fetch_error(RuntimeError(text)))
 
     def _on_fetch_failed(self, info: FetchError) -> None:
         if not self._answer_is_wanted():

@@ -1,12 +1,17 @@
-"""Modal dialog that downloads required binaries with a progress bar."""
+"""First-run downloads: the VPN engine and the list of Russian addresses.
+
+A dialog over the window with a progress bar while a file comes down; on
+failure, what went wrong, how to do it by hand, and a button to try again.
+"""
 from __future__ import annotations
 
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import QMessageBox, QProgressDialog
+from PySide6.QtWidgets import QHBoxLayout
 
 from ..core import geoip_ru, sing_box_installer
 from ..core.i18n import tr
-from ..core.safe_text import no_markup
+from . import kit
+from .merge_prompt import one_line
 
 
 class _DownloadThread(QThread):
@@ -26,52 +31,80 @@ class _DownloadThread(QThread):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
-def _run_download(parent, label: str, installer_fn, on_fail_msg: str) -> bool:
-    dlg = QProgressDialog(tr("inst.downloading", label=label), None, 0, 100, parent)
-    dlg.setWindowTitle(tr("inst.first_run_title"))
-    dlg.setCancelButton(None)
-    dlg.setMinimumDuration(0)
-    dlg.setAutoClose(False)
-    dlg.setAutoReset(False)
-    dlg.setValue(0)
+class DownloadDialog(kit.OverlayDialog):
+    """Shown while one file downloads. It has no buttons and does not close
+    on Escape: the download is not something that can be stopped half way,
+    and the client cannot start without what it brings."""
 
-    thread = _DownloadThread(installer_fn)
-    error_holder: list[str] = []
+    def __init__(self, parent, label: str):
+        super().__init__(parent)
+        self.error = ""
+        self._over = False
+        self.head("download", tr("inst.first_run_title"), tr("inst.first_run_text"), tone="accent")
+        row = QHBoxLayout()
+        row.addWidget(kit.label(label, "label"), stretch=1)
+        self.meta = kit.label("", "count")
+        row.addWidget(self.meta)
+        self.body.addLayout(row)
+        self.bar = kit.Progress()
+        self.add_widget(self.bar)
 
-    def on_progress(done: int, total: int) -> None:
+    def on_progress(self, done: int, total: int) -> None:
         if total > 0:
-            dlg.setValue(int(done * 100 / total))
-            dlg.setLabelText(tr("inst.downloading_progress", label=label,
-                                done=done // 1024, total=total // 1024))
+            self.bar.set_fraction(done / total)
+            self.meta.setText(tr("inst.progress_kb", done=done // 1024, total=total // 1024))
         else:
-            dlg.setLabelText(tr("inst.downloading_indeterminate", label=label,
-                                done=done // 1024))
+            self.bar.set_fraction(None)
+            self.meta.setText(tr("inst.progress_kb_unknown", done=done // 1024))
 
-    def on_done() -> None:
-        dlg.setValue(100)
-        dlg.close()
+    def on_done(self) -> None:
+        self._over = True
+        self.accept()
 
-    def on_failed(msg: str) -> None:
-        error_holder.append(msg)
-        dlg.close()
+    def on_failed(self, message: str) -> None:
+        self.error = message
+        self._over = True
+        self.accept()
 
-    thread.progress.connect(on_progress)
-    thread.finished_ok.connect(on_done)
-    thread.failed.connect(on_failed)
-    thread.start()
-    dlg.exec()
-    thread.wait()
+    def reject(self) -> None:
+        if self._over:
+            super().reject()
 
-    if error_holder:
-        QMessageBox.critical(parent, tr("inst.download_failed_title", label=label),
-                             no_markup(f"{error_holder[0]}\n\n{on_fail_msg}"))
-        return False
-    return True
+
+def failure_dialog(parent, label: str, error: str, manual_hint: str) -> kit.OverlayDialog:
+    """What failed, in the system's own words (plain text, one line), and the
+    way to do it by hand."""
+    dlg = kit.OverlayDialog(parent, wide=True)
+    dlg.head("x-circle", tr("inst.download_failed_title", label=label), "", tone="danger")
+    dlg.error_label = dlg.add_long_text(one_line(error, 300), max_height=60, role="mono")
+    dlg.hint_label = dlg.add_long_text(manual_hint, max_height=200)
+    dlg.add_actions([("close", tr("leak.close_btn"), "secondary"),
+                     ("retry", tr("inst.retry"), "primary")],
+                    default="retry", icons={"retry": "refresh"})
+    return dlg
+
+
+def _run_download(parent, label: str, installer_fn, on_fail_msg: str) -> bool:
+    while True:
+        dlg = DownloadDialog(parent, label)
+        thread = _DownloadThread(installer_fn)
+        thread.progress.connect(dlg.on_progress)
+        thread.finished_ok.connect(dlg.on_done)
+        thread.failed.connect(dlg.on_failed)
+        thread.start()
+        dlg.exec()
+        thread.wait()
+        if not dlg._over:
+            # Closed from outside (the app is quitting): not a success.
+            return False
+        if not dlg.error:
+            return True
+        if failure_dialog(parent, label, dlg.error, on_fail_msg).ask() != "retry":
+            return False
 
 
 def ensure_sing_box_installed(parent) -> bool:
-    """Download sing-box (+ wintun.dll on Windows) if missing. For the v3.0.0
-    sing-box TUN engine."""
+    """Download sing-box (and wintun.dll on Windows) if it is missing."""
     if sing_box_installer.is_installed():
         return True
     return _run_download(
@@ -81,10 +114,11 @@ def ensure_sing_box_installed(parent) -> bool:
 
 
 def ensure_geoip_ru_cached(parent) -> bool:
-    """Download the local-IP CIDR list if missing. For TUN-mode split routing.
+    """Download the list of Russian IP ranges if it is missing — it is what
+    "Russian sites direct" routes by.
 
-    Soft requirement — if the download fails, TUN mode still works for
-    domains we pre-resolved, just without comprehensive CIDR coverage.
+    Not required to connect: without it the client still sends the domains it
+    resolved itself directly, just without the full coverage.
     """
     if geoip_ru.is_cached():
         return True

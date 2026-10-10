@@ -677,7 +677,28 @@ QPushButton#ktBtnGhost[ico="true"][sz="sm"], QPushButton#ktBtnDanger[ico="true"]
     min-width: {t.CONTROL_H_SM - 2}px; max-width: {t.CONTROL_H_SM - 2}px; padding: 0;
 }}
 QPushButton#ktBtnPrimary:focus, QPushButton#ktBtnSecondary:focus,
-QPushButton#ktBtnGhost:focus, QPushButton#ktBtnDanger:focus {{ border: 2px solid {c.focus}; }}
+QPushButton#ktBtnGhost:focus, QPushButton#ktBtnDanger:focus {{
+    border: 2px solid {c.focus}; padding: 0 {t.SP_4 - 1}px;
+    min-height: {t.CONTROL_H - 4}px; max-height: {t.CONTROL_H - 4}px;
+}}
+QPushButton#ktBtnPrimary[sz="sm"]:focus, QPushButton#ktBtnSecondary[sz="sm"]:focus,
+QPushButton#ktBtnGhost[sz="sm"]:focus, QPushButton#ktBtnDanger[sz="sm"]:focus {{
+    padding: 0 {t.SP_3 - 1}px;
+    min-height: {t.CONTROL_H_SM - 4}px; max-height: {t.CONTROL_H_SM - 4}px;
+}}
+QPushButton#ktBtnPrimary[sz="lg"]:focus, QPushButton#ktBtnSecondary[sz="lg"]:focus,
+QPushButton#ktBtnGhost[sz="lg"]:focus, QPushButton#ktBtnDanger[sz="lg"]:focus {{
+    padding: 0 {t.SP_5 - 1}px;
+    min-height: {t.CONTROL_H_LG - 4}px; max-height: {t.CONTROL_H_LG - 4}px;
+}}
+QPushButton#ktBtnPrimary[ico="true"]:focus, QPushButton#ktBtnSecondary[ico="true"]:focus,
+QPushButton#ktBtnGhost[ico="true"]:focus, QPushButton#ktBtnDanger[ico="true"]:focus {{
+    padding: 0; min-width: {t.CONTROL_H - 4}px; max-width: {t.CONTROL_H - 4}px;
+}}
+QPushButton#ktBtnPrimary[ico="true"][sz="sm"]:focus, QPushButton#ktBtnSecondary[ico="true"][sz="sm"]:focus,
+QPushButton#ktBtnGhost[ico="true"][sz="sm"]:focus, QPushButton#ktBtnDanger[ico="true"][sz="sm"]:focus {{
+    padding: 0; min-width: {t.CONTROL_H_SM - 4}px; max-width: {t.CONTROL_H_SM - 4}px;
+}}
 QPushButton#ktBtnGhost {{ background-color: transparent; color: {c.text_secondary}; border: 1px solid transparent; }}
 QPushButton#ktBtnGhost:hover {{ background-color: {c.surface_hover}; color: {c.text}; }}
 QPushButton#ktBtnGhost:pressed {{ background-color: {c.surface_pressed}; color: {c.text}; }}
@@ -710,6 +731,7 @@ QLabel#ktHint[tone="error"] {{ color: {c.danger_text}; }}
 QLabel#ktHint[tone="success"] {{ color: {c.success_text}; }}
 QLabel#ktHint[tone="warning"] {{ color: {c.accent_text}; }}
 QLabel#ktTextSm {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; }}
+QLabel#ktTextSm[tone="error"] {{ color: {c.danger_text}; }}
 QLabel#ktBannerQuote {{
     background-color: {c.surface}; border-radius: {t.R_SM}px; color: {c.text};
     font-size: {t.FS_SM}px; padding: {t.SP_2}px {t.SP_2H}px;
@@ -817,6 +839,95 @@ QLabel#ktDiffName {{ background: transparent; color: {c.text}; font-size: {t.FS_
 QLabel#ktDiffOld {{ background: transparent; color: {c.text_tertiary}; font-family: {t.FONT_MONO}; font-size: {t.FS_SM}px; }}
 QLabel#ktDiffNew {{ background: transparent; color: {c.text}; font-family: {t.FONT_MONO}; font-size: {t.FS_SM}px; }}
 QLabel#ktDiffMore {{ background: transparent; color: {c.text_tertiary}; font-size: {t.FS_SM}px; }}
+
+/* ===== v2: settings ===== */
+QScrollArea#ktPageScroll {{ background-color: {c.bg}; border: none; }}
+QLabel#ktSectionTitle {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; font-weight: 600; }}
+QFrame#ktGroupCard {{
+    background-color: {c.surface}; border: 1px solid {c.line}; border-radius: {t.R_LG}px;
+}}
+QFrame#ktSetting {{ background-color: transparent; border: none; border-bottom: 1px solid {c.line}; }}
+QFrame#ktSetting[slot="last"], QFrame#ktSetting[slot="only"] {{ border-bottom: 1px solid transparent; }}
+QFrame#ktSetting[slot="first"], QFrame#ktSetting[slot="only"] {{
+    border-top-left-radius: {t.R_LG - 1}px; border-top-right-radius: {t.R_LG - 1}px;
+}}
+QFrame#ktSetting[slot="last"], QFrame#ktSetting[slot="only"] {{
+    border-bottom-left-radius: {t.R_LG - 1}px; border-bottom-right-radius: {t.R_LG - 1}px;
+}}
+QFrame#ktSetting:hover {{ background-color: {c.surface_2}; }}
+QFrame#ktSetting[expanded="true"] {{ background-color: {c.surface_2}; }}
+QFrame#ktSetting[warning="true"] {{ background-color: {c.accent_soft}; }}
+QFrame#ktSetting:focus {{ border: 1px solid {c.focus}; }}
+QLabel#ktSettingTitle {{ background: transparent; color: {c.text}; font-size: {t.FS_MD}px; font-weight: 500; }}
+QLabel#ktSettingHint {{ background: transparent; color: {c.text_tertiary}; font-size: {t.FS_SM}px; }}
+QLabel#ktSettingHint[tone="accent"] {{ color: {c.accent_text}; font-weight: 600; }}
+QLabel#ktSettingValue {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; }}
+QLabel#ktSettingFull {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; }}
+
+/* ===== v2: log, statistics ===== */
+QPlainTextEdit#ktLog {{
+    background-color: {c.surface}; color: {c.text_secondary};
+    border: 1px solid {c.line}; border-radius: {t.R_LG}px; padding: {t.SP_2}px;
+    font-family: {t.FONT_MONO}; font-size: {t.FS_SM}px;
+    selection-background-color: {c.accent}; selection-color: {c.on_accent};
+}}
+QLabel#ktCaption {{ background: transparent; color: {c.text_tertiary}; font-size: {t.FS_XS}px; }}
+QLabel#ktH2 {{ background: transparent; color: {c.text}; font-size: {t.FS_LG}px; font-weight: 600; }}
+QLabel#ktMetric {{ background: transparent; color: {c.text}; font-size: {t.FS_METRIC}px; font-weight: 600; }}
+QLabel#ktMetric[muted="true"] {{ color: {c.text_tertiary}; }}
+QLabel#ktStrong {{ background: transparent; color: {c.text}; font-size: {t.FS_SM}px; font-weight: 600; }}
+QLabel#ktPlaceholder {{
+    background: transparent; color: {c.text_tertiary}; font-size: {t.FS_XS}px;
+    border: 1px dashed {c.line}; border-radius: {t.R_MD}px;
+}}
+
+/* ===== v2: dialog contents ===== */
+QFrame#ktResult {{ background: transparent; border: none; border-bottom: 1px solid {c.line}; }}
+QFrame#ktResult[last="true"] {{ border-bottom: 1px solid transparent; }}
+QLabel#ktResultName {{ background: transparent; color: {c.text}; font-size: {t.FS_SM}px; font-weight: 600; }}
+QLabel#ktResultText {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; }}
+QLabel#ktResultText[tone="fail"] {{ color: {c.danger_text}; }}
+QPlainTextEdit#ktReport {{
+    background-color: {c.surface_2}; color: {c.text_secondary};
+    border: 1px solid {c.line}; border-radius: {t.R_MD}px; padding: {t.SP_2}px;
+    font-family: {t.FONT_MONO}; font-size: {t.FS_XS}px;
+    selection-background-color: {c.accent}; selection-color: {c.on_accent};
+}}
+QFrame#ktPanel {{ background-color: {c.surface_2}; border: none; border-radius: {t.R_MD}px; }}
+QTextBrowser#ktNotes {{
+    background: transparent; border: none; color: {c.text_secondary};
+    font-family: {t.FONT}; font-size: {t.FS_SM}px; padding: 0;
+    selection-background-color: {c.accent}; selection-color: {c.on_accent};
+}}
+QLabel#ktMono {{
+    background: transparent; color: {c.text_secondary};
+    font-family: {t.FONT_MONO}; font-size: {t.FS_SM}px;
+}}
+QFrame#ktAppRow {{ background: transparent; border: none; border-bottom: 1px solid {c.line}; }}
+QFrame#ktAppRow[last="true"] {{ border-bottom: 1px solid transparent; }}
+QFrame#ktAppRow:hover {{ background-color: {c.surface_2}; }}
+QScrollArea#ktMiniList {{
+    background-color: {c.surface}; border: 1px solid {c.line}; border-radius: {t.R_MD}px;
+}}
+QWidget#ktMiniListBody {{ background: transparent; }}
+QScrollArea#ktTextScroll {{ background: transparent; border: none; }}
+QScrollArea#ktTextScroll > QWidget > QWidget {{ background: transparent; }}
+
+/* ===== v2: scroll bars (the horizontal one had no style at all) ===== */
+QScrollBar:horizontal {{ background: transparent; height: 8px; border: none; }}
+QScrollBar::handle:horizontal {{ background: {c.line_strong}; border-radius: 4px; min-width: 24px; }}
+QScrollBar::handle:horizontal:hover {{ background: {c.line_hover}; }}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
+QScrollBar::handle:vertical {{ background: {c.line_strong}; }}
+QScrollBar::handle:vertical:hover {{ background: {c.line_hover}; }}
+QAbstractScrollArea::corner {{ background: transparent; }}
+
+/* ===== v2: toasts ===== */
+QFrame#ktToast {{
+    background-color: {c.surface_2}; border: 1px solid {c.line_strong}; border-radius: {t.R_MD}px;
+}}
+QLabel#ktToastText {{ background: transparent; color: {c.text}; font-size: {t.FS_SM}px; }}
 """
 
 
