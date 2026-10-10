@@ -7163,7 +7163,7 @@ def _new_configs_get_pinged() -> None:
     results overwrite the new ones."""
     import inspect
     from kapro_tun.gui import main_window as _mw
-    for fn in ("_on_add_page_saved", "_on_import_subscription"):
+    for fn in ("_on_add_page_saved", "_on_subscription_imported"):
         if "self._refresh_tray_pings()" not in inspect.getsource(getattr(_mw.MainWindow, fn)):
             raise AssertionError(f"{fn} does not refresh pings for the new servers")
     src = inspect.getsource(_mw.MainWindow._refresh_tray_pings)
@@ -8351,7 +8351,8 @@ def _v401_merge_has_no_side_doors() -> None:
         raise AssertionError("'replace' did not replace")
 
     # Every way a server gets into the list goes through it.
-    for owner, fn in ((_mw.MainWindow, "_on_import_subscription"),
+    for owner, fn in ((_mw.MainWindow, "_on_subscription_imported"),
+                      (_mw.MainWindow, "_on_subs_refreshed"),
                       (_mw.MainWindow, "_on_add_page_saved"),
                       (_cp.ConfigsPickerDialog, "_on_add"),
                       (_cp.ConfigsPickerDialog, "_merge_incoming")):
@@ -8855,6 +8856,588 @@ check("ui v2: tokens are complete, icons are valid, sheets follow the theme (v4.
       _v41_tokens_and_icons)
 check("ui v2: navigation has four tabs, Servers among them (v4.1.0)", _v41_navigation)
 check("ui v2: home shows every state and clears stale values (v4.1.0)", _v41_home_states)
+
+
+# ---------------------------------------------------------------------------
+# v4.1.0 — the v2 interface, phase 2: servers, adding a server, dialogs
+# ---------------------------------------------------------------------------
+
+section("v4.1.0: interface v2 — servers, adding, dialogs over the window")
+
+
+def _v41_in_russian(fn):
+    """Run a check under the Russian locale: its assertions quote the texts."""
+    def run() -> None:
+        from kapro_tun.core import i18n as _i18n
+        prev = _i18n._current
+        _i18n.set_locale("ru")
+        try:
+            fn()
+        finally:
+            _i18n.set_locale(prev)
+    return run
+
+
+def _v41_all_text_is_plain(root, where: str) -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QLabel
+    for lab in root.findChildren(QLabel):
+        if "<" in lab.text() and lab.textFormat() != Qt.PlainText:
+            raise AssertionError(f"{where} renders {lab.text()[:40]!r} as markup")
+
+
+def _v41_servers_page() -> None:
+    """The Servers tab lists, finds, sorts and measures; it asks before a
+    delete and never offers to act on a server that is not on screen."""
+    from kapro_tun.gui import kit, servers_page as sp
+    _v41_app()
+    nl = _v401_cfg("🇳🇱 Нидерланды", "10.0.0.1")
+    de = _v401_cfg("🇩🇪 Германия", "10.0.0.2")
+    tr_ = _v401_cfg("<b>Турция</b>", "10.0.0.3")
+    page = sp.ServersPage()
+    fired: list = []
+    page.add_clicked.connect(lambda: fired.append("add"))
+    page.subscription_clicked.connect(lambda: fired.append("sub"))
+    page.connect_requested.connect(lambda c: fired.append(("connect", c)))
+    page.delete_requested.connect(lambda c: fired.append(("delete", c)))
+
+    # Nothing saved: the page says what to do, and has no list to act on.
+    if page.empty_card.isHidden() or not page.list.isHidden() or not page.action_bar.isHidden():
+        raise AssertionError("empty Servers tab must show the empty card and nothing else")
+    page.empty_card.add_btn.click()
+    page.empty_card.sub_btn.click()
+    if fired != ["add", "sub"]:
+        raise AssertionError(f"empty-state buttons lead nowhere: {fired}")
+
+    page.set_configs([nl, de, tr_], active_name=nl.name, connected=True)
+    if not page.empty_card.isHidden() or page.list.isHidden() or page.count.text() != "3":
+        raise AssertionError("with servers the list must show, with their count")
+    rows = {r.cfg.name: r for r in page.list.rows}
+    if rows[nl.name].badge.isHidden() or not rows[de.name].badge.isHidden():
+        raise AssertionError("only the server in use carries the 'active' badge")
+    if page.selected() is not nl or not rows[nl.name].is_selected():
+        raise AssertionError("the page must open with the server in use selected")
+    if page.connect_btn.isEnabled() or page.delete_btn.isEnabled() \
+            or page.connect_btn.text() != "Подключён":
+        raise AssertionError("a connected server can be neither connected again nor deleted")
+    _v41_all_text_is_plain(page, "the Servers tab")
+
+    page._on_row_clicked(rows[de.name])
+    if page.selected() is not de or page.picked_name.full_text() != "Германия" \
+            or not page.connect_btn.isEnabled() or not page.delete_btn.isEnabled():
+        raise AssertionError("selecting a row must arm the action bar for it")
+    page.connect_btn.click()
+    page._on_row_activated(rows[tr_.name])
+    if fired[-2:] != [("connect", de), ("connect", tr_)]:
+        raise AssertionError("Connect and double click must ask for that server")
+
+    # Delete: only after an explicit yes, and the question is a danger one.
+    with _v4_patched(kit, confirm=lambda *_a, **_k: False):
+        page.delete_btn.click()
+    if fired[-1][0] == "delete":
+        raise AssertionError("a declined delete still went through")
+    asked: list = []
+    with _v4_patched(kit, confirm=lambda *a, **k: asked.append((a, k)) or True):
+        page.delete_btn.click()
+    if fired[-1] != ("delete", tr_) or not asked[0][1].get("danger") \
+            or "\n" in asked[0][0][2] or "Турция" not in asked[0][0][2]:
+        raise AssertionError("delete must be confirmed by name, as a destructive action")
+
+    # Search: by name, by address; the count says how many are shown.
+    page.search.setText("герм")
+    if page.visible_names() != [de.name] or page.count.text() != "1 из 3" or page.selected() is not de:
+        raise AssertionError("search by name: wrong rows, count or selection")
+    page.search.setText("10.0.0.3")
+    if page.visible_names() != [tr_.name] or page.selected() is not tr_:
+        raise AssertionError("search by address must find the server and select it")
+    page.search.setText("нет такого")
+    if page.visible_names() or page.list.not_found.isHidden() \
+            or page.connect_btn.isEnabled() or page.delete_btn.isEnabled():
+        raise AssertionError("nothing found: no actions may stay armed for a hidden server")
+    page.search.setText("")
+
+    # Opening the list "on" a server that an old filter hides drops the filter.
+    page.search.setText("герм")
+    page.select(nl.name)
+    if page.search.text() or page.selected() is not nl:
+        raise AssertionError("a leftover filter hid the server the page was opened on")
+
+    # Keys: Enter connects the selected server — unless it was meant for a
+    # focused button or the search field. Enter on a button presses that button.
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+    from PySide6.QtWidgets import QApplication
+
+    def press(widget, key) -> None:
+        QApplication.sendEvent(widget, QKeyEvent(QEvent.KeyPress, key, Qt.NoModifier))
+
+    page.show()
+    page.activateWindow()
+    page._on_row_clicked(next(r for r in page.list.rows if r.cfg is de))
+    page.setFocus()
+    n = len(fired)
+    press(page, Qt.Key_Return)
+    if fired[n:] != [("connect", de)]:
+        raise AssertionError(f"Enter on the list must connect the selected server: {fired[n:]}")
+    press(page, Qt.Key_Down)
+    if page.selected() is de:
+        raise AssertionError("the arrow keys do not move the selection")
+    page._on_row_clicked(next(r for r in page.list.rows if r.cfg is de))
+    n = len(fired)
+    page.add_btn.setFocus(Qt.TabFocusReason)
+    press(page.add_btn, Qt.Key_Return)
+    if fired[n:] != ["add"]:
+        raise AssertionError(f"Enter on a focused button did something else: {fired[n:]}")
+    page.search.setFocus()
+    n = len(fired)
+    press(page.search, Qt.Key_Return)
+    if fired[n:]:
+        raise AssertionError("Enter in the search field connected a server")
+    page.hide()
+
+    # Sorting.
+    page.sort.set_current(sp.SORT_NAME)
+    want = [c.name for c in sorted([nl, de, tr_], key=sp.name_key)]
+    if [r.cfg.name for r in page.list.rows] != want:
+        raise AssertionError("sort by name ignores the flag-less name")
+    page.sort.set_current(sp.SORT_SPEED)
+    page.set_pings({nl.name: 200, de.name: 40, tr_.name: None})
+    if [r.cfg.name for r in page.list.rows] != [de.name, nl.name, tr_.name]:
+        raise AssertionError("sort by speed: fastest first, unreachable last")
+    kinds = {r.cfg.name: r.ping.kind() for r in page.list.rows}
+    if kinds != {de.name: "good", nl.name: "mid", tr_.name: "na"}:
+        raise AssertionError(f"ping colours are wrong: {kinds}")
+    page.set_pings({}, pending=True)
+    if {r.ping.kind() for r in page.list.rows} != {"pending"} \
+            or [r.cfg.name for r in page.list.rows] != [de.name, nl.name, tr_.name]:
+        raise AssertionError("a new measurement must reset the labels and keep the order")
+    page.set_ping(nl.name, 30)
+    if next(r for r in page.list.rows if r.cfg is nl).ping.kind() != "good":
+        raise AssertionError("a single result does not reach its row")
+
+    # Called on every refresh tick: an unchanged list costs nothing, a list
+    # re-read from disk keeps the rows and rebinds them to the new objects.
+    before = list(page.list.rows)
+    page.set_configs([nl, de, tr_], nl.name, True)
+    nl2 = _v401_cfg(nl.name, "10.0.0.1")
+    page.set_configs([nl2, de, tr_], nl.name, False)
+    if page.list.rows != before or next(r for r in before if r.cfg.name == nl.name).cfg is not nl2:
+        raise AssertionError("an unchanged list was rebuilt, or rows kept stale objects")
+    page.select(nl.name)
+    if not page.connect_btn.isEnabled() or page.connect_btn.text() != "Подключиться":
+        raise AssertionError("once disconnected, the active server can be connected")
+    page.set_configs([de], "", False)
+    if len(page.list.rows) != 1 or page.selected() is not de:
+        raise AssertionError("a removed server must leave the list and the selection")
+
+    import inspect
+    import re
+    from kapro_tun.gui import add_server_v2
+    for mod in (sp, kit, add_server_v2):
+        stray = re.findall(r"#[0-9a-fA-F]{6}\b", inspect.getsource(mod))
+        if stray:
+            raise AssertionError(f"{mod.__name__} hard-codes colours: {sorted(set(stray))}")
+
+
+def _v41_add_server_page() -> None:
+    """Adding by link and by subscription: what is recognized, what is
+    refused, what is remembered — and that nothing from outside is markup."""
+    from PySide6.QtCore import QObject, Signal
+    from kapro_tun.core import storage, subscription as _sub
+    from kapro_tun.gui import add_server_v2 as av, kit
+    _v41_app()
+
+    class _Fetch(QObject):
+        succeeded = Signal(object)
+        failed = Signal(object)
+        started: list = []
+
+        def __init__(self, url, parent=None):
+            super().__init__(parent)
+            _Fetch.started.append(self)
+
+        def start(self) -> None:
+            pass
+
+        def isRunning(self) -> bool:  # noqa: N802
+            return False
+
+    url = "https://p.example/sub/abc"
+    body = ("trojan://pw@10.0.0.1:443?security=tls#A\n"
+            "trojan://pw@10.0.0.2:443?security=tls#B\nnot-a-link")
+    toasts: list = []
+    with _v4_fresh_data_dir(), _v4_patched(av, show_toast=lambda _w, text, **_k: toasts.append(text)):
+        page = av.AddServerPage()
+        page._make_fetcher = _Fetch
+        got: list = []
+        page.config_ready.connect(lambda c: got.append(("cfg", c)))
+        page.subscription_imported.connect(lambda items: got.append(("sub", items)))
+
+        # --- by link ---
+        if page.mode() != av.MODE_LINK or page.save_btn.isEnabled():
+            raise AssertionError("the page must open on 'by link' with nothing to save")
+        page.url_edit.setPlainText("not a link")
+        if page.save_btn.isEnabled() or page.link_status.property("tone") != "error":
+            raise AssertionError("garbage must be reported and not be saveable")
+        page.url_edit.setPlainText("trojan://pw@10.0.0.9:443?security=tls#<b>NL</b>")
+        if not page.save_btn.isEnabled() or page.link_status.property("tone") != "success" \
+                or "10.0.0.9:443" not in page.link_status.text() \
+                or page.name_edit.text() != "<b>NL</b>":
+            raise AssertionError("a valid link must be recognized and name itself")
+        page.name_edit.setText("   ")
+        page.save_btn.click()
+        if got or not toasts:
+            raise AssertionError("a server without a name must not be saved silently")
+        page.name_edit.setText("Мой сервер")
+        page.save_btn.click()
+        if not got or got[-1][0] != "cfg" or got[-1][1].name != "Мой сервер":
+            raise AssertionError("save must hand over the server under the name typed")
+        # The name the page filled in follows the link; a typed one stays.
+        page.open(av.MODE_LINK)
+        page.url_edit.setPlainText("trojan://pw@10.0.0.9:443?security=tls#First")
+        page.url_edit.setPlainText("trojan://pw@10.0.0.8:443?security=tls#Second")
+        if page.name_edit.text() != "Second":
+            raise AssertionError("a second link would be saved under the first link's name")
+        page.name_edit.setText("Свой")
+        page.url_edit.setPlainText("trojan://pw@10.0.0.7:443?security=tls#Third")
+        if page.name_edit.text() != "Свой":
+            raise AssertionError("a name the user typed was overwritten by the link's")
+        page.open(av.MODE_LINK)
+        page.url_edit.setPlainText("trojan://pw@10.0.0.9:443?security=tls#Fake%0A%0AAll%20good%E2%80%AE")
+        if "\n" in page.name_edit.text() or "\u202e" in page.name_edit.text():
+            raise AssertionError("a link named itself with line breaks or direction overrides")
+
+        # A web link is a subscription: offered, never parsed as a server.
+        page.url_edit.setPlainText(url)
+        if page.save_btn.isEnabled() or page.to_sub.isHidden():
+            raise AssertionError("a web link must offer the subscription path")
+        page._on_to_subscription()
+        if page.mode() != av.MODE_SUB or page.sub_edit.text() != url:
+            raise AssertionError("the offer must carry the link over to the subscription tab")
+
+        # --- subscription: what is refused before any request is made ---
+        for bad in ("", "http://p.example/sub", "ftp://p.example/x", "p.example/sub"):
+            page.sub_edit.setText(bad)
+            n = len(_Fetch.started)
+            page._on_fetch()
+            if len(_Fetch.started) != n or page.sub_state() != av.ST_INPUT \
+                    or page.sub_hint.property("tone") != "error" or page.sub_hint.isHidden():
+                raise AssertionError(f"{bad!r} must be refused in place, without a request")
+
+        # --- an answer nobody is waiting for is dropped ---
+        page.sub_edit.setText(url)
+        page._on_fetch()
+        if page.sub_state() != av.ST_LOADING or page.main_btn.isEnabled():
+            raise AssertionError("while loading the button must not start a second fetch")
+        stale = _Fetch.started[-1]
+        page.open(av.MODE_SUB)
+        stale.succeeded.emit(_sub.result_from_body(body))
+        if page.sub_state() != av.ST_INPUT:
+            raise AssertionError("the answer to an abandoned fetch changed the form")
+
+        # --- a result: previewed, then handed over and remembered ---
+        page.sub_edit.setText(url)
+        page._on_fetch()
+        _Fetch.started[-1].succeeded.emit(_sub.result_from_body(body))
+        if page.sub_state() != av.ST_RESULT or page.notice.kind != "success" \
+                or page.notice.texts()[0] != "Найдено серверов: 2" or page.cancel_btn.isHidden():
+            raise AssertionError(f"result is not shown: {page.sub_state()} {page.notice.texts()}")
+        page.main_btn.click()
+        s = storage.load_settings()
+        if got[-1][0] != "sub" or len(got[-1][1]) != 2 or s.get("subscription_url") != url \
+                or s.get("subscription_urls") != [url] or not s.get("subscription_last_refresh"):
+            raise AssertionError("an accepted subscription must be handed over and its link kept")
+
+        # Pasted text has no address: it must not erase the saved one.
+        page._ingest_text(body)
+        if page.sub_state() != av.ST_RESULT or "Источник: вставленный текст." not in page.notice.texts():
+            raise AssertionError("pasted share links must be previewed as pasted")
+        page.main_btn.click()
+        s = storage.load_settings()
+        if s.get("subscription_url") != url or s.get("subscription_urls") != [url]:
+            raise AssertionError("a pasted import overwrote the saved subscription link")
+        n = len(_Fetch.started)
+        page._ingest_text(url)
+        if len(_Fetch.started) != n + 1:
+            raise AssertionError("a web link from the clipboard must be fetched")
+        page.open(av.MODE_SUB)
+
+        # Editing the field under a result withdraws the result.
+        page._show_result(_sub.result_from_body(body), url=url)
+        page._on_sub_edited("x")
+        n = len(got)
+        page.sub_edit.setText("")
+        page.main_btn.click()
+        if page.sub_state() != av.ST_INPUT or len(got) != n:
+            raise AssertionError("a result survived an edit of the link it came from")
+
+        # --- failures and the provider's own words: text, never markup ---
+        page._on_fetch_failed(_sub.FetchError(category="unknown", raw="<img src=x>",
+                                              title="<b>t</b>", detail="<i>d</i>\nline two",
+                                              suggest_manual=True))
+        if page.sub_state() != av.ST_ERROR or page.notice.kind != "danger" \
+                or any("\n" in t for t in page.notice.texts()):
+            raise AssertionError("a fetch error must be shown as a one-line-per-item notice")
+        _v41_all_text_is_plain(page, "the fetch error")
+        page._on_fetch_failed(_sub.FetchError(
+            category="unknown", raw="URLError: https://user:pw@p.example/sub/SECRET?token=TOKEN failed",
+            title="t", detail="d", suggest_manual=False))
+        shown = " ".join(page.notice.texts())
+        if "SECRET" in shown or "TOKEN" in shown or "pw@" in shown or "p.example" not in shown:
+            raise AssertionError(f"a fetch error shows the subscription link's secret: {shown!r}")
+        stub = _sub.SubscriptionResult(
+            configs=[], errors=[], raw_lines=1, placeholders=["App not supported"],
+            provider_note="<b>Pay</b>\n\nAll good, press Add",
+            support_url="https://t.me/support", account_url="file:///c:/windows/system32/calc.exe")
+        page._show_result(stub, url=url)
+        links = [b.url() for b in page.notice.findChildren(kit.LinkButton) if b.parent() is not None]
+        if page.sub_state() != av.ST_MESSAGE or page.notice.kind != "warning" \
+                or links != ["https://t.me/support"] or any("\n" in t for t in page.notice.texts()):
+            raise AssertionError(f"provider stub: wrong state, links {links} or multi-line quote")
+        _v41_all_text_is_plain(page, "the provider message")
+        page._show_result(_sub.SubscriptionResult(configs=[], errors=["x"], raw_lines=1), url=url)
+        if page.sub_state() != av.ST_ERROR or page.cancel_btn.isHidden() is False:
+            raise AssertionError("a body without servers is an error with nothing to add")
+
+        # --- manual paste ---
+        dlg = av.PasteDialog(None)
+        if dlg.buttons["parse"].isEnabled():
+            raise AssertionError("nothing pasted, nothing to parse")
+        dlg.area.setPlainText("abc")
+        if not dlg.buttons["parse"].isEnabled() or dlg.chars.text() != "3 симв.":
+            raise AssertionError("the paste dialog does not follow its text")
+        with _v4_patched(av.PasteDialog, ask=lambda _s: "parse", text=lambda _s: body):
+            page._on_manual()
+        if page.sub_state() != av.ST_RESULT:
+            raise AssertionError("a pasted body is not parsed")
+        with _v4_patched(av.PasteDialog, ask=lambda _s: "", text=lambda _s: body):
+            page.open(av.MODE_SUB)
+            page._on_manual()
+        if page.sub_state() != av.ST_INPUT:
+            raise AssertionError("a dismissed paste dialog must change nothing")
+        page.shutdown()
+
+    # The real workers: off the UI thread, answer delivered on it, and a
+    # failure arrives classified instead of killing the thread.
+    import threading
+    import time as _time
+    from PySide6.QtCore import QCoreApplication
+    from kapro_tun.gui import sub_workers as sw
+    seen: list = []
+
+    def fake_import(link, *_a, **_k):
+        seen.append(("worker", threading.current_thread() is threading.main_thread()))
+        if "bad" in link:
+            raise TimeoutError("timed out")
+        return _sub.result_from_body(body)
+
+    class _Sink(QObject):
+        def take(self, value) -> None:
+            seen.append(("slot", threading.current_thread() is threading.main_thread(),
+                         type(value).__name__))
+
+    sink = _Sink()
+    with _v4_patched(sw, import_with_dpi_fallback=fake_import):
+        ok, bad = sw.SubscriptionFetch(url), sw.SubscriptionFetch("https://bad.example/s")
+        ok.succeeded.connect(sink.take)
+        bad.failed.connect(sink.take)
+        both = sw.SubscriptionsRefresh([url, "https://bad.example/s"])
+        both.done.connect(sink.take)
+        for worker in (ok, bad, both):
+            worker.start()
+        # Deliver only what is addressed to `sink`. Spinning the whole event
+        # loop here would also run whatever earlier checks left behind.
+        for _ in range(200):
+            _time.sleep(0.02)
+            QCoreApplication.sendPostedEvents(sink, 0)
+            if sum(1 for s in seen if s[0] == "slot") == 3:
+                break
+    slots = sorted(s[2] for s in seen if s[0] == "slot")
+    if slots != ["FetchError", "SubscriptionResult", "dict"]:
+        raise AssertionError(f"background downloads did not all report: {seen}")
+    if any(s[1] for s in seen if s[0] == "worker") or not all(s[1] for s in seen if s[0] == "slot"):
+        raise AssertionError("downloads must run off the UI thread and answer on it")
+
+
+def _v41_overlay_dialogs() -> None:
+    """Dialogs open over the window, default to the harmless answer, and the
+    name-conflict question shows the sender's values as single lines."""
+    import inspect
+    from PySide6.QtWidgets import QLabel, QWidget
+    from kapro_tun.gui import kit, merge_prompt as mp, tokens
+    from kapro_tun.gui.home_v2 import ElidedLabel
+    _v41_app()
+    host = QWidget()
+    host.setGeometry(100, 100, 460, 720)
+
+    dlg = kit.OverlayDialog(host)
+    dlg.head("trash", "Удалить?", "Текст", tone="danger")
+    dlg.add_actions([("cancel", "Отмена", "secondary"), ("ok", "Удалить", "danger")], default="cancel")
+    if not dlg.buttons["cancel"].isDefault() or dlg.buttons["ok"].isDefault():
+        raise AssertionError("Enter must mean the default (harmless) button")
+    dlg._cover_host()
+    g = dlg.geometry()
+    if (g.x(), g.y(), g.width(), g.height()) != (100, 100 + tokens.TITLEBAR_H, 460, 720 - tokens.TITLEBAR_H):
+        raise AssertionError(f"the dialog does not cover the window under its title bar: {g}")
+    dlg.finish("ok")
+    if dlg.result_key != "ok":
+        raise AssertionError("a pressed button is not reported")
+    for answer, yes in (("ok", True), ("cancel", False), ("", False)):
+        with _v4_patched(kit.OverlayDialog, ask=lambda _s, a=answer: a):
+            if kit.confirm(host, "trash", "t", "x", "Да", "Нет", danger=True) is not yes:
+                raise AssertionError(f"confirm() read {answer!r} wrong")
+
+    saved = _v401_cfg("Home\n\nAll good, press Replace", "h.example", "sub:a")
+    conflicts = [(saved, _v401_cfg(saved.name, "evil.example", "sub:b")),
+                 (_v401_cfg("Same", "s.example", "sub:a", secret="one"),
+                  _v401_cfg("Same", "s.example", "sub:b", secret="two"))]
+    conflicts += [(_v401_cfg(f"n{i}", f"a{i}.example"), _v401_cfg(f"n{i}", f"b{i}.example"))
+                  for i in range(9)]
+    dlg = mp.build_conflict_dialog(host, conflicts)
+    if not dlg.buttons["keep"].isDefault() or dlg.buttons["replace"].isDefault():
+        raise AssertionError("'keep both' must be the default answer")
+    texts = [w.full_text() if isinstance(w, ElidedLabel) else w.text() for w in dlg.findChildren(QLabel)]
+    cells = [w.full_text() for w in dlg.findChildren(ElidedLabel)]
+    if any("\n" in t for t in cells):
+        raise AssertionError("a server name wrote its own paragraph into the question")
+    for needle in ("evil.example:443", "тот же адрес, другие параметры", "…и ещё 3"):
+        if needle not in texts:
+            raise AssertionError(f"the conflict dialog does not show {needle!r}: {texts}")
+    _v41_all_text_is_plain(dlg, "the conflict dialog")
+    for answer, replace in (("replace", True), ("keep", False), ("", False)):
+        with _v4_patched(kit.OverlayDialog, ask=lambda _s, a=answer: a):
+            if mp.ask_replace_conflicts(host, conflicts[:1]) is not replace:
+                raise AssertionError(f"the conflict question read {answer!r} wrong")
+    if "QMessageBox" in inspect.getsource(mp):
+        raise AssertionError("the conflict question still opens a system message box")
+
+
+def _v41_window_uses_the_new_pages() -> None:
+    """The main window routes everything through the Servers tab and the add
+    page; choosing and deleting a server do what the buttons say."""
+    import inspect
+    from kapro_tun.core import storage
+    from kapro_tun.gui import main_window as mw
+    src = inspect.getsource(mw)
+    for gone in ("ConfigsPickerDialog", "OnboardingPage", "AddConfigPage", "SubscriptionDialog("):
+        if gone in src:
+            raise AssertionError(f"the main window still uses {gone}")
+    goto = inspect.getsource(mw.MainWindow._goto)
+    if '"servers"' not in goto or "not self.configs" in goto:
+        raise AssertionError("_goto has no Servers page or still hijacks the empty home")
+    for fn in ("_on_add_page_saved", "_on_subscription_imported", "_on_subs_refreshed"):
+        if "merge_with_prompt" not in inspect.getsource(getattr(mw.MainWindow, fn)):
+            raise AssertionError(f"{fn} puts servers into the list past the merge")
+    with _v4_fresh_data_dir():
+        storage.update_settings({"subscription_urls": [
+            "https://a.example/s", "http://b.example/s", "https://a.example/s", "file:///c:/x"]})
+        if mw.MainWindow._subscription_urls(None) != ["https://a.example/s"]:
+            raise AssertionError("refresh would re-fetch a saved link that is not https")
+    # Downloads cannot be interrupted, so they must not be QThreads: one
+    # still running at quit would abort the process or have to be killed.
+    from kapro_tun.gui import add_server_v2, sub_workers
+    for mod in (add_server_v2, sub_workers):
+        code = "\n".join(line for line in inspect.getsource(mod).splitlines()
+                         if not line.lstrip().startswith(("#", '"')))
+        if "QThread(" in code or "(QThread)" in code or ".terminate(" in code:
+            raise AssertionError(f"{mod.__name__} runs a download on a QThread or kills a thread")
+    if "self.add_page.shutdown()" not in inspect.getsource(mw.MainWindow._join_workers):
+        raise AssertionError("quit does not tell the add page to drop its pending download")
+    if "_sync_servers_page()" not in inspect.getsource(mw.MainWindow._refresh_home):
+        raise AssertionError("the Servers tab is not kept in step with the list")
+
+    a, b = _v401_cfg("A", "10.0.0.1"), _v401_cfg("B", "10.0.0.2")
+
+    class _Mgr:
+        def __init__(self):
+            self.connected, self.saved, self.settings = False, {}, {}
+
+        def is_connected(self):
+            return self.connected
+
+        def update_settings(self, **kw):
+            self.saved.update(kw)
+
+    class _Win:
+        _connecting = False
+
+        def __init__(self):
+            self.manager, self.configs, self._active_config = _Mgr(), [a, b], a
+            self._tray_pings, self.calls = {a.name: 10, b.name: 20}, []
+
+        def _goto(self, name):
+            self.calls.append(("goto", name))
+
+        def _refresh_home(self):
+            self.calls.append("refresh")
+
+        def _on_connect_click(self):
+            self.calls.append("connect")
+
+        def _on_tray_config_picked(self, cfg):
+            self.calls.append(("switch", cfg.name))
+
+    w = _Win()
+    mw.MainWindow._on_server_chosen(w, b)
+    if w._active_config is not b or w.manager.saved.get("last_config_name") != "B" \
+            or w.calls[0] != ("goto", "home") or w.calls[-1] != "connect":
+        raise AssertionError(f"choosing a server must select it, go home and connect: {w.calls}")
+    w.manager.connected = True
+    mw.MainWindow._on_server_chosen(w, a)
+    if w.calls[-1] != ("switch", "A"):
+        raise AssertionError("choosing a server while connected must switch to it")
+    # Mid-connect nothing may change: the connect in flight reads the active
+    # server when it lands, and would report the wrong one.
+    w.manager.connected, w._connecting, n = False, True, len(w.calls)
+    w.manager.saved.clear()
+    said: list = []
+    with _v4_patched(mw, show_toast=lambda _w, text, **_k: said.append(text)):
+        mw.MainWindow._on_server_chosen(w, a)
+    if w._active_config is not b or w.calls[n:] or w.manager.saved or not said:
+        raise AssertionError("a choice made mid-connect changed the active server or said nothing")
+
+    # A merge that updates the active server brings a new object under the
+    # same name; the window must follow it.
+    w = _Win()
+    a2 = _v401_cfg("A", "10.9.9.9")
+    w.configs[:] = [a2, b]
+    mw.MainWindow._rebind_active_config(w)
+    if w._active_config is not a2:
+        raise AssertionError("after an update the window still dials the server's old address")
+    for fn in ("_on_add_page_saved", "_on_subscription_imported", "_on_subs_refreshed",
+               "_on_sub_autorefresh_added"):
+        if "_rebind_active_config()" not in inspect.getsource(getattr(mw.MainWindow, fn)):
+            raise AssertionError(f"{fn} replaces the list without rebinding the active server")
+
+    with _v4_fresh_data_dir(), _v4_patched(mw, show_toast=lambda *_a, **_k: None):
+        w = _Win()
+        # A different object with the same name: the list may have been
+        # re-read from disk since the page drew its rows.
+        mw.MainWindow._on_delete_server(w, _v401_cfg("A", "10.0.0.1"))
+        if [c.name for c in w.configs] != ["B"] or w._active_config is not b \
+                or "A" in w._tray_pings or w.manager.saved.get("last_config_name") != "B":
+            raise AssertionError("deleting the active server must remove it and move on to the next")
+        if [c.name for c in storage.load_configs()] != ["B"]:
+            raise AssertionError("the deletion was not saved")
+        # The tunnel came up on it while the question was on screen: refuse.
+        w.manager.connected = True
+        mw.MainWindow._on_delete_server(w, b)
+        if [c.name for c in w.configs] != ["B"] or w._active_config is not b:
+            raise AssertionError("a server in use was deleted from under its tunnel")
+        w.manager.connected = False
+        mw.MainWindow._on_delete_server(w, b)
+        if w.configs or w._active_config is not None or w.manager.saved.get("last_config_name") != "":
+            raise AssertionError("deleting the last server must leave no active one")
+
+
+check("ui v2: Servers tab lists, searches, sorts, pings, asks before delete (v4.1.0)",
+      _v41_in_russian(_v41_servers_page))
+check("ui v2: add page recognizes, refuses and remembers; outside text is plain (v4.1.0)",
+      _v41_in_russian(_v41_add_server_page))
+check("ui v2: dialogs open over the window and default to the harmless answer (v4.1.0)",
+      _v41_in_russian(_v41_overlay_dialogs))
+check("ui v2: the window routes servers through the new pages (v4.1.0)",
+      _v41_window_uses_the_new_pages)
 
 
 # ---------------------------------------------------------------------------

@@ -44,7 +44,7 @@ from ..core import (
 from ..core import controller as _controller
 from ..core.controller import MODE_TUN
 from ..core.safe_text import esc, no_markup
-from .merge_prompt import merge_with_prompt
+from .merge_prompt import merge_with_prompt, one_line
 from ..core.controller import ConnectionManager as _CM
 _HEALTH_OK, _HEALTH_DEGRADED, _HEALTH_DEAD = (
     _CM.HEALTH_OK, _CM.HEALTH_DEGRADED, _CM.HEALTH_DEAD)
@@ -52,14 +52,13 @@ from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
 from ..core.parser import ProxyConfig
 from . import icons
-from .add_page import AddConfigPage
-from .onboarding import OnboardingPage
+from .add_server_v2 import MODE_LINK, MODE_SUB, AddServerPage
+from .servers_page import ServersPage
 from .subscription_autorefresh import SubscriptionAutoRefresh
 from .config_dialog import AddConfigDialog
 from .stats_page import StatsPage
 from .world_map import WorldMapWidget
 from . import window_resize
-from .configs_picker import ConfigsPickerDialog
 from .installer_dialog import (ensure_geoip_ru_cached, ensure_sing_box_installed)
 from .sites_dialog import SitesDialog
 from .sparkline import TrafficSparkline
@@ -1213,8 +1212,8 @@ class MainWindow(QMainWindow):
         _theme = lambda: str(self.manager.settings.get("theme", "auto"))
         self.settings_page = SettingsPage(self.manager)
         self.logs_page = LogsPage()
-        self.add_page = AddConfigPage()
-        self.onboarding_page = OnboardingPage()
+        self.add_page = AddServerPage()
+        self.servers_page = ServersPage()
         # v1.15.0: 24-hour bandwidth chart page. Same theme-getter so
         # the chart's colors track live theme switches.
         self.stats_page = StatsPage()
@@ -1223,7 +1222,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.settings_page)    # index 1
         self.stack.addWidget(self.logs_page)        # index 2
         self.stack.addWidget(self.add_page)         # index 3
-        self.stack.addWidget(self.onboarding_page)  # index 4
+        self.stack.addWidget(self.servers_page)     # index 4
         self.stack.addWidget(self.stats_page)       # index 5
         root.addWidget(self.stack, stretch=1)
 
@@ -1253,13 +1252,13 @@ class MainWindow(QMainWindow):
 
         self._wire_signals()
         self._refresh_home()
-        # If this is a clean install (no saved configs), open onboarding
-        # instead of the empty Home card — _goto("home") detects this.
-        # First-time UX: user sees Welcome + 3 big actions, not a sad
-        # "Конфиг не выбран" panel.
-        if not self.configs:
-            self._goto("home")  # routes to onboarding via empty-state hijack
+        # A clean install opens on the same home screen as everyone else's:
+        # with no server yet it shows what to do first (home_v2.EmptyCard).
         self.nav.set_active("home")
+        if not self.configs:
+            # Otherwise the first button in the tab order opens with a focus
+            # ring on it, as if something had been pressed already.
+            self.stack.setFocus()
 
         # Kick off the initial tray-pings background scan so the
         # quick-connect block appears within a few seconds of startup.
@@ -1288,7 +1287,7 @@ class MainWindow(QMainWindow):
 
     def _wire_signals(self) -> None:
         self.home_page.connect_clicked.connect(self._on_connect_click)
-        self.home_page.card_clicked.connect(self._on_open_picker)
+        self.home_page.card_clicked.connect(self._on_open_servers)
         self.settings_page.sites_clicked.connect(self._on_edit_sites)
         self.settings_page.logs_clicked.connect(lambda: self._goto("logs"))
         self.settings_page.diagnostics_clicked.connect(self._on_open_diagnostics)
@@ -1307,21 +1306,19 @@ class MainWindow(QMainWindow):
             lambda: self._start_update_check(interactive=True)
         )
         self.logs_page.back_clicked.connect(lambda: self._goto("settings"))
-        self.add_page.back_clicked.connect(lambda: self._goto("home"))
+        self.add_page.back_clicked.connect(lambda: self._goto("servers"))
         self.add_page.config_ready.connect(self._on_add_page_saved)
-        self.add_page.subscription_clicked.connect(self._on_import_subscription)
-        # Onboarding: the two action buttons reuse the existing import-
-        # subscription and add-config-page paths. Same destinations as
-        # the bottom-nav "+" and Settings → Subscription import, just
-        # exposed earlier to brand-new users with zero saved configs.
-        self.onboarding_page.subscription_clicked.connect(self._on_import_subscription)
-        self.onboarding_page.add_config_clicked.connect(self._on_open_add_page)
+        self.add_page.subscription_imported.connect(self._on_subscription_imported)
+        self.servers_page.connect_requested.connect(self._on_server_chosen)
+        self.servers_page.delete_requested.connect(self._on_delete_server)
+        self.servers_page.add_clicked.connect(self._on_open_add_page)
+        self.servers_page.subscription_clicked.connect(self._on_import_subscription)
+        self.servers_page.ping_requested.connect(self._refresh_tray_pings)
+        self.servers_page.refresh_requested.connect(self._on_refresh_subscriptions)
         self.nav.home_clicked.connect(lambda: self._goto("home"))
+        self.nav.servers_clicked.connect(lambda: self._goto("servers"))
         self.nav.stats_clicked.connect(lambda: self._goto("stats"))
         self.nav.settings_clicked.connect(lambda: self._goto("settings"))
-        # Until the Servers page lands (phase 2) the tab opens the server list
-        # the way the home card does.
-        self.nav.servers_clicked.connect(self._on_open_picker)
         self.log_received.connect(self.logs_page.append)
         # v2.2.0: also scan helper logs for socket-exhaustion so we treat it as
         # its own root cause (not a memory leak to reconnect-loop on).
@@ -1336,20 +1333,12 @@ class MainWindow(QMainWindow):
         self.tray.config_selected.connect(self._on_tray_config_picked)
 
     def _goto(self, name: str) -> None:
-        # Empty-state hijack: any "go home" request when the user has
-        # zero saved configs lands on the onboarding screen instead.
-        # The bottom-nav highlight still says "home" so the spatial
-        # model is consistent — onboarding is "what Home looks like
-        # when you haven't done anything yet".
-        if name == "home" and not self.configs:
-            self._fade_to(4)  # onboarding stack index
-            self.nav.set_active("home")
-            return
         target_index, nav_key = {
             "home":     (0, "home"),
             "settings": (1, "settings"),
             "logs":     (2, None),     # no nav highlight for logs
-            "add":      (3, "servers"),
+            "add":      (3, "servers"),  # adding a server is part of Servers
+            "servers":  (4, "servers"),
             "stats":    (5, "stats"),  # v1.15.0
         }.get(name, (0, "home"))
         if target_index == self.stack.currentIndex():
@@ -1407,6 +1396,8 @@ class MainWindow(QMainWindow):
         """
         if not self.configs:
             self._tray_pings = {}
+            self.servers_page.set_pings({})
+            self.servers_page.set_pinging(False)
             return
         from .configs_picker import _PingerThread
 
@@ -1440,11 +1431,24 @@ class MainWindow(QMainWindow):
             # quick-connect top-3.
             active_name = self._active_config.name if self._active_config else ""
             self.tray.set_configs(self.configs, active_name, self._tray_pings)
+            # The Servers tab gets the full set (and re-sorts by speed).
+            self.servers_page.set_pings(self._tray_pings)
+            self.servers_page.set_pinging(False)
 
+        # The Servers tab shows the same measurement as it comes in.
+        self.servers_page.set_pings({}, pending=True)
+        self.servers_page.set_pinging(True)
         self._tray_pinger = _PingerThread(list(self.configs), parent=self)
         self._tray_pinger.pinged.connect(on_pinged)
+        self._tray_pinger.pinged.connect(self._on_tray_pinged)
         self._tray_pinger.finished.connect(on_finished)
         self._tray_pinger.start()
+
+    def _on_tray_pinged(self, name: str, ms) -> None:
+        # Only from the measurement in progress: a result of the one before,
+        # already on its way when that was stopped, must not paint a row.
+        if self.sender() is self._tray_pinger:
+            self.servers_page.set_ping(name, ms)
 
     def _diagnose_component_death(self) -> None:
         """No-op since v3.1.0: sing-box is the single dataplane process, so there
@@ -1509,6 +1513,7 @@ class MainWindow(QMainWindow):
         # and we get the success/failure signal.
         if self._connecting:
             self.tray.set_state("connecting", self._active_config.name if self._active_config else "")
+            self._sync_servers_page()
             return
 
         # Detect external crash of the ACTIVE engine's core process. The core
@@ -1661,6 +1666,16 @@ class MainWindow(QMainWindow):
         self.home_page.set_ping(self._tray_pings.get(active_name),
                                 known=active_name in self._tray_pings)
         self.tray.set_configs(self.configs, active_name, self._tray_pings)
+        self._sync_servers_page()
+
+    def _sync_servers_page(self) -> None:
+        """Hand the Servers tab the current list, the active server and
+        whether it is in use. Cheap when nothing changed — it runs on every
+        refresh tick, so no path that changes the list has to remember it."""
+        self.servers_page.set_configs(
+            self.configs,
+            self._active_config.name if self._active_config else "",
+            self.manager.is_connected() or self._connecting)
 
     def _poll_traffic(self) -> None:
         """Pull the latest cumulative byte counters and feed rates to HomePage.
@@ -2533,66 +2548,166 @@ class MainWindow(QMainWindow):
             return
         self._do_connect()
 
-    def _on_open_picker(self) -> None:
-        current_name = self._active_config.name if self._active_config else ""
-        dlg = ConfigsPickerDialog(self.configs, current_name, self)
-        result = dlg.exec()
-        # Always reload — picker may have mutated saved list via add/remove
-        self.configs = storage.load_configs()
-        if result == ConfigsPickerDialog.Accepted:
-            chosen = dlg.selected_config()
-            if chosen is not None:
-                self._active_config = chosen
-                self.manager.update_settings(last_config_name=chosen.name)
-        else:
-            # User cancelled but may have added/removed — re-sync selection.
-            names = {c.name for c in self.configs}
-            if self._active_config and self._active_config.name not in names:
-                self._active_config = self.configs[0] if self.configs else None
+    def _on_open_servers(self) -> None:
+        """The server card on the home screen: show the list, on the server
+        in use."""
+        if self._active_config is not None:
+            self.servers_page.select(self._active_config.name)
+        self._goto("servers")
+
+    def _on_server_chosen(self, cfg: ProxyConfig) -> None:
+        """"Connect" on the Servers tab (and "Save and connect" on the add
+        page): make this server the one in use and bring the tunnel up on it.
+        Same meaning as picking a server in the tray menu."""
+        if self._connecting:
+            # A connect is in flight, and it reads the active server when it
+            # lands: changing it now would report "connected to B" over a
+            # tunnel to A. Nothing changes; the user picks again in a moment.
+            show_toast(self, tr("srv.busy"), kind="info")
+            return
+        self._goto("home")
+        if self.manager.is_connected():
+            self._on_tray_config_picked(cfg)
+            return
+        self._active_config = cfg
+        self.manager.update_settings(last_config_name=cfg.name)
         self._refresh_home()
-        # Config list may have changed (add/remove) — re-rank for tray
-        # quick-connect block.
-        self._refresh_tray_pings()
+        self._on_connect_click()
+
+    def _on_delete_server(self, cfg: ProxyConfig) -> None:
+        """The Servers tab asked (and the user confirmed) to delete a server.
+        Names are unique in the saved list, so the name identifies it even if
+        the list was re-read from disk since the page drew its rows."""
+        # The page checked this before asking; the tunnel may have come up
+        # on this very server while the question was on screen.
+        in_use = (self._active_config is not None and self._active_config.name == cfg.name
+                  and (self.manager.is_connected() or self._connecting))
+        if in_use:
+            show_toast(self, tr("srv.del_connected_tip"), kind="info")
+            return
+        self.configs[:] = [c for c in self.configs if c.name != cfg.name]
+        storage.save_configs(self.configs)
+        self._tray_pings.pop(cfg.name, None)
+        if self._active_config is not None and self._active_config.name == cfg.name:
+            self._active_config = self.configs[0] if self.configs else None
+            self.manager.update_settings(
+                last_config_name=self._active_config.name if self._active_config else "")
+        self._refresh_home()
+        show_toast(self, tr("srv.deleted", name=one_line(cfg.name, 40)), kind="info")
+
+    def _rebind_active_config(self) -> None:
+        """After the list was replaced: point the active server at its entry
+        in the new list. A merge that updates a server (a provider rotated
+        its address or key) keeps the name and brings a new object; the old
+        one would keep dialling the dead address."""
+        if self._active_config is not None:
+            name = self._active_config.name
+            self._active_config = next((c for c in self.configs if c.name == name),
+                                       self._active_config)
 
     def _on_open_add_page(self) -> None:
-        """Nav-bar '+' switches to the inline AddConfigPage."""
-        self.add_page.reset()
+        """"Add" on the Servers tab or on the empty home screen."""
+        self.add_page.open(MODE_LINK)
         self._goto("add")
 
     def _on_add_page_saved(self, new_cfg: ProxyConfig) -> None:
-        """User filled out AddConfigPage and clicked Save."""
+        """A single server, parsed and named on the add page."""
         merged, _added, _updated = merge_with_prompt(self, self.configs, [new_cfg])
         self.configs[:] = merged
         storage.save_configs(self.configs)
+        self._rebind_active_config()
         # As stored: under "keep both" the new server lives under its own name.
         new_cfg = next((c for c in self.configs if c.outbound == new_cfg.outbound), new_cfg)
-        self._active_config = new_cfg
-        self.manager.update_settings(last_config_name=new_cfg.name)
-        self._goto("home")
-        self._refresh_home()
         # A new server has no ping yet, and the tray's quick-connect list only
         # shows servers that do — without this it stayed invisible there until
         # the next restart.
         self._refresh_tray_pings()
-        show_toast(self, tr("mw.toast_config_added", name=new_cfg.name), kind="success")
+        show_toast(self, tr("mw.toast_config_added", name=one_line(new_cfg.name, 40)),
+                   kind="success")
+        # The button says "Save and connect" — so connect. (If a connect to
+        # another server is in flight, the new one is saved and waits in the list.)
+        self._goto("servers")
+        self._on_server_chosen(new_cfg)
 
     def _on_import_subscription(self) -> None:
-        from .subscription_dialog import SubscriptionDialog
-        dlg = SubscriptionDialog(self)
-        if dlg.exec() != SubscriptionDialog.Accepted:
+        """Every "import a subscription" entry point — Servers, Settings, the
+        home banner, the empty home screen — opens the same page."""
+        self.add_page.open(MODE_SUB)
+        self._goto("add")
+
+    def _subscription_urls(self) -> list[str]:
+        """Every subscription link imported so far, in order, without
+        repeats. Falls back to the single `subscription_url` of installs that
+        predate the list."""
+        from ..core.subscription import is_https_url
+        s = storage.load_settings()
+        urls = [u for u in (s.get("subscription_urls") or []) if u]
+        if not urls and s.get("subscription_url"):
+            urls = [s["subscription_url"]]
+        # https only, as on import: a link saved by an old version (or typed
+        # into settings.json) over http would send its token, and take the
+        # server list back, in the clear.
+        return [u for u in dict.fromkeys(urls) if is_https_url(u)]
+
+    def _on_refresh_subscriptions(self) -> None:
+        """Re-fetch every saved subscription and merge what it returns."""
+        running = getattr(self, "_subs_refresher", None)
+        if running is not None and running.isRunning():
             return
-        imported = dlg.imported_configs()
+        urls = self._subscription_urls()
+        if not urls:
+            show_toast(self, tr("srv.no_subs"), kind="info", duration_ms=5000)
+            return
+        from .sub_workers import SubscriptionsRefresh
+        self.servers_page.set_refreshing(True)
+        self._subs_refresher = SubscriptionsRefresh(urls, parent=self)
+        self._subs_refresher.done.connect(self._on_subs_refreshed)
+        self._subs_refresher.start()
+
+    def _on_subs_refreshed(self, agg: dict) -> None:
+        self._subs_refresher = None
+        self.servers_page.set_refreshing(False)
+        # New servers are added, a subscription's own servers are updated
+        # (providers rotate addresses and keys), nothing is ever deleted — a
+        # failed or partial fetch must not wipe a working list.
+        merged, added, updated = merge_with_prompt(self, self.configs, agg["configs"])
+        if added or updated:
+            self.configs[:] = merged
+            storage.save_configs(self.configs)
+            self._rebind_active_config()
+            self._refresh_tray_pings()
+        if agg["ok"] > 0:
+            import time as _t
+            changes = {"subscription_last_refresh": int(_t.time())}
+            if agg["userinfo"] is not None:
+                changes["subscription_userinfo"] = agg["userinfo"].to_dict()
+            storage.update_settings(changes, fallback=self.manager.settings)
+            self.settings_page.refresh_sub_info()
+            self.home_page.refresh_sub_banner()
+        self._refresh_home()
+        text = tr("srv.refresh_done", ok=agg["ok"], total=agg["total"], added=added, updated=updated)
+        errors = agg["errors"]
+        if errors:
+            text += "\n" + tr("srv.refresh_failed", n=len(errors),
+                              reason=one_line(errors[0][1].title, 80))
+        show_toast(self, text, kind="error" if errors else "success", duration_ms=6000)
+
+    def _on_subscription_imported(self, imported: list) -> None:
+        """The add page fetched (or was given) a subscription and the user
+        pressed "Add to list"."""
         if not imported:
             return
-        # The same source-aware merge as the picker's import: a subscription
-        # may update its own servers, never silently another source's.
+        self._goto("servers")
+        # The source-aware merge: a subscription may update its own servers,
+        # never silently another source's.
         merged, added, replaced = merge_with_prompt(self, self.configs, imported)
         self.configs[:] = merged
         storage.save_configs(self.configs)
+        self._rebind_active_config()
         # Same as a single add: freshly imported servers have no ping, so they
         # were missing from the tray's quick-connect list until a restart.
         self._refresh_tray_pings()
-        # Subscription-Userinfo was just persisted by the dialog — reflect
+        # Subscription-Userinfo was just persisted by the page — reflect
         # the fresh remaining-traffic / expiry in the Settings subtitle + the
         # home-screen expiry banner. (refresh_sub_info lives on SettingsPage;
         # calling it on the window raised AttributeError, which the runtime
@@ -2745,6 +2860,10 @@ class MainWindow(QMainWindow):
         the app-lifetime workers below (ping / probe / connect / update) may
         still be mid-run; requestInterruption()+quit()+wait() each so none is
         deleted while running. Best-effort + bounded — never let cleanup raise."""
+        try:
+            self.add_page.shutdown()
+        except Exception:
+            pass
         for name in ("_connect_worker", "_ip_probe", "_tray_pinger",
                      "_autopick_pinger", "_update_worker"):
             w = getattr(self, name, None)
@@ -2792,6 +2911,7 @@ class MainWindow(QMainWindow):
         Toast the count so the user knows their list grew.
         """
         self.configs = storage.load_configs()
+        self._rebind_active_config()
         self._refresh_home()
         self._refresh_tray_pings()
         msg = (tr("mw.toast_sub_refreshed_one") if count == 1

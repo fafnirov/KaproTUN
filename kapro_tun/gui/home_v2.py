@@ -29,7 +29,7 @@ from ..core import storage
 from ..core.i18n import tr
 from ..core.parser import ProxyConfig
 from . import connection_state as cs
-from . import flags, icons_v2, tokens
+from . import flags, icons_v2, kit, tokens
 from .icons_v2 import IconLabel
 from .widgets import CircleConnectButton
 
@@ -57,6 +57,12 @@ def chip_code(cfg: ProxyConfig) -> str:
         return code.upper()[:2]
     plain = "".join(ch for ch in strip_flag(cfg.name) if ch.isalnum())
     return plain[:2].upper() or "··"
+
+
+def server_meta(cfg: ProxyConfig) -> str:
+    """The second line of a server: "VLESS · host:port"."""
+    proto = cfg.protocol.upper() if len(cfg.protocol) <= 5 else cfg.protocol.capitalize()
+    return f"{proto} · {cfg.outbound.get('server', '?')}:{cfg.outbound.get('server_port', '?')}"
 
 
 def _cap(text: str) -> str:
@@ -226,8 +232,7 @@ class ServerCard(QFrame):
         else:
             self.chip.setText(chip_code(cfg))
             self.name.setText(strip_flag(cfg.name))
-            self.meta.setText(f"{cfg.protocol.upper() if len(cfg.protocol) <= 5 else cfg.protocol.capitalize()}"
-                              f" · {cfg.outbound.get('server', '?')}:{cfg.outbound.get('server_port', '?')}")
+            self.meta.setText(server_meta(cfg))
             self.chevron.set_icon("chevron-down")
         for w in (self, self.chip):
             w.style().unpolish(w)
@@ -560,12 +565,15 @@ class InfoCard(QFrame):
 
 
 class EmptyCard(QFrame):
-    """Shown instead of the info card while there is no server at all."""
+    """Shown where the content would be while there is no server at all: on
+    the home screen instead of the info card, on the Servers tab instead of
+    the list (with its own wording)."""
 
     add_clicked = Signal()
     subscription_clicked = Signal()
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, title: str = "", text: str = "",
+                 add_label: str = "", sub_label: str = ""):
         super().__init__(parent)
         self.setObjectName("ktCard")
         col = QVBoxLayout(self)
@@ -578,11 +586,11 @@ class EmptyCard(QFrame):
         glyph.move(16, 16)
         col.addWidget(badge, 0, Qt.AlignHCenter)
         col.addSpacing(tokens.SP_1)
-        title = QLabel(tr("home.empty_title"))
+        title = QLabel(title or tr("home.empty_title"))
         title.setObjectName("ktEmptyTitle")
         title.setAlignment(Qt.AlignCenter)
         col.addWidget(title)
-        text = QLabel(tr("home.empty_text"))
+        text = QLabel(text or tr("home.empty_text"))
         text.setObjectName("ktEmptyText")
         text.setAlignment(Qt.AlignCenter)
         text.setWordWrap(True)
@@ -591,14 +599,10 @@ class EmptyCard(QFrame):
         actions = QHBoxLayout()
         actions.setSpacing(tokens.SP_2)
         actions.addStretch(1)
-        self.add_btn = QPushButton(tr("home.empty_add"))
-        self.add_btn.setObjectName("ktBtnPrimary")
-        self.add_btn.setIcon(icons_v2.icon("plus", tokens.ICON_SM, tokens.colors().on_accent))
+        self.add_btn = kit.Button(add_label or tr("home.empty_add"), "primary", icon="plus")
         self.add_btn.clicked.connect(self.add_clicked)
         actions.addWidget(self.add_btn)
-        self.sub_btn = QPushButton(tr("home.empty_sub"))
-        self.sub_btn.setObjectName("ktBtnSecondary")
-        self.sub_btn.setIcon(icons_v2.icon("download", tokens.ICON_SM, tokens.colors().text))
+        self.sub_btn = kit.Button(sub_label or tr("home.empty_sub"), "secondary", icon="download")
         self.sub_btn.clicked.connect(self.subscription_clicked)
         actions.addWidget(self.sub_btn)
         actions.addStretch(1)
