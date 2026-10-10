@@ -42,7 +42,10 @@ jobs:
         env:
           # Headless Qt — no display server on the runner.
           QT_QPA_PLATFORM: offscreen
-        run: python -m kapro_tun.scripts.smoke_test
+        # -u and faulthandler: when the suite dies in native code (a Qt
+        # abort, a segfault) the log otherwise stops a screenful early and
+        # names no test.
+        run: python -u -X faulthandler -m kapro_tun.scripts.smoke_test
 
   build:
     name: Build (${{ matrix.os }})
