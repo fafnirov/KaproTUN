@@ -72,14 +72,14 @@ fi
 
 # --- fetch helper ---------------------------------------------------------
 
-# fetch <url> <dest> <min-bytes>
+# fetch <url> <dest> <min-bytes> [max-seconds] [retries]
 fetch() {
-    local url="$1" dest="$2" min="${3:-102400}"
+    local url="$1" dest="$2" min="${3:-102400}" max_time="${4:-900}" retries="${5:-3}"
     note "  [fetch] ${url##*/}"
     # Timeouts are not optional: a host that accepts the connection and
     # then never responds would otherwise hang the whole sync forever.
-    if ! curl -fsSL --connect-timeout 15 --max-time 900 --retry 3 --retry-delay 5 \
-              -o "$dest" "$url"; then
+    if ! curl -fsSL --connect-timeout 15 --max-time "$max_time" --retry "$retries" \
+              --retry-delay 5 -o "$dest" "$url"; then
         rm -f "$dest"
         return 1
     fi
@@ -112,7 +112,11 @@ done
 note "=== wintun ${WINTUN_VERSION} ==="
 # Not required: wintun.net is not blocked in RU, so a client falls back to
 # it cleanly. Worth mirroring anyway for the offline/slow case.
-fetch "https://www.wintun.net/builds/${WINTUN_FILE}" "$TMP_DIR/$WINTUN_FILE" \
+# Short leash, no retries: this file is under 1 MB and optional, and the
+# installer below — the one thing a release must get onto the mirror — waits
+# behind it. With the default 15 min x 4 attempts a stalled wintun.net held
+# the v4.0.1 installer back for the best part of an hour.
+fetch "https://www.wintun.net/builds/${WINTUN_FILE}" "$TMP_DIR/$WINTUN_FILE" 102400 90 0 \
     || note "  [skip] $WINTUN_FILE — clients fall back to wintun.net directly"
 
 # --- our own installer ----------------------------------------------------
