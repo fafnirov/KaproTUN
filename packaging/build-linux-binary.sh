@@ -4,12 +4,13 @@
 # Why a container: a binary built on a new distribution needs that
 # distribution's glibc. Built on ubuntu-latest, the AppImage asked for glibc
 # 2.38 and would not start on Ubuntu 22.04 or Debian 12, while the README
-# promises glibc 2.31+. Debian 11 (bullseye) has exactly glibc 2.31, so what
-# is built here runs there and on everything newer.
+# promises glibc 2.31+. Ubuntu 20.04 has exactly glibc 2.31, so what is built
+# here runs there and on everything newer. (Debian 11 has it too, but its
+# package repositories were retired with its end of life and apt fails.)
 #
-# Run from the repository root, as root, inside debian:bullseye:
+# Run from the repository root, as root, inside ubuntu:20.04:
 #   docker run --rm -v "$PWD":/src -w /src -e HOST_UID=$(id -u) -e HOST_GID=$(id -g) \
-#     debian:bullseye bash packaging/build-linux-binary.sh
+#     ubuntu:20.04 bash packaging/build-linux-binary.sh
 set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
@@ -30,7 +31,7 @@ echo "glibc in the build container: $(ldd --version | head -n1)"
 
 # Python 3.12 from python-build-standalone (via uv): it is built against
 # glibc 2.17 and ships a shared libpython, which is what PyInstaller needs.
-# Debian 11's own Python is 3.9.
+# Ubuntu 20.04's own Python is 3.8.
 curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/opt/uv sh
 export PATH="/opt/uv:$PATH"
 uv python install 3.12

@@ -92,12 +92,12 @@ jobs:
             # "glibc 2.31+" holds only if the binary is BUILT on glibc 2.31:
             # built straight on this runner it needed 2.38 and did not start
             # on Ubuntu 22.04 / Debian 12. So PyInstaller runs inside
-            # Debian 11 (packaging/build-linux-binary.sh); only the AppImage
+            # Ubuntu 20.04 (packaging/build-linux-binary.sh); only the AppImage
             # wrapping happens on the runner.
             build_cmd: |
               docker run --rm -v "$PWD":/src -w /src \
                 -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-                debian:bullseye bash packaging/build-linux-binary.sh
+                ubuntu:20.04 bash packaging/build-linux-binary.sh
               # AppDir layout per AppImage spec
               mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps \
                        AppDir/usr/share/applications
