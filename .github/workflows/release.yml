@@ -42,7 +42,10 @@ jobs:
         env:
           # Headless Qt — no display server on the runner.
           QT_QPA_PLATFORM: offscreen
-        run: python -m kapro_tun.scripts.smoke_test
+        # -u and faulthandler: when the suite dies in native code (a Qt
+        # abort, a segfault) the log otherwise stops a screenful early and
+        # names no test.
+        run: python -u -X faulthandler -m kapro_tun.scripts.smoke_test
 
   build:
     name: Build (${{ matrix.os }})
@@ -85,8 +88,16 @@ jobs:
             # the PyInstaller output into AppDir layout then run
             # appimagetool. The resulting .AppImage is one chmod +x
             # away from running on any glibc-2.31+ distro.
+            #
+            # "glibc 2.31+" holds only if the binary is BUILT on glibc 2.31:
+            # built straight on this runner it needed 2.38 and did not start
+            # on Ubuntu 22.04 / Debian 12. So PyInstaller runs inside
+            # Ubuntu 20.04 (packaging/build-linux-binary.sh); only the AppImage
+            # wrapping happens on the runner.
             build_cmd: |
-              python -m PyInstaller KaproTUN.spec --noconfirm --log-level WARN
+              docker run --rm -v "$PWD":/src -w /src \
+                -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+                ubuntu:20.04 bash packaging/build-linux-binary.sh
               # AppDir layout per AppImage spec
               mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps \
                        AppDir/usr/share/applications

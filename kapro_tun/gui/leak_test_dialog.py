@@ -1,286 +1,237 @@
-"""Modal dialog: 'Проверка утечек' — runs leak_test.run_full_leak_test
-in a worker thread, displays a 4-row pass/fail table.
+"""The leak self-test dialog (Settings → "Check for leaks").
 
-Triggered from SettingsPage 'Проверить утечки' button. Probes can
-take 10-15 s total (network calls + 1 s settle for bash.ws DNS test),
-so we MUST run them off the GUI thread — otherwise the window freezes
-and Windows shows "Не отвечает" in the titlebar.
+Four probes — IPv4, IPv6, DNS, WebRTC — run together off the UI thread; the
+dialog shows a line per probe as soon as the report is in. If a leak comes
+from a protection that is switched off, it offers to switch it on; if IPv6
+leaks although it should be caught, it offers to copy read-only firewall
+diagnostics for a support request.
 
-UI shape:
-    +-------------------------------------------+
-    | Проверка утечек                       [x] |
-    +-------------------------------------------+
-    |                                           |
-    |  Проверяем IPv4, IPv6, DNS, WebRTC…       |  ← while running
-    |  [spinner]                                |
-    |                                           |
-    +-------------------------------------------+
-                       ↓ done ↓
-    +-------------------------------------------+
-    | Проверка утечек                       [x] |
-    +-------------------------------------------+
-    |  ● IPv4   46.17.101.82 (Финляндия)        |
-    |  ● IPv6   заблокирован                    |
-    |  ⚠ DNS    обнаружен ISP-резолвер!         |
-    |       (показать список ↓)                 |
-    |  ● WebRTC STUN заблокирован                |
-    |                                           |
-    |              [Закрыть]                    |
-    +-------------------------------------------+
+Everything a probe returns (addresses, country names, resolver host names) is
+what remote services said, and is shown as plain text.
 
-Colour convention:
-  ●  green   — pass / clean
-  ⚠  amber   — warning / suspected leak
-  ✗  red     — fail / definite leak / probe error
+The probes cannot be interrupted, so they run as a background job that nobody
+waits for (background.py): closing the dialog early is immediate and safe.
 """
 from __future__ import annotations
 
-from typing import Optional
+import threading
+import time
+from typing import Callable, Optional
 
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal
-from PySide6.QtWidgets import (
-    QDialog,
-    QHBoxLayout,
-    QLabel,
-    QProgressBar,
-    QPushButton,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtCore import QTimer, Signal
+from PySide6.QtWidgets import QApplication, QWidget
 
 from ..core import leak_test
 from ..core.i18n import tr
-from . import styles
+from . import kit
+from .background import Background
+from .merge_prompt import one_line
+
+_WATCHDOG_MS = 25_000
+
+# The probes' blocking calls get a process-wide socket timeout while they
+# run. Runs can overlap (the dialog closed and opened again before the first
+# finished), so the timeout is set by the first and put back by the last —
+# not saved and restored by each, which could leave it set for good.
+_timeout_lock = threading.Lock()
+_timeout_users = 0
+_timeout_before: Optional[float] = None
 
 
-class _LeakTestWorker(QObject):
-    """Runs the probes off the GUI thread.
+def _probe_timeout(enter: bool) -> None:
+    global _timeout_users, _timeout_before
+    import socket
+    with _timeout_lock:
+        if enter:
+            if _timeout_users == 0:
+                _timeout_before = socket.getdefaulttimeout()
+                socket.setdefaulttimeout(8.0)
+            _timeout_users += 1
+        else:
+            _timeout_users = max(0, _timeout_users - 1)
+            if _timeout_users == 0:
+                socket.setdefaulttimeout(_timeout_before)
 
-    v1.16.10: probes now run in parallel inside run_full_leak_test
-    (ThreadPoolExecutor with 4 workers). The worker just delegates
-    and emits the final report — no per-step progress because all
-    probes are in flight simultaneously and "finish in arbitrary
-    order".
-    """
-    finished = Signal(object)  # leak_test.LeakTestReport
+
+class _LeakTestRun(Background):
+    finished = Signal(object)   # leak_test.LeakTestReport
 
     def __init__(self, socks_proxy: Optional[str]):
         super().__init__()
         self._socks_proxy = socks_proxy
 
-    def run(self) -> None:
-        # Belt-and-braces global socket timeout. requests honours its
-        # own `timeout=`, but underlying socket ops can still block
-        # longer at SOCKS handshake / DNS chain edge cases.
-        # setdefaulttimeout caps every blocking call thread-wide.
-        import socket as _socket
-        _orig_timeout = _socket.getdefaulttimeout()
-        _socket.setdefaulttimeout(8.0)
-
+    def _work(self) -> Callable[[], None]:
+        _probe_timeout(True)
         try:
             report = leak_test.run_full_leak_test(self._socks_proxy)
-        except Exception as e:  # safety net — never let worker crash silently
+        except Exception as e:      # never let the job die silently
             report = leak_test.LeakTestReport()
-            report.ipv4 = leak_test.IPv4Result(
-                error=f"{type(e).__name__}: {e}"
-            )
+            report.ipv4 = leak_test.IPv4Result(error=f"{type(e).__name__}: {e}")
         finally:
-            _socket.setdefaulttimeout(_orig_timeout)
-        self.finished.emit(report)
+            _probe_timeout(False)
+        return lambda: self.finished.emit(report)
 
 
-class LeakTestDialog(QDialog):
-    """The Settings → 'Проверить утечки' dialog."""
+class _ResultRow(kit.ResultLine):
+    """A probe's line, with the verdicts named the way the dialog thinks."""
 
+    def __init__(self, name: str, parent: Optional[QWidget] = None):
+        super().__init__(name, parent)
+        self._detail = self.text
+
+    def set_pass(self, detail: str) -> None:
+        self.set_result("ok", detail)
+
+    def set_warn(self, detail: str) -> None:
+        self.set_result("warn", detail)
+
+    def set_fail(self, detail: str) -> None:
+        self.set_result("fail", detail)
+
+    def set_waiting(self) -> None:
+        self.set_result("wait", "…")
+
+
+class LeakTestDialog(kit.OverlayDialog):
     def __init__(self, socks_proxy: Optional[str], manager=None,
                  parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.setWindowTitle(tr("leak.title"))
-        self.setModal(True)
-        self.setMinimumWidth(440)
-        # Manager lets us flip a protection setting in-place when the test
-        # finds a leak that's only leaking because its toggle is off.
+        super().__init__(parent, wide=True)
+        self._socks_proxy = socks_proxy
         self._manager = manager
         self._fixable: list = []
         self._action: Optional[str] = None  # "enable" | "diag"
+        self._run: Optional[_LeakTestRun] = None
+        self._started_at = 0.0
 
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(20, 20, 20, 20)
-        self._layout.setSpacing(12)
+        self.head("droplet", tr("leak.title"), " ", tone="accent")
+        self._progress = kit.Progress()
+        self.add_widget(self._progress)
 
-        # ----- Running state: caption + indeterminate progress -----
-        # v1.16.10: caption updates per step ("Проверяем IPv4…" → "IPv6…"
-        # → "DNS…" → "WebRTC…") so user can see exactly which probe
-        # is currently in flight. If something hangs, the caption tells
-        # us which probe is at fault — vital for debugging since the
-        # spinner alone is opaque.
-        connected = socks_proxy is not None
-        if not connected:
-            initial_caption = tr("leak.caption_no_vpn")
-        else:
-            initial_caption = tr("leak.caption_running")
-        self._running_caption = QLabel(initial_caption)
-        self._running_caption.setWordWrap(True)
-        self._layout.addWidget(self._running_caption)
-
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 0)  # indeterminate "barber pole"
-        self._layout.addWidget(self._progress)
-
-        # ----- Result rows (created hidden, revealed when worker done) -----
         self._row_ipv4 = _ResultRow("IPv4")
         self._row_ipv6 = _ResultRow("IPv6")
         self._row_dns = _ResultRow("DNS")
-        self._row_webrtc = _ResultRow("WebRTC STUN")
-        for row in (self._row_ipv4, self._row_ipv6,
-                    self._row_dns, self._row_webrtc):
-            row.setVisible(False)
-            self._layout.addWidget(row)
+        self._row_webrtc = _ResultRow("WebRTC")
+        self._rows = (self._row_ipv4, self._row_ipv6, self._row_dns, self._row_webrtc)
+        from PySide6.QtWidgets import QVBoxLayout
+        box = QVBoxLayout()
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(0)
+        for row in self._rows:
+            box.addWidget(row)
+        self._row_webrtc.setProperty("last", "true")
+        self.body.addLayout(box)
 
-        # DNS detail panel — folds out under the DNS row when leak found.
-        self._dns_detail = QTextEdit()
-        self._dns_detail.setReadOnly(True)
-        self._dns_detail.setFixedHeight(110)
+        # Which resolvers answered, when a DNS leak is suspected.
+        self._dns_detail = kit.Report(height=92)
         self._dns_detail.setVisible(False)
-        self._layout.addWidget(self._dns_detail)
+        self.add_widget(self._dns_detail)
 
-        # ----- One-click fix (v1.19.3) — shown only when a detected leak is
-        # leaking *because its protection toggle is off*, so enabling it
-        # actually fixes it. Turns the leak test from "reports a problem"
-        # into "fixes the problem".
-        self._fix_caption = QLabel("")
-        self._fix_caption.setWordWrap(True)
+        self._fix_caption = self.add_text("")
         self._fix_caption.setVisible(False)
-        self._layout.addWidget(self._fix_caption)
-        self._fix_btn = QPushButton(tr("leak.fix_enable_btn"))
-        self._fix_btn.setObjectName("primary")
+        self._fix_btn = kit.Button(tr("leak.fix_enable_btn"), "secondary", icon="shield-check")
         self._fix_btn.setVisible(False)
         self._fix_btn.clicked.connect(self._on_action_clicked)
-        self._layout.addWidget(self._fix_btn)
+        self.add_widget(self._fix_btn)
 
-        # ----- Close button at the bottom -----
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        self._close_btn = QPushButton(tr("leak.close_btn"))
-        self._close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(self._close_btn)
-        self._layout.addLayout(btn_row)
+        self.add_actions(
+            [("again", tr("leak.again_btn"), "secondary"), ("close", tr("leak.close_btn"), "primary")],
+            default="close", icons={"again": "refresh"},
+            handlers={"again": self._start, "close": self.accept})
+        self._again_btn = self.buttons["again"]
 
-        # ----- Kick off the worker -----
-        self._thread = QThread(self)
-        self._worker = _LeakTestWorker(socks_proxy)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.finished.connect(self._on_report)
-        self._worker.finished.connect(self._thread.quit)
-        self._thread.start()
-
-        # ----- Watchdog (v1.16.9) ----------------------------------------
-        # Probes have wallclock budgets in code: IPv4 ≤12 s (2 endpoints
-        # × 6 s), IPv6 ≤4 s, DNS ≤10×2 s lookups + 2 s settle + 8 s for
-        # bash.ws GET, WebRTC ≤2 s. Worst-case ≈48 s, typical ≈12 s.
-        # User v1.16.8 report: dialog stuck at "Проверяем…" for 30+ s
-        # — root cause was bare gethostbyname hanging without timeout
-        # (now fixed in leak_test._resolve_with_hard_timeout). Belt-and-
-        # braces: this watchdog fires after 35 s and forcibly shows a
-        # timeout error so the dialog never wedges forever even if some
-        # future probe regression introduces another sleep-style hang.
+        # The probes have their own timeouts, but a hung resolver can outlast
+        # them: after this long, stop the spinner and say so.
         self._watchdog = QTimer(self)
         self._watchdog.setSingleShot(True)
-        # v1.16.10: 25 s budget. Per-probe caps: IPv4 ≤8 s × 2 endpoints,
-        # IPv6 ≤4 s, DNS ≤10×2 s lookups + 2 s settle + 8 s bash.ws =
-        # ≤30 s worst case if everything's at the limit. We use 25 s
-        # as the dialog watchdog because typical run is 8-12 s and a
-        # genuine hang past 25 s means probes are wedged.
-        self._watchdog.setInterval(25_000)
+        self._watchdog.setInterval(_WATCHDOG_MS)
         self._watchdog.timeout.connect(self._on_watchdog_fire)
+        self._start()
+
+    def _connected(self) -> bool:
+        """In TUN mode there is no proxy address to pass, so a missing one
+        does not mean "no VPN": ask the manager."""
+        try:
+            if self._manager is not None:
+                return bool(self._manager.is_connected())
+        except Exception:
+            pass
+        return self._socks_proxy is not None
+
+    def _start(self) -> None:
+        self._again_btn.setEnabled(False)
+        self._action, self._fixable = None, []
+        for w in (self._dns_detail, self._fix_caption, self._fix_btn):
+            w.setVisible(False)
+        self._fix_btn.setEnabled(True)
+        for row in self._rows:
+            row.set_waiting()
+        self.set_head_text(tr("leak.caption_running" if self._connected() else "leak.caption_no_vpn"))
+        self._progress.setVisible(True)
+        self._started_at = time.monotonic()
+        self._run = _LeakTestRun(self._socks_proxy)
+        self._run.finished.connect(self._on_report)
+        self._run.start()
         self._watchdog.start()
 
-    # ----- result handling -------------------------------------------------
-
     def _on_report(self, report: leak_test.LeakTestReport) -> None:
-        # Worker finished cleanly — disarm the watchdog so it doesn't
-        # try to overwrite the results 35 s later.
-        if self._watchdog.isActive():
-            self._watchdog.stop()
-        # Swap the "Проверяем…" caption + progress for the results.
-        self._running_caption.setVisible(False)
+        if self.sender() is not None and self.sender() is not self._run:
+            return      # an earlier run, overtaken by "check again"
+        self._run = None
+        self._watchdog.stop()
         self._progress.setVisible(False)
+        self._again_btn.setEnabled(True)
+        secs = max(1, round(time.monotonic() - self._started_at))
+        self.set_head_text(tr("leak.done_vpn" if self._connected() else "leak.done_no_vpn", s=secs))
 
-        # --- IPv4 ---
         v4 = report.ipv4
         if v4.ok:
-            country_text = f" ({v4.country})" if v4.country else ""
-            self._row_ipv4.set_pass(f"{v4.ip}{country_text}")
+            where = f"{v4.ip} ({v4.country})" if v4.country else f"{v4.ip}"
+            self._row_ipv4.set_pass(one_line(where, 120))
         else:
-            self._row_ipv4.set_fail(v4.error or tr("leak.ipv4_no_ip"))
+            self._row_ipv4.set_fail(one_line(v4.error, 200) if v4.error else tr("leak.ipv4_no_ip"))
 
-        # --- IPv6 ---
         v6 = report.ipv6
         if v6.ipv6_blocked:
             self._row_ipv6.set_pass(tr("leak.ipv6_blocked"))
         else:
-            # We got an IPv6 — that means traffic went out the real ISP.
-            self._row_ipv6.set_fail(
-                tr("leak.ipv6_leak", ip=v6.ip)
-            )
+            self._row_ipv6.set_fail(tr("leak.ipv6_leak", ip=one_line(v6.ip, 60)))
 
-        # --- DNS ---
         dns = report.dns
         if dns.error:
-            self._row_dns.set_fail(tr("leak.dns_error", error=dns.error))
+            self._row_dns.set_fail(tr("leak.dns_error", error=one_line(dns.error, 200)))
         elif not dns.resolvers:
             self._row_dns.set_warn(tr("leak.dns_no_resolvers"))
         elif dns.suspected_leak:
-            self._row_dns.set_fail(
-                tr("leak.dns_suspected", n=len(dns.resolvers))
-            )
-            # Resolver hostnames come from PTR records: text, never markup.
+            self._row_dns.set_fail(tr("leak.dns_suspected", n=len(dns.resolvers)))
             self._dns_detail.setPlainText(self._format_dns_resolvers(dns))
             self._dns_detail.setVisible(True)
         else:
-            self._row_dns.set_pass(
-                tr("leak.dns_clean", n=len(dns.resolvers))
-            )
+            self._row_dns.set_pass(tr("leak.dns_clean", n=len(dns.resolvers)))
 
-        # --- WebRTC ---
-        wr = report.webrtc
-        if wr.stun_blocked:
-            note = tr("leak.webrtc_blocked")
-            self._row_webrtc.set_pass(note)
+        if report.webrtc.stun_blocked:
+            self._row_webrtc.set_pass(tr("leak.webrtc_blocked"))
         else:
             self._row_webrtc.set_fail(tr("leak.webrtc_leak"))
 
-        # Reveal the rows.
-        for row in (self._row_ipv4, self._row_ipv6,
-                    self._row_dns, self._row_webrtc):
-            row.setVisible(True)
-
-        # One-click fix: if a leak is leaking only because its protection
-        # toggle is off, offer to flip it right here.
+        # A leak caused by a protection that is switched off can be fixed
+        # from here. If nothing is switched off and IPv6 still leaks, the
+        # cause is outside the settings — offer diagnostics instead.
         if self._manager is not None:
-            self._fixable = leak_test.fixable_protections(
-                report, self._manager.settings)
+            self._fixable = leak_test.fixable_protections(report, self._manager.settings)
             if self._fixable:
                 self._action = "enable"
                 names = ", ".join(label for _, label in self._fixable)
                 self._fix_caption.setText(tr("leak.fix_off_caption", names=names))
                 self._fix_btn.setText(tr("leak.fix_enable_named", names=names))
-                self._fix_caption.setVisible(True)
-                self._fix_btn.setVisible(True)
+                self._fix_btn.set_icon("shield-check")
             elif not report.ipv6.ipv6_blocked:
-                # IPv6 protection is built into the tunnel and has no switch,
-                # so a leak here is a fault, not a setting. Offer a
-                # diagnostics bundle for support.
                 self._action = "diag"
                 self._fix_caption.setText(tr("leak.diag_caption"))
                 self._fix_btn.setText(tr("leak.diag_copy_btn"))
+                self._fix_btn.set_icon("copy")
+            if self._action:
                 self._fix_caption.setVisible(True)
                 self._fix_btn.setVisible(True)
-
-        # Resize the dialog to fit the new content.
-        self.adjustSize()
 
     def _on_action_clicked(self) -> None:
         if self._action == "enable":
@@ -289,9 +240,8 @@ class LeakTestDialog(QDialog):
             self._copy_diagnostics()
 
     def _enable_protections(self) -> None:
-        """Enable the off-but-needed protection toggles via the manager
-        (updates in-memory settings AND persists), then tell the user to
-        reconnect so the firewall rules actually get armed."""
+        """Switch on what was off (saved through the manager). The firewall
+        rules are armed at connect time, so the user is told to reconnect."""
         if self._manager is None or not self._fixable:
             return
         for key, _label in self._fixable:
@@ -300,113 +250,40 @@ class LeakTestDialog(QDialog):
         self._fix_btn.setEnabled(False)
         self._fix_btn.setText(tr("leak.fix_enabled_btn", names=names))
         self._fix_caption.setText(tr("leak.fix_enabled_caption", names=names))
-        self.adjustSize()
 
     def _copy_diagnostics(self) -> None:
-        """Copy a read-only firewall diagnostics bundle to the clipboard so
-        the user can paste it into a support request. The commands only
-        READ firewall state — nothing is modified."""
-        from PySide6.QtWidgets import QApplication
-
+        """Copy firewall diagnostics for a support request. The commands only
+        read firewall state; nothing is changed."""
         from ..core import ipv6_block
         try:
             diag = ipv6_block.diagnostics()
-        except Exception as e:  # noqa: BLE001 — never let copy crash the dialog
+        except Exception as e:  # noqa: BLE001 — copying must not take the dialog down
             diag = tr("leak.diag_collect_fail", error=e)
         QApplication.clipboard().setText(diag)
         self._fix_btn.setEnabled(False)
         self._fix_btn.setText(tr("leak.diag_copied_btn"))
         self._fix_caption.setText(tr("leak.diag_copied_caption"))
-        self.adjustSize()
 
     def _format_dns_resolvers(self, dns: leak_test.DnsResult) -> str:
-        """Pretty list of DNS resolvers + their geo for the detail panel."""
         lines = []
         for entry in dns.resolvers_meta:
             ip = entry.get("ip", "?")
             country = entry.get("country_name") or entry.get("country", "")
-            asn = entry.get("asn") or ""
-            hostname = entry.get("hostname") or ""
-            tail = " · ".join(p for p in (country, asn, hostname) if p)
-            lines.append(f"• {ip}    {tail}" if tail else f"• {ip}")
+            tail = " · ".join(p for p in (country, entry.get("asn") or "",
+                                          entry.get("hostname") or "") if p)
+            lines.append(one_line(f"{ip}    {tail}" if tail else f"{ip}", 160))
         return "\n".join(lines) if lines else tr("leak.dns_no_data")
 
     def _on_watchdog_fire(self) -> None:
-        """Probes exceeded the 35 s overall budget — show timeout error.
-
-        Worker thread might still be churning (DNS resolver hang etc.).
-        We can't safely kill a QThread, but we CAN stop showing the
-        spinner and present a useful error. Worker becomes a daemon —
-        if it later emits finished, _on_report will harmlessly redraw.
-        """
-        self._running_caption.setVisible(False)
+        """The run is still going; it can finish later and will simply redraw."""
         self._progress.setVisible(False)
-        # Show all rows as ✗ with a generic timeout message — the user
-        # gets something actionable instead of an indefinite spinner.
+        self._again_btn.setEnabled(True)
+        self.set_head_text("")
         self._row_ipv4.set_fail(tr("leak.timeout_ipv4"))
         self._row_ipv6.set_fail(tr("leak.timeout"))
         self._row_dns.set_fail(tr("leak.timeout_dns"))
         self._row_webrtc.set_fail(tr("leak.timeout"))
-        for row in (self._row_ipv4, self._row_ipv6,
-                    self._row_dns, self._row_webrtc):
-            row.setVisible(True)
-        self.adjustSize()
 
-    def closeEvent(self, event) -> None:  # noqa: N802
-        # Disarm watchdog so it doesn't fire on a half-dead dialog.
-        if self._watchdog.isActive():
-            self._watchdog.stop()
-        # Make sure the worker thread tears down cleanly before the dialog
-        # is destroyed — otherwise Qt warns "QThread destroyed while still
-        # running" on exit.
-        if self._thread.isRunning():
-            self._thread.quit()
-            self._thread.wait(3000)
-        super().closeEvent(event)
-
-
-# ===== Helper widget: one result row ====================================
-
-class _ResultRow(QWidget):
-    """A single ●/⚠/✗ label + caption + detail row."""
-
-    def __init__(self, name: str, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        self._badge = QLabel("●")
-        self._badge.setFixedWidth(20)
-        self._badge.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self._badge)
-
-        self._name = QLabel(name)
-        self._name.setFixedWidth(96)
-        self._name.setStyleSheet("font-weight: 600;")
-        layout.addWidget(self._name)
-
-        self._detail = QLabel("…")
-        # Shows what remote services answered (IP, country, error text).
-        self._detail.setTextFormat(Qt.PlainText)
-        self._detail.setWordWrap(True)
-        layout.addWidget(self._detail, stretch=1)
-
-    def set_pass(self, detail: str) -> None:
-        self._badge.setText("●")
-        self._badge.setStyleSheet(f"color: {styles.ACCENT}; font-size: 14pt;")
-        self._detail.setText(detail)
-        self._detail.setStyleSheet("")
-
-    def set_warn(self, detail: str) -> None:
-        self._badge.setText("⚠")
-        # Use ACCENT (amber) — matches the brand and reads as "caution"
-        self._badge.setStyleSheet(f"color: {styles.ACCENT}; font-size: 12pt;")
-        self._detail.setText(detail)
-        self._detail.setStyleSheet("")
-
-    def set_fail(self, detail: str) -> None:
-        self._badge.setText("✗")
-        self._badge.setStyleSheet(f"color: {styles.DANGER}; font-size: 12pt; font-weight: bold;")
-        self._detail.setText(detail)
-        self._detail.setStyleSheet(f"color: {styles.DANGER};")
+    def done(self, result: int) -> None:
+        self._watchdog.stop()
+        super().done(result)

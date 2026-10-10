@@ -1,9 +1,9 @@
 """The one way servers get into the saved list — with the user asked whenever
 an incoming server would take over a saved one that came from somewhere else.
 
-Every entry point uses merge_with_prompt(): subscription import (from the
-picker, Settings, the home banner, onboarding), subscription refresh, and
-adding a single server by hand. They used to carry their own copies of a
+Every entry point uses merge_with_prompt(): subscription import (from
+Servers, Settings, the home banner, the empty home screen), subscription
+refresh, and adding a single server by hand. They used to carry their own copies of a
 "replace by name" loop; migrating one and missing another left the hole open
 on the path most people actually use.
 """
@@ -11,8 +11,15 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox, QWidget
+from PySide6.QtGui import QFont, QFontMetrics
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ..core.i18n import tr
 from ..core.parser import ProxyConfig
@@ -33,25 +40,71 @@ def _where(cfg: ProxyConfig) -> str:
     return one_line(f"{cfg.outbound.get('server', '?')}:{cfg.outbound.get('server_port', '?')}")
 
 
+def conflict_lines(conflicts: list) -> list[tuple[str, str, str]]:
+    """(name, saved address, incoming address) for each conflict shown. When
+    the address is the same and something else differs (a key, a transport),
+    the third value says so instead of repeating the address."""
+    from .home_v2 import strip_flag
+    out = []
+    for saved, new in conflicts[:_MAX_SHOWN]:
+        old, now = _where(saved), _where(new)
+        out.append((one_line(strip_flag(saved.name), 40), old,
+                    tr("conflict.same_addr") if now == old else now))
+    return out
+
+
+def build_conflict_dialog(parent: Optional[QWidget], conflicts: list):
+    """The question shown over the window. Every value in it is the sender's
+    text and is shown as text, one line each."""
+    from . import kit, tokens
+    from .home_v2 import ElidedLabel
+    from .icons_v2 import IconLabel
+
+    dlg = kit.OverlayDialog(parent, wide=True)
+    dlg.head("alert-triangle", tr("picker.conflict_title"), tr("conflict.intro"), tone="accent")
+    diff = QFrame()
+    diff.setObjectName("ktDiff")
+    col = QVBoxLayout(diff)
+    col.setContentsMargins(tokens.SP_3, tokens.SP_2H, tokens.SP_3, tokens.SP_2H)
+    col.setSpacing(tokens.SP_1H)
+    font = QFont(QApplication.font())
+    font.setPixelSize(tokens.FS_SM)
+    font.setWeight(QFont.DemiBold)
+    metrics = QFontMetrics(font)
+    lines = conflict_lines(conflicts)
+    # One width for every name, so the addresses line up in columns.
+    name_w = min(120, max(metrics.horizontalAdvance(name + ":") for name, _o, _n in lines) + 4)
+    for name, old, new in lines:
+        row = QHBoxLayout()
+        row.setSpacing(tokens.SP_1H)
+        cells = []
+        for text, role in ((name + ":", "ktDiffName"), (old, "ktDiffOld"), (new, "ktDiffNew")):
+            cell = ElidedLabel(text)
+            cell.setObjectName(role)
+            cells.append(cell)
+        # Fixed, not the label's own "take whatever is left": the two
+        # addresses share the rest of the row.
+        cells[0].setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        cells[0].setFixedWidth(name_w)
+        row.addWidget(cells[0])
+        row.addWidget(cells[1], stretch=1)
+        row.addWidget(IconLabel("chevron-right", tokens.ICON_XS, "text_tertiary"))
+        row.addWidget(cells[2], stretch=1)
+        col.addLayout(row)
+    if len(conflicts) > _MAX_SHOWN:
+        col.addWidget(kit.label(tr("picker.conflict_more", n=len(conflicts) - _MAX_SHOWN), "diffMore"))
+    dlg.add_widget(diff)
+    dlg.add_text(tr("conflict.advice"))
+    dlg.add_actions([("replace", tr("picker.conflict_replace"), "secondary"),
+                     ("keep", tr("picker.conflict_keep"), "primary")], default="keep")
+    return dlg
+
+
 def ask_replace_conflicts(parent: Optional[QWidget], conflicts: list) -> bool:
     """True = replace the saved servers; False = keep both. "Keep both" is the
-    default and what Escape, Enter and closing the window mean: it is the
-    answer that cannot redirect anyone's traffic."""
-    shown = [f"• {one_line(saved.name, 40)}: {_where(saved)} → {_where(new)}"
-             for saved, new in conflicts[:_MAX_SHOWN]]
-    if len(conflicts) > _MAX_SHOWN:
-        shown.append(tr("picker.conflict_more", n=len(conflicts) - _MAX_SHOWN))
-    box = QMessageBox(parent)
-    box.setIcon(QMessageBox.Warning)
-    box.setWindowTitle(tr("picker.conflict_title"))
-    box.setTextFormat(Qt.PlainText)
-    box.setText(tr("picker.conflict_body", items="\n".join(shown)))
-    keep = box.addButton(tr("picker.conflict_keep"), QMessageBox.AcceptRole)
-    swap = box.addButton(tr("picker.conflict_replace"), QMessageBox.DestructiveRole)
-    box.setDefaultButton(keep)
-    box.setEscapeButton(keep)
-    box.exec()
-    return box.clickedButton() is swap
+    default and what Escape, Enter and a click outside the dialog mean: it is
+    the answer that cannot redirect anyone's traffic."""
+    return build_conflict_dialog(parent, conflicts).ask() == "replace"
 
 
 def merge_with_prompt(

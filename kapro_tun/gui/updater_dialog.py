@@ -21,23 +21,16 @@ from typing import Optional
 
 import requests
 
-from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtWidgets import (
-    QApplication,
-    QDialog,
-    QHBoxLayout,
-    QLabel,
-    QProgressBar,
-    QPushButton,
-    QTextBrowser,
-    QVBoxLayout,
-)
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QTextBrowser, QVBoxLayout
 
 from .. import __version__
 from ..core import app_log
 from ..core.i18n import tr
-from ..core.safe_text import esc, link
 from ..core.updater import UpdateInfo
+from . import kit, tokens
+from .background import Background
+from .merge_prompt import one_line
 
 
 SETUP_FILENAME = "KaproTUN-Setup.exe"
@@ -75,9 +68,43 @@ class _NotesBrowser(QTextBrowser):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("ktNotes")
+        self.setFrameShape(QFrame.NoFrame)
         self.setOpenExternalLinks(False)
         self.setOpenLinks(False)
         self.anchorClicked.connect(self._open_if_web)
+        self._theme_links()
+
+    def setMarkdown(self, text: str) -> None:  # noqa: N802 — Qt's name
+        super().setMarkdown(text)
+        self._theme_links()
+
+    def _theme_links(self) -> None:
+        """Give links the theme's accent. Notes loaded as Markdown ignore
+        both the style sheet and the widget palette for this, so the colour
+        is written into the link fragments themselves."""
+        from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
+        accent = QColor(tokens.colors().accent_text)
+        doc = self.document()
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid() and frag.charFormat().isAnchor():
+                    cursor = QTextCursor(doc)
+                    cursor.setPosition(frag.position())
+                    cursor.setPosition(frag.position() + frag.length(), QTextCursor.KeepAnchor)
+                    fmt = QTextCharFormat()
+                    fmt.setForeground(accent)
+                    cursor.mergeCharFormat(fmt)
+                it += 1
+            block = block.next()
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        if event.type() == event.Type.StyleChange:
+            self._theme_links()
+        super().changeEvent(event)
 
     def loadResource(self, _kind, _name):  # noqa: N802 — Qt override
         return None
@@ -99,10 +126,19 @@ class _Cancelled(Exception):
     promptly and leaves no partial installer behind."""
 
 
-class _DownloadWorker(QThread):
+class _DownloadWorker(Background):
+    """Downloads the installer off the UI thread. A background job rather than
+    a QThread: a stalled read can outlast any wait the dialog is willing to
+    make, and a QThread still running when its dialog (or the app) goes away
+    aborts the process."""
+
     progress = Signal(int, int)   # bytes_done, bytes_total
     finished_ok = Signal(str)     # path to downloaded file
     failed = Signal(str)
+
+    def _work(self):
+        self.run()
+        return lambda: None
 
     def __init__(self, urls: list[str], dest: Path, parent=None,
                  expect_sha256: str = ""):
@@ -185,79 +221,69 @@ class _DownloadWorker(QThread):
 
 # --- dialog ---------------------------------------------------------------
 
-class UpdaterDialog(QDialog):
-    """One-stop update flow: changelog → click → download → relaunch."""
+class UpdaterDialog(kit.OverlayDialog):
+    """One-stop update flow: what is new → one click → download → relaunch."""
 
     def __init__(self, info: UpdateInfo, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, wide=True)
         self._info = info
         self._download_worker: Optional[_DownloadWorker] = None
         self._setup_path: Optional[Path] = None
         self._cancelled = False
 
-        self.setWindowTitle(tr("upd.window_title"))
-        self.resize(540, 480)
+        self.head("update", tr("upd.window_title"),
+                  tr("upd.versions", new=one_line(info.version, 30), cur=__version__), tone="accent")
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
-
-        title = QLabel(f"KaproTUN v{info.version}")
-        title.setTextFormat(Qt.PlainText)
-        title.setObjectName("h1")
-        layout.addWidget(title)
-
-        sub = QLabel(tr("upd.current_version", version=__version__))
-        sub.setObjectName("muted")
-        layout.addWidget(sub)
-
-        notes_label = QLabel(tr("upd.whats_new"))
-        notes_label.setObjectName("h2")
-        layout.addWidget(notes_label)
-
-        # Render release notes — markdown, headings + lists. _NotesBrowser
-        # loads no images and opens only web links.
+        panel = QFrame()
+        panel.setObjectName("ktPanel")
+        col = QVBoxLayout(panel)
+        col.setContentsMargins(tokens.SP_3, tokens.SP_3, tokens.SP_3, tokens.SP_3)
+        col.setSpacing(tokens.SP_2)
+        col.addWidget(kit.label(tr("upd.whats_new"), "label"))
         self.notes = _NotesBrowser()
+        self.notes.setFixedHeight(190)
         self.notes.setMarkdown(info.notes or "_no release notes_")
-        layout.addWidget(self.notes, stretch=1)
+        col.addWidget(self.notes)
+        # The release page: only if it is an ordinary web address.
+        self.release_link = kit.LinkButton(tr("upd.release_page"), info.url)
+        self.release_link.setVisible(bool(self.release_link.url()))
+        col.addWidget(self.release_link)
+        self.add_widget(panel)
 
-        self.status_label = QLabel("")
-        self.status_label.setObjectName("muted")
-        self.status_label.setWordWrap(True)
-        self.status_label.setVisible(False)
-        layout.addWidget(self.status_label)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
-        self.progress_bar.setTextVisible(True)
+        status = QHBoxLayout()
+        self.status_label = kit.label("", "textSm", wrap=True)
+        status.addWidget(self.status_label, stretch=1)
+        self.percent_label = kit.label("", "strong")
+        status.addWidget(self.percent_label)
+        self._status_box = QFrame()
+        self._status_box.setLayout(status)
+        status.setContentsMargins(0, 0, 0, 0)
+        self._status_box.setVisible(False)
+        self.add_widget(self._status_box)
+        self.progress_bar = kit.Progress()
+        self.progress_bar.set_fraction(0.0)
         self.progress_bar.setVisible(False)
-        layout.addWidget(self.progress_bar)
+        self.add_widget(self.progress_bar)
 
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        self.later_btn = QPushButton(tr("upd.later_button"))
-        self.later_btn.clicked.connect(self.reject)
-        self.update_btn = QPushButton(tr("upd.update_button", version=info.version))
-        self.update_btn.setObjectName("primary")
-        self.update_btn.clicked.connect(self._start_download)
-        btn_row.addWidget(self.later_btn)
-        btn_row.addWidget(self.update_btn)
-        layout.addLayout(btn_row)
-
-    # --- download flow ----------------------------------------------------
+        self.add_actions(
+            [("later", tr("upd.later_button"), "secondary"),
+             ("update", tr("upd.update_button", version=one_line(info.version, 30)), "primary")],
+            # "Later" is what Enter means: updating downloads and runs an
+            # installer and drops the tunnel — that takes a deliberate press.
+            default="later", handlers={"later": self.reject, "update": self._start_download})
+        self.later_btn, self.update_btn = self.buttons["later"], self.buttons["update"]
 
     def _cancel_download(self) -> None:
         """Abort any in-flight download and make the result slots inert.
 
         Dismissing this dialog MUST mean "don't update". Before v3.3.7 the
-        worker kept running after Esc/[X]: when it finished, _on_downloaded
-        still Popen'd the installer and quit the app — tearing down the user's
+        worker kept running after Esc: when it finished, _on_downloaded still
+        launched the installer and quit the app — tearing down the user's
         active tunnel and silently reinstalling, against an explicit "no".
 
-        Idempotent and safe when no download is running. The worker is kept
-        referenced (and parented) so it is never destroyed while still running;
-        the bounded wait just gives its stream a moment to unwind."""
+        Idempotent and safe when no download is running. The bounded wait
+        just gives the stream a moment to unwind; a download that is stuck in
+        a read longer than that ends on its own, unheard."""
         self._cancelled = True
         worker = self._download_worker
         if worker is not None and worker.isRunning():
@@ -265,26 +291,28 @@ class UpdaterDialog(QDialog):
             worker.wait(3000)   # abort lands on the next chunk; bounded join
 
     def reject(self) -> None:
-        # Covers every "no": the Later button, Esc, and the [X] (QDialog's
-        # default closeEvent calls reject()).
+        # Every "no": the Later button, Esc, a click outside the card.
         self._cancel_download()
         super().reject()
 
+    def _set_status(self, text: str, tone: str = "") -> None:
+        self._status_box.setVisible(True)
+        self.status_label.setText(text)
+        self.status_label.setProperty("tone", tone)
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
+
     def _start_download(self) -> None:
+        self._cancelled = False
         self.update_btn.setEnabled(False)
-        # Leave "Later" clickable: it's the explicit way to back out mid-
-        # download now that dismissing actually cancels (v3.3.7).
-        self.status_label.setVisible(True)
-        self.status_label.setText(
-            tr("upd.downloading", filename=SETUP_FILENAME, version=self._info.version)
-        )
+        self._set_status(tr("upd.downloading", filename=SETUP_FILENAME,
+                            version=one_line(self._info.version, 30)))
+        self.percent_label.setText("")
+        self.progress_bar.set_fraction(0.0)
         self.progress_bar.setVisible(True)
 
-        # %TEMP%\KaproTUN-Setup-v0.1.X.exe — version in name so multiple
-        # downloads don't collide.
         temp_dir = Path(tempfile.gettempdir())
         dest = temp_dir / f"KaproTUN-Setup-v{self._info.version}.exe"
-
         self._download_worker = _DownloadWorker(
             _setup_sources(self._info.version), dest, parent=self,
             expect_sha256=getattr(self._info, "setup_sha256", ""),
@@ -297,30 +325,24 @@ class UpdaterDialog(QDialog):
     def _on_progress(self, done: int, total: int) -> None:
         if self._cancelled:
             return
+        mb = 1024 * 1024
         if total > 0:
-            pct = int(done * 100 / total)
-            self.progress_bar.setValue(pct)
-            mb_done = done // (1024 * 1024)
-            mb_total = total // (1024 * 1024)
-            self.status_label.setText(
-                tr("upd.progress_pct", done=mb_done, total=mb_total, pct=pct)
-            )
+            self.progress_bar.set_fraction(done / total)
+            self._set_status(tr("upd.progress_of", done=f"{done / mb:.1f}", total=f"{total / mb:.1f}"))
+            self.percent_label.setText(f"{int(done * 100 / total)} %")
         else:
-            mb = done // (1024 * 1024)
-            self.status_label.setText(tr("upd.progress_mb", mb=mb))
+            self.progress_bar.set_fraction(None)
+            self._set_status(tr("upd.progress_mb", mb=done // mb))
+            self.percent_label.setText("")
 
     def _on_downloaded(self, path: str) -> None:
-        # Hard gate: NEVER launch the installer + quit the app if the user
-        # dismissed the dialog. The worker already stays silent on cancel; this
-        # also catches a signal that was queued before the cancel landed.
         if self._cancelled:
             return
         self._setup_path = Path(path)
-        self.status_label.setText(tr("upd.launching"))
-        self.progress_bar.setRange(0, 0)  # indeterminate spinner
-
-        # Launch the installer in silent mode, detached so it survives
-        # our QApplication.quit().
+        self._set_status(tr("upd.launching"))
+        self.percent_label.setText("")
+        self.progress_bar.set_fraction(None)
+        # The installer takes over in silent mode and starts the new version.
         try:
             subprocess.Popen(
                 [str(self._setup_path), "--silent"],
@@ -333,22 +355,15 @@ class UpdaterDialog(QDialog):
         except OSError as e:
             self._on_failed(tr("upd.launch_failed", error=e))
             return
-
-        # Bow out so the installer can overwrite our exe.
         self.accept()
         QApplication.quit()
 
     def _on_failed(self, msg: str) -> None:
         if self._cancelled:
             return
-        self.status_label.setText(
-            # `msg` can quote a server's HTTP reason phrase; the release URL
-            # comes from an API response. Neither is markup of ours.
-            f"<span style='color:#ef4444'>{tr('upd.error_prefix', msg=esc(msg))}</span><br>"
-            + link(self._info.url, "color:#f59e0b", tr("upd.open_release_page"))
-        )
-        self.status_label.setTextFormat(Qt.RichText)
-        self.status_label.setOpenExternalLinks(True)
+        # The message quotes hosts and exception texts: one plain line.
+        self._set_status(tr("upd.error_prefix", msg=one_line(msg, 300)), tone="error")
+        self.percent_label.setText("")
         self.progress_bar.setVisible(False)
         self.later_btn.setEnabled(True)
         self.update_btn.setEnabled(True)

@@ -1,7 +1,6 @@
 """Main application window — compact, mobile-app-style single-screen layout."""
 from __future__ import annotations
 
-import sys
 import time
 from typing import Optional
 
@@ -16,20 +15,7 @@ from PySide6.QtCore import (
 from PySide6.QtWidgets import QGraphicsOpacityEffect
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
-    QButtonGroup,
-    QCheckBox,
-    QComboBox,
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
     QMainWindow,
-    QMessageBox,
-    QPlainTextEdit,
-    QPushButton,
-    QRadioButton,
-    QScrollArea,
-    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -38,895 +24,35 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..core.i18n import tr
 from ..core import (
-    admin, app_log, autostart, net_conflicts, sing_box_config,
-    sing_box_installer, storage, updater, xray_stats,
+    app_log, net_conflicts, sing_box_config, storage, updater, xray_stats,
 )
 from ..core import controller as _controller
 from ..core.controller import MODE_TUN
-from ..core.safe_text import esc, no_markup
-from .merge_prompt import merge_with_prompt
+from .merge_prompt import merge_with_prompt, one_line
 from ..core.controller import ConnectionManager as _CM
 _HEALTH_OK, _HEALTH_DEGRADED, _HEALTH_DEAD = (
     _CM.HEALTH_OK, _CM.HEALTH_DEGRADED, _CM.HEALTH_DEAD)
 from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
 from ..core.parser import ProxyConfig
-from . import icons
-from .add_page import AddConfigPage
-from .onboarding import OnboardingPage
+from . import icons, kit
+from .add_server_v2 import MODE_LINK, MODE_SUB, AddServerPage
+from .servers_page import ServersPage
 from .subscription_autorefresh import SubscriptionAutoRefresh
-from .config_dialog import AddConfigDialog
 from .stats_page import StatsPage
-from .world_map import WorldMapWidget
 from . import window_resize
-from .configs_picker import ConfigsPickerDialog
 from .installer_dialog import (ensure_geoip_ru_cached, ensure_sing_box_installed)
 from .sites_dialog import SitesDialog
-from .sparkline import TrafficSparkline
+from .home_v2 import HomePage
+from .settings_v2 import LogsPage, SettingsPage
 from .titlebar import TitleBar
 from .toast import show_toast
 from .tray import TrayManager
-from .widgets import CircleConnectButton, ConfigCard, NavBar, StatusLabel, TrafficLegend
+from .widgets import NavBar
 from . import connection_state
 
 
 # ----- Pages ---------------------------------------------------------------
-
-class HomePage(QWidget):
-    """Connect circle + active config card."""
-
-    connect_clicked = Signal()
-    card_clicked = Signal()
-    banner_clicked = Signal()  # expiry banner → open subscription import
-
-    def __init__(self, parent: Optional[QWidget] = None, compact: bool = False):
-        super().__init__(parent)
-        self.setObjectName("page")
-        self._compact = compact
-        # Compact preset (low-height screens): tighter vertical rhythm + a
-        # smaller hero circle / graph. Every key action stays reachable.
-        pad_v = 10 if compact else 16
-        self._gap_circle = 14 if compact else 28
-        self._gap_map = 8 if compact else 14
-        self._gap_bottom = 12 if compact else 24
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, pad_v, 24, pad_v)
-        layout.setSpacing(0)
-
-        # Title
-        title = QLabel("KaproTUN")
-        title.setObjectName("title")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
-
-        # Subscription expiry/quota banner — only shown when the provider's
-        # Subscription-Userinfo says the sub is low/expired (<=3 days or <=10%
-        # traffic). Clickable → opens the subscription import to renew.
-        self.sub_banner = QLabel()
-        self.sub_banner.setTextFormat(Qt.RichText)
-        self.sub_banner.setWordWrap(True)
-        self.sub_banner.setAlignment(Qt.AlignCenter)
-        self.sub_banner.setOpenExternalLinks(False)
-        self.sub_banner.linkActivated.connect(lambda _l: self.banner_clicked.emit())
-        self.sub_banner.setVisible(False)
-        layout.addSpacing(6)
-        layout.addWidget(self.sub_banner)
-        self.refresh_sub_banner()
-
-        layout.addStretch(1)
-
-        # Connect button — centered with surrounding stretchers
-        self.circle = CircleConnectButton()
-        self.circle.set_compact(compact)
-        self.circle.clicked.connect(self.connect_clicked)
-        circle_row = QHBoxLayout()
-        circle_row.addStretch(1)
-        circle_row.addWidget(self.circle)
-        circle_row.addStretch(1)
-        layout.addLayout(circle_row)
-        layout.addSpacing(self._gap_circle)
-
-        self.status_label = StatusLabel()
-        layout.addWidget(self.status_label)
-
-        # Public IP / country reveal — shown ~2 seconds after a successful
-        # connect, hidden when idle or connecting. Empty when the probe
-        # fails (so we don't show a misleading "fetching..." that might
-        # never finish). v1.10.0.
-        self.public_ip_label = QLabel("")
-        self.public_ip_label.setAlignment(Qt.AlignCenter)
-        self.public_ip_label.setTextFormat(Qt.RichText)
-        self.public_ip_label.setObjectName("secondary")
-        self.public_ip_label.setVisible(False)
-        layout.addSpacing(2)
-        layout.addWidget(self.public_ip_label)
-
-        # World map with a pin on the active VPN country (v1.14.0).
-        # Centered, hidden until the IP probe resolves a known country
-        # code. Theme follows the user's choice — getter reads settings
-        # at paint time so it auto-updates on theme switch.
-        # v1.14.1: bumped the leading addSpacing from 4 to 14 so the
-        # map visually separates from the IP label above (user reported
-        # they looked merged together — no overlap, just no breathing
-        # room).
-        self.world_map = WorldMapWidget()
-        self.world_map.setVisible(False)
-        map_row = QHBoxLayout()
-        map_row.addStretch(1)
-        map_row.addWidget(self.world_map)
-        map_row.addStretch(1)
-        layout.addSpacing(self._gap_map)
-        layout.addLayout(map_row)
-        layout.addSpacing(8)
-
-        # Live traffic legend — colour-matched ↑/↓ rates (doubles as the
-        # sparkline legend) with fixed-width values so the numbers don't shift
-        # the layout, plus a session-total caption. Visible only while connected.
-        self.traffic = TrafficLegend()
-        self.traffic.setVisible(False)
-        layout.addSpacing(6)
-        layout.addWidget(self.traffic)
-
-        # Sparkline — 1-minute bandwidth history, shown under the numbers when
-        # connected. Hidden when idle.
-        self.sparkline = TrafficSparkline()
-        self.sparkline.set_compact(compact)
-        self.sparkline.setVisible(False)
-        layout.addSpacing(4)
-        layout.addWidget(self.sparkline)
-
-        # v1.14.6: bottom stretch replaced with a small fixed gap so
-        # the map sits right above "Прямые сайты". Previously the
-        # stretch ate ~100 px of empty space when sparkline + traffic
-        # rows were hidden (most of the time — xray Stats API often
-        # returns nothing on TUN-mode connections). Result: a huge
-        # void between the map and "Прямые сайты", which the user
-        # rightly called out. Free vertical space now all goes to the
-        # top stretch (line 83) between the title and the connect
-        # circle — pushes the circle down to vertical centre and the
-        # status/IP/map block hugs the "Прямые сайты" line below.
-        layout.addSpacing(self._gap_bottom)
-
-        # Info row about split routing
-        self._info_label = QLabel()
-        self._info_label.setAlignment(Qt.AlignCenter)
-        self._info_label.setTextFormat(Qt.RichText)
-        self.refresh_sites_count()
-        layout.addWidget(self._info_label)
-        layout.addSpacing(12)
-
-        # Active config card
-        self.config_card = ConfigCard()
-        self.config_card.clicked.connect(self.card_clicked)
-        layout.addWidget(self.config_card)
-
-    def set_state(self, state: str, detail: str = "") -> None:
-        self.circle.set_state(state)
-        self.status_label.set_state(state, detail)
-        if connection_state.normalize(state) != connection_state.CONNECTED:
-            self.traffic.clear()
-            self.traffic.setVisible(False)
-            self.sparkline.setVisible(False)
-            self.sparkline.reset()
-            # Public IP banner + map only make sense while connected;
-            # clear immediately on disconnect/connecting so the user
-            # doesn't briefly see stale data from the previous session.
-            self.public_ip_label.clear()
-            self.public_ip_label.setVisible(False)
-            self.world_map.set_country(None)
-            self.world_map.setVisible(False)
-
-    def set_public_ip(
-        self,
-        ip: str,
-        country_name: str,
-        city: Optional[str] = None,
-        country_code: str = "",
-    ) -> None:
-        """Render the just-fetched public IP + plant a map pin.
-
-        v1.14.0: country_code added so the WorldMapWidget can place
-        the pin. Empty/unknown code → map stays hidden but IP label
-        still shows (graceful degradation when the IP-probe fallback
-        returned a hit without country info — e.g. ipify-only path).
-        """
-        if not ip:
-            self.public_ip_label.clear()
-            self.public_ip_label.setVisible(False)
-            self.world_map.set_country(None)
-            self.world_map.setVisible(False)
-            return
-        # Single line: "Ваш IP: 1.2.3.4 · Нидерланды (Amsterdam)". City
-        # is the optional bit since ipinfo free tier sometimes omits it.
-        place = country_name if country_name else "—"
-        if city:
-            place = f"{country_name} · {city}" if country_name else city
-        self.public_ip_label.setText(
-            f"<span style='color:#71717a'>{tr('mw.your_ip')} </span>"
-            f"<span style='color:#fafafa'>{esc(ip)}</span>"
-            f"<span style='color:#71717a'>  ·  {esc(place)}</span>"
-        )
-        self.public_ip_label.setVisible(True)
-        # Map gets shown only when we have a known country — silent
-        # hide when the probe fallback gave IP-only (httpbin.org).
-        from .world_map import COUNTRY_COORDS
-        if country_code and country_code.upper() in COUNTRY_COORDS:
-            self.world_map.set_country(country_code)
-            self.world_map.setVisible(True)
-        else:
-            self.world_map.set_country(None)
-            self.world_map.setVisible(False)
-
-    def set_traffic(self, up_rate: float, down_rate: float,
-                    up_total: int, down_total: int) -> None:
-        """Refresh the live traffic legend + sparkline. Called once per second."""
-        self.traffic.set_values(up_rate, down_rate, up_total, down_total)
-        self.traffic.setVisible(True)
-        self.sparkline.setVisible(True)
-        self.sparkline.add_sample(up_rate, down_rate)
-
-    def set_config(self, cfg: Optional[ProxyConfig]) -> None:
-        self.config_card.set_config(cfg)
-
-    def refresh_sites_count(self) -> None:
-        sites_count = len(storage.load_sites())
-        self._info_label.setText(
-            f"<span style='color:#a1a1aa'>{tr('mw.direct_sites_prefix')} </span>"
-            f"<span style='color:#fafafa'>{sites_count}</span> "
-            f"<span style='color:#a1a1aa'>{tr('mw.direct_sites_suffix')}</span>"
-        )
-
-    def refresh_sub_banner(self) -> None:
-        """Show a prominent banner only when the subscription is low/expired,
-        per the cached Subscription-Userinfo. Hidden otherwise so a healthy
-        sub adds no clutter. Reads storage at call time so MainWindow can
-        refresh it after every fetch."""
-        banner = getattr(self, "sub_banner", None)
-        if banner is None:
-            return
-        data = storage.load_settings().get("subscription_userinfo")
-        info = None
-        if data:
-            try:
-                from ..core.subscription import SubscriptionInfo
-                info = SubscriptionInfo.from_dict(data)
-            except Exception:
-                info = None
-        if info is None or not info.is_low():
-            banner.setVisible(False)
-            return
-        expired = info.is_expired()
-        text = info.banner_text() or (tr("mw.sub_expired") if expired else tr("mw.sub_expiring"))
-        icon = "⛔" if expired else "⏳"
-        # Red for expired, amber for "running low". Inline style so it works
-        # regardless of the active QSS theme.
-        bg = "#7f1d1d" if expired else "#78350f"
-        fg = "#fecaca" if expired else "#fde68a"
-        link = tr("mw.sub_renew") if expired else tr("mw.sub_extend")
-        banner.setStyleSheet(
-            f"QLabel {{ background:{bg}; color:{fg}; border-radius:8px;"
-            f" padding:8px 12px; font-weight:600; }}"
-        )
-        banner.setText(
-            f"{icon} {text} · "
-            f"<a href='#renew' style='color:#fef3c7'>{link}</a>"
-        )
-        banner.setVisible(True)
-
-
-class SettingsPage(QWidget):
-    """Listen port, auto-proxy toggle, sites editor link, log viewer, about."""
-
-    sites_clicked = Signal()
-    logs_clicked = Signal()
-    diagnostics_clicked = Signal()
-    bypass_apps_clicked = Signal()
-    subscription_clicked = Signal()
-    check_updates_requested = Signal()
-    settings_changed = Signal()
-
-    def __init__(self, manager: ConnectionManager, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.setObjectName("page")
-        self._manager = manager
-
-        # The settings list is taller than the fixed 760-px window can hold,
-        # so wrap it in a scroll area. Wrapper layout has zero margins; the
-        # `outer` layout (inside the scrolled content) keeps the actual
-        # padding so scrollbar appears flush with the right edge.
-        wrapper = QVBoxLayout(self)
-        wrapper.setContentsMargins(0, 0, 0, 0)
-        wrapper.setSpacing(0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setObjectName("settingsScroll")
-        wrapper.addWidget(scroll)
-
-        content = QWidget()
-        content.setObjectName("page")
-        scroll.setWidget(content)
-        outer = QVBoxLayout(content)
-        outer.setContentsMargins(24, 20, 24, 16)
-        outer.setSpacing(14)
-
-        title = QLabel(tr("mw.settings_title"))
-        title.setObjectName("h1")
-        outer.addWidget(title)
-
-        # v3.1.0: KaproTUN is TUN-only (sing-box). No mode/engine choice — the
-        # whole system is tunnelled. Admin is always required for the TUN device.
-        # Admin status / relaunch button shown only when relevant
-        self._admin_row = QHBoxLayout()
-        self._admin_label = QLabel()
-        self._admin_label.setObjectName("dim")
-        # The proxy-mode explanation is a full sentence; let it wrap instead
-        # of clipping in the fixed-width window.
-        self._admin_label.setWordWrap(True)
-        self._admin_row.addWidget(self._admin_label, stretch=1)
-        self._relaunch_btn = QPushButton(tr("mw.relaunch_admin"))
-        self._relaunch_btn.clicked.connect(self._on_relaunch_admin)
-        self._admin_row.addWidget(self._relaunch_btn)
-        admin_row_widget = QWidget()
-        admin_row_widget.setLayout(self._admin_row)
-        outer.addWidget(admin_row_widget)
-        self._refresh_admin_row()
-
-        # --- Auto-start with Windows ---
-        sep_startup = QFrame()
-        sep_startup.setFrameShape(QFrame.HLine)
-        outer.addWidget(sep_startup)
-
-        startup_label = QLabel(tr("mw.startup_section"))
-        startup_label.setObjectName("h2")
-        outer.addWidget(startup_label)
-
-        self.autostart_check = QCheckBox(tr("mw.autostart_check"))
-        self.autostart_check.setChecked(autostart.is_enabled())
-        self.autostart_check.toggled.connect(self._on_autostart_changed)
-        outer.addWidget(self.autostart_check)
-        autostart_hint = QLabel(tr("mw.autostart_hint"))
-        autostart_hint.setObjectName("dim")
-        autostart_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(autostart_hint)
-
-        self.autoconnect_check = QCheckBox(tr("mw.autoconnect_check"))
-        self.autoconnect_check.setChecked(
-            bool(manager.settings.get("autoconnect_on_launch", False))
-        )
-        self.autoconnect_check.toggled.connect(self._on_autoconnect_changed)
-        outer.addWidget(self.autoconnect_check)
-
-        # --- Kill-switch ---
-        sep_kill = QFrame()
-        sep_kill.setFrameShape(QFrame.HLine)
-        outer.addWidget(sep_kill)
-
-        kill_label = QLabel(tr("mw.security_section"))
-        kill_label.setObjectName("h2")
-        outer.addWidget(kill_label)
-
-        self.kill_check = QCheckBox(tr("mw.kill_switch_check"))
-        self.kill_check.setChecked(
-            bool(manager.settings.get("kill_switch", False))
-        )
-        self.kill_check.toggled.connect(self._on_kill_switch_changed)
-        outer.addWidget(self.kill_check)
-        kill_hint = QLabel(tr("mw.kill_switch_hint"))
-        kill_hint.setObjectName("dim")
-        kill_hint.setWordWrap(True)
-        kill_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(kill_hint)
-
-        # --- IPv6 leak protection ---
-        # Built into the tunnel and always on, so this is a statement, not a
-        # switch: ticked and disabled. Until v4.0.0 it was a live checkbox that
-        # wrote a setting nothing read — on or off, the behaviour was the same.
-        self.ipv6_check = QCheckBox(tr("mw.ipv6_check"))
-        self.ipv6_check.setChecked(True)
-        self.ipv6_check.setEnabled(False)
-        outer.addWidget(self.ipv6_check)
-        ipv6_hint = QLabel(tr("mw.ipv6_hint"))
-        ipv6_hint.setObjectName("dim")
-        ipv6_hint.setWordWrap(True)
-        ipv6_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(ipv6_hint)
-
-        # --- WebRTC leak protection (v1.16.0) ---
-        # Browser WebRTC API uses STUN over UDP to discover the user's
-        # public IP — and any JavaScript on the page can read it,
-        # bypassing the VPN. HTTP-proxy mode is the most exposed
-        # (system proxy only catches TCP); TUN mode is technically safe
-        # but defence-in-depth is cheap. Default ON for both.
-        self.webrtc_check = QCheckBox(tr("mw.webrtc_check"))
-        self.webrtc_check.setChecked(
-            bool(manager.settings.get("webrtc_leak_protection", True))
-        )
-        self.webrtc_check.toggled.connect(self._on_webrtc_leak_changed)
-        outer.addWidget(self.webrtc_check)
-        webrtc_hint = QLabel(tr("mw.webrtc_hint"))
-        webrtc_hint.setObjectName("dim")
-        webrtc_hint.setWordWrap(True)
-        webrtc_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(webrtc_hint)
-
-        # --- Leak self-test button (v1.16.4) ---
-        # Active probe of IPv4 / IPv6 / DNS / WebRTC. Doesn't write any
-        # state — just opens a modal dialog that runs the probes off
-        # the GUI thread and shows pass/fail. Useful proof that the
-        # 3 firewall rules + DNS routing actually work end-to-end.
-        leak_test_row = QHBoxLayout()
-        leak_test_row.setContentsMargins(28, 6, 0, 0)
-        self.leak_test_btn = QPushButton(tr("mw.leak_test_btn"))
-        self.leak_test_btn.clicked.connect(self._on_leak_test_clicked)
-        leak_test_row.addWidget(self.leak_test_btn)
-        leak_test_row.addStretch(1)
-        outer.addLayout(leak_test_row)
-        leak_test_hint = QLabel(tr("mw.leak_test_hint"))
-        leak_test_hint.setObjectName("dim")
-        leak_test_hint.setWordWrap(True)
-        leak_test_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(leak_test_hint)
-
-        # --- Public IP probe toggle (v1.10.0) ---
-        # We dial one third-party endpoint (ipinfo.io) after connect to
-        # show "Ваш IP: X (страна)" in the UI as visible proof the
-        # tunnel works. Some users prefer zero "phone home"-looking
-        # calls — let them opt out.
-        self.ip_probe_check = QCheckBox(tr("mw.ip_probe_check"))
-        self.ip_probe_check.setChecked(
-            bool(manager.settings.get("public_ip_probe", True))
-        )
-        self.ip_probe_check.toggled.connect(self._on_ip_probe_changed)
-        outer.addWidget(self.ip_probe_check)
-        ip_probe_hint = QLabel(tr("mw.ip_probe_hint"))
-        ip_probe_hint.setObjectName("dim")
-        ip_probe_hint.setWordWrap(True)
-        ip_probe_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(ip_probe_hint)
-
-        # --- DNS (v3.1.1: always the system resolver) ---
-        # No DNS-server picker / leak toggle any more. The old custom DoH /
-        # smart-split resolver got DPI-throttled on RU networks: DoH exchanges
-        # timed out ("context deadline exceeded"), which black-holed DNS AND
-        # false-failed the connect-gate, so a working tunnel reported "doesn't
-        # pass traffic". DNS is now ALWAYS the system resolver — app :53 is
-        # hijacked into sing-box and answered via type:local over the physical
-        # NIC (the user's already-working ISP/router DNS), one reliable path.
-        sep_dns = QFrame()
-        sep_dns.setFrameShape(QFrame.HLine)
-        outer.addWidget(sep_dns)
-
-        dns_label = QLabel("DNS")
-        dns_label.setObjectName("h2")
-        outer.addWidget(dns_label)
-        dns_note = QLabel(tr("mw.dns_note"))
-        dns_note.setObjectName("dim")
-        dns_note.setWordWrap(True)
-        dns_note.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(dns_note)
-
-        # --- Routing: ad-block + RU-direct (v1.19.0) ---------------------
-        # Both apply at the xray routing layer via the bundled geo data
-        # files (geosite.dat / geoip.dat ship with xray-core), so they
-        # work on any server and any DNS choice.
-        sep_routing = QFrame()
-        sep_routing.setFrameShape(QFrame.HLine)
-        outer.addWidget(sep_routing)
-
-        routing_label = QLabel(tr("mw.routing_section"))
-        routing_label.setObjectName("h2")
-        outer.addWidget(routing_label)
-
-
-        self.ru_direct_check = QCheckBox(tr("mw.ru_direct_check"))
-        self.ru_direct_check.setChecked(
-            bool(manager.settings.get("route_ru_direct", True))
-        )
-        self.ru_direct_check.toggled.connect(self._on_route_ru_direct_changed)
-        outer.addWidget(self.ru_direct_check)
-        ru_direct_hint = QLabel(tr("mw.ru_direct_hint"))
-        ru_direct_hint.setObjectName("dim")
-        ru_direct_hint.setWordWrap(True)
-        ru_direct_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(ru_direct_hint)
-
-        # --- Games bypass the VPN — v3.5.0 ---
-        self.games_check = QCheckBox(tr("mw.games_check"))
-        self.games_check.setChecked(bool(manager.settings.get("games_direct", True)))
-        self.games_check.toggled.connect(self._on_games_direct_changed)
-        outer.addWidget(self.games_check)
-        games_hint = QLabel(tr("mw.games_hint"))
-        games_hint.setObjectName("dim")
-        games_hint.setWordWrap(True)
-        games_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(games_hint)
-
-        # --- Turbo (kernel TUN stack) — v3.3.0 ---
-        self.turbo_check = QCheckBox(tr("mw.turbo_check"))
-        self.turbo_check.setChecked(bool(manager.settings.get("high_speed", False)))
-        self.turbo_check.toggled.connect(self._on_high_speed_changed)
-        outer.addWidget(self.turbo_check)
-        turbo_hint = QLabel(tr("mw.turbo_hint"))
-        turbo_hint.setObjectName("dim")
-        turbo_hint.setWordWrap(True)
-        turbo_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(turbo_hint)
-
-        # --- Apps that bypass the VPN (v3.5.2) — the generic mechanism the
-        # built-in games list is a preset of. ---
-        bypass_row = QHBoxLayout()
-        bypass_row.setContentsMargins(28, 6, 0, 0)
-        self.bypass_apps_btn = QPushButton(tr("mw.bypass_apps_btn"))
-        self.bypass_apps_btn.clicked.connect(self.bypass_apps_clicked)
-        bypass_row.addWidget(self.bypass_apps_btn)
-        bypass_row.addStretch(1)
-        outer.addLayout(bypass_row)
-
-        # --- Network diagnostics (v3.5.2) ---
-        diag_row = QHBoxLayout()
-        diag_row.setContentsMargins(28, 6, 0, 0)
-        self.diagnostics_btn = QPushButton(tr("mw.diagnostics_btn"))
-        self.diagnostics_btn.clicked.connect(self.diagnostics_clicked)
-        diag_row.addWidget(self.diagnostics_btn)
-        diag_row.addStretch(1)
-        outer.addLayout(diag_row)
-
-        # --- Network debug mode (v3.5.2) ---
-        self.netdebug_check = QCheckBox(tr("mw.netdebug_check"))
-        self.netdebug_check.setChecked(
-            bool(manager.settings.get("network_debug", False)))
-        self.netdebug_check.toggled.connect(self._on_network_debug_changed)
-        outer.addWidget(self.netdebug_check)
-        netdebug_hint = QLabel(tr("mw.netdebug_hint"))
-        netdebug_hint.setObjectName("dim")
-        netdebug_hint.setWordWrap(True)
-        netdebug_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(netdebug_hint)
-
-        # --- Minimal metadata for the subscription provider (v3.6.x) ---
-        self.minmeta_check = QCheckBox(tr("mw.minmeta_check"))
-        self.minmeta_check.setChecked(
-            bool(manager.settings.get("minimal_metadata", False)))
-        self.minmeta_check.toggled.connect(self._on_minimal_metadata_changed)
-        outer.addWidget(self.minmeta_check)
-        minmeta_hint = QLabel(tr("mw.minmeta_hint"))
-        minmeta_hint.setObjectName("dim")
-        minmeta_hint.setWordWrap(True)
-        minmeta_hint.setContentsMargins(28, 0, 0, 0)
-        outer.addWidget(minmeta_hint)
-
-
-        # --- Language toggle ---
-        # Lives in Security section because it's the only other "global
-        # preference" — too small to deserve its own section header.
-        from ..core import i18n as _i18n
-        lang_row = QHBoxLayout()
-        lang_row.setContentsMargins(0, 6, 0, 0)
-        lang_label = QLabel(_i18n.tr("settings.language_label"))
-        lang_row.addWidget(lang_label)
-        lang_row.addStretch(1)
-        self.lang_combo = QComboBox()
-        # Order: Auto first (most users will leave it as detected),
-        # then RU/EN alphabetical so it's predictable.
-        self.lang_combo.addItem(_i18n.tr("settings.language_auto"), "auto")
-        self.lang_combo.addItem("English", "en")
-        self.lang_combo.addItem("Русский", "ru")
-        current_lang = manager.settings.get("language", "auto")
-        for i in range(self.lang_combo.count()):
-            if self.lang_combo.itemData(i) == current_lang:
-                self.lang_combo.setCurrentIndex(i)
-                break
-        self.lang_combo.currentIndexChanged.connect(self._on_language_changed)
-        lang_row.addWidget(self.lang_combo)
-        outer.addLayout(lang_row)
-        lang_hint = QLabel(tr("mw.lang_hint"))
-        lang_hint.setObjectName("dim")
-        lang_hint.setWordWrap(True)
-        lang_hint.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(lang_hint)
-
-        # --- Theme toggle (v1.13.0) ---
-        # Same pattern as language: QComboBox with 3 options, takes effect
-        # at next restart (Qt doesn't cleanly re-style already-constructed
-        # widgets without each widget participating, and our code uses
-        # both global stylesheet AND a few setStyleSheet calls in widgets
-        # — restart is simpler than chasing every label).
-        theme_row = QHBoxLayout()
-        theme_row.setContentsMargins(0, 6, 0, 0)
-        theme_label_text = tr("mw.theme_label")
-        theme_label = QLabel(theme_label_text)
-        theme_row.addWidget(theme_label)
-        theme_row.addStretch(1)
-        self.theme_combo = QComboBox()
-        # Same order convention as language — Auto first (sensible default),
-        # then alphabetical.
-        auto_label = tr("mw.theme_auto")
-        dark_label = tr("mw.theme_dark")
-        light_label = tr("mw.theme_light")
-        self.theme_combo.addItem(auto_label, "auto")
-        self.theme_combo.addItem(dark_label, "dark")
-        self.theme_combo.addItem(light_label, "light")
-        current_theme = manager.settings.get("theme", "auto")
-        for i in range(self.theme_combo.count()):
-            if self.theme_combo.itemData(i) == current_theme:
-                self.theme_combo.setCurrentIndex(i)
-                break
-        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
-        theme_row.addWidget(self.theme_combo)
-        outer.addLayout(theme_row)
-        theme_hint = QLabel(tr("mw.theme_hint"))
-        theme_hint.setObjectName("dim")
-        theme_hint.setWordWrap(True)
-        theme_hint.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(theme_hint)
-
-
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        outer.addWidget(sep)
-
-        # --- Subscription import link ---
-        # Subtitle doubles as a live status line: remaining traffic /
-        # expiry from the provider's Subscription-Userinfo, when known.
-        sub_row, self._sub_info_label = self._make_link_row(
-            tr("mw.sub_import_title"),
-            self._sub_info_text(),
-            self.subscription_clicked.emit,
-        )
-        outer.addLayout(sub_row)
-
-        # --- Sites editor link ---
-        sites_row, self._sites_count_label = self._make_link_row(
-            tr("mw.direct_sites_title"),
-            tr("mw.domains_count", n=len(storage.load_sites())),
-            self.sites_clicked.emit,
-        )
-        outer.addLayout(sites_row)
-
-        # --- Logs viewer link ---
-        logs_row, _ = self._make_link_row(
-            tr("mw.logs_title"),
-            tr("mw.logs_hint"),
-            self.logs_clicked.emit,
-        )
-        outer.addLayout(logs_row)
-
-        outer.addStretch(1)
-
-        # --- About ---
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        outer.addWidget(sep2)
-
-        sb_version = sing_box_installer.get_installed_version() or tr("mw.not_installed")
-        about = QLabel(
-            f"<div style='color:#fafafa; font-weight:600'>KaproTUN v{__version__}</div>"
-            f"<div style='color:#71717a; font-size:9pt'>sing-box: {sb_version}</div>"
-            f"<div style='color:#71717a; font-size:9pt'>GPL v3 · "
-            f"<a href='https://github.com/fafnirov/KaproTUN' style='color:#f59e0b'>"
-            f"github.com/fafnirov/KaproTUN</a></div>"
-        )
-        about.setOpenExternalLinks(True)
-        about.setTextFormat(Qt.RichText)
-        about.setWordWrap(True)
-        outer.addWidget(about)
-
-        # --- Updates row ---
-        upd_row = QHBoxLayout()
-        upd_row.setSpacing(8)
-        self.update_status_label = QLabel("")
-        self.update_status_label.setObjectName("dim")
-        self.update_status_label.setWordWrap(True)
-        upd_row.addWidget(self.update_status_label, stretch=1)
-        self.check_updates_btn = QPushButton(tr("mw.check_updates_btn"))
-        self.check_updates_btn.clicked.connect(self._on_check_updates_clicked)
-        upd_row.addWidget(self.check_updates_btn)
-        outer.addLayout(upd_row)
-
-    def _make_link_row(self, title: str, hint: str, on_click) -> tuple[QHBoxLayout, QLabel]:
-        """Title + hint on the left, action button on the right. Returns (layout, hint_label)."""
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        text_block = QVBoxLayout()
-        text_block.setSpacing(2)
-        title_lbl = QLabel(title)
-        title_lbl.setWordWrap(True)
-        text_block.addWidget(title_lbl)
-        hint_lbl = QLabel(hint)
-        hint_lbl.setObjectName("dim")
-        hint_lbl.setWordWrap(True)
-        text_block.addWidget(hint_lbl)
-        row.addLayout(text_block, stretch=1)
-        btn = QPushButton(tr("mw.open_btn"))
-        # Pin enough width that the QSS padding doesn't truncate the label
-        # ("Открыт" instead of "Открыть") — Qt's sizeHint doesn't account
-        # for QSS padding.
-        btn.setMinimumWidth(96)
-        btn.clicked.connect(on_click)
-        row.addWidget(btn)
-        return row, hint_lbl
-
-    def refresh_sites_count(self) -> None:
-        if self._sites_count_label is not None:
-            self._sites_count_label.setText(tr("mw.domains_count", n=len(storage.load_sites())))
-
-    def _sub_info_text(self) -> str:
-        """Subscription-row subtitle: remaining traffic / expiry (if the
-        provider sent Subscription-Userinfo) plus how long ago we last
-        refreshed; else the default hint."""
-        default = tr("mw.sub_default_hint")
-        try:
-            from ..core.subscription import SubscriptionInfo, humanize_ago
-            settings = storage.load_settings()
-            data = settings.get("subscription_userinfo")
-            base = default
-            if data:
-                base = SubscriptionInfo.from_dict(data).summary() or default
-            ago = humanize_ago(int(settings.get("subscription_last_refresh", 0) or 0))
-            return tr("mw.sub_updated_ago", base=base, ago=ago) if ago else base
-        except Exception:
-            return default
-
-    def refresh_sub_info(self) -> None:
-        label = getattr(self, "_sub_info_label", None)
-        if label is not None:
-            label.setText(self._sub_info_text())
-
-    def _on_autostart_changed(self, checked: bool) -> None:
-        ok = autostart.enable(minimized=True) if checked else autostart.disable()
-        if not ok:
-            # Revert checkbox state if the registry write failed
-            self.autostart_check.blockSignals(True)
-            self.autostart_check.setChecked(not checked)
-            self.autostart_check.blockSignals(False)
-
-    def _on_autoconnect_changed(self, checked: bool) -> None:
-        self._manager.update_settings(autoconnect_on_launch=checked)
-        self.settings_changed.emit()
-
-    def _on_kill_switch_changed(self, checked: bool) -> None:
-        self._manager.update_settings(kill_switch=checked)
-        if not checked:
-            # Switching it off lifts the block now, not at the next connect:
-            # with the tunnel down this is the way to get the internet back
-            # without reconnecting.
-            self._manager.release_killswitch()
-        self.settings_changed.emit()
-
-    def _on_webrtc_leak_changed(self, checked: bool) -> None:
-        self._manager.update_settings(webrtc_leak_protection=checked)
-        self.settings_changed.emit()
-
-    def _on_games_direct_changed(self, checked: bool) -> None:
-        self._manager.update_settings(games_direct=checked)
-
-    def _on_minimal_metadata_changed(self, checked: bool) -> None:
-        # Takes effect on the next subscription fetch; the auto-refresh timer is
-        # re-evaluated on the next app start (or when the user refreshes).
-        self._manager.update_settings(minimal_metadata=checked)
-
-    def _on_network_debug_changed(self, checked: bool) -> None:
-        # Takes effect immediately (no reconnect): the flag only gates whether
-        # app_log.net() writes, so the user can arm it and reproduce right away.
-        self._manager.update_settings(network_debug=checked)
-        app_log.set_net_debug(checked)
-        app_log.log(f"[net-debug] {'enabled' if checked else 'disabled'} by user")
-
-    def _on_route_ru_direct_changed(self, checked: bool) -> None:
-        self._manager.update_settings(route_ru_direct=checked)
-        self.settings_changed.emit()
-
-    def _on_high_speed_changed(self, checked: bool) -> None:
-        self._manager.update_settings(high_speed=checked)
-        self.settings_changed.emit()
-
-    def _on_leak_test_clicked(self) -> None:
-        """Open the leak-test dialog. In TUN mode the system route table already
-        tunnels everything through sing-box, so no proxy override is needed — the
-        probes use the ordinary system stack. When not connected they get the
-        real IP/DNS as a baseline."""
-        from .leak_test_dialog import LeakTestDialog
-        dlg = LeakTestDialog(None, manager=self._manager, parent=self.window())
-        dlg.exec()
-
-    def _on_ip_probe_changed(self, checked: bool) -> None:
-        self._manager.update_settings(public_ip_probe=checked)
-        self.settings_changed.emit()
-
-        self.settings_changed.emit()
-
-    def _on_theme_changed(self, _index: int) -> None:
-        """Persist theme + apply it live to the running app.
-
-        v1.13.0 saved the choice but required a restart to see it.
-        User feedback: "выбрал светлую — никакой белезны нет, тёмная
-        осталась". That's correct because we just stored to settings.
-        v1.13.1 also calls `setStyleSheet` on the QApplication so the
-        global QSS picks up the new palette immediately. Custom-painted
-        widgets (Sparkline, CircleConnectButton) that read module-level
-        DARK constants still need a restart to fully refresh — the hint
-        below tells the user that's a known limitation.
-        """
-        new_theme = self.theme_combo.currentData()
-        self._manager.update_settings(theme=new_theme)
-        # Live re-style. QApplication is a singleton — instance() returns
-        # ours. Setting the stylesheet recomputes layout for every widget
-        # currently using that sheet, so the whole window re-paints with
-        # the new palette in one frame.
-        from PySide6.QtWidgets import QApplication
-        from .styles import get_qss
-        app = QApplication.instance()
-        if app is not None:
-            app.setStyleSheet(get_qss(str(new_theme)))
-        # Notify MainWindow so it can update() custom-painted widgets
-        # (WorldMapWidget — Sparkline / CircleConnectButton are next).
-        # Stylesheet change does not trigger paintEvent on QPainter-
-        # drawn widgets, so we have to push it manually.
-        self.settings_changed.emit()
-
-    def _on_language_changed(self, _index: int) -> None:
-        """Persist language choice. Takes effect on next launch — we don't
-        rebuild the UI in-place because that means re-translating every
-        widget that was constructed at startup (settings labels, tray
-        menu items, etc.) and chasing every label is fragile. Restart
-        is one extra click for a change users make ~once per install.
-        """
-        new_lang = self.lang_combo.currentData()
-        self._manager.update_settings(language=new_lang)
-
-    def _on_check_updates_clicked(self) -> None:
-        """Forwarded to MainWindow which owns the worker thread."""
-        self.check_updates_requested.emit()
-
-    # --- update banner UI -------------------------------------------------
-
-    def set_update_status(self, text: str, accent: bool = False) -> None:
-        """Update the dim line next to the 'Проверить обновления' button."""
-        color = "#f59e0b" if accent else "#71717a"
-        weight = "600" if accent else "400"
-        self.update_status_label.setText(
-            f"<span style='color:{color}; font-weight:{weight}'>{text}</span>"
-        )
-        self.update_status_label.setTextFormat(Qt.RichText)
-
-    def _refresh_admin_row(self) -> None:
-        if admin.is_admin():
-            self._admin_label.setText(tr("mw.admin_yes"))
-            self._relaunch_btn.setVisible(False)
-        elif self._manager.planned_mode() != MODE_TUN:
-            # macOS without root: proxy mode works as-is, so this is not a
-            # warning. Say what the mode covers, and leave the full TUN one
-            # click away for whoever wants every app tunnelled and accepts
-            # the password prompt that goes with it.
-            self._admin_label.setText(tr("mw.proxy_mode_info"))
-            self._relaunch_btn.setText(tr("mw.relaunch_tun"))
-            self._relaunch_btn.setVisible(True)
-        else:
-            self._admin_label.setText(tr("mw.admin_no"))
-            self._relaunch_btn.setText(tr("mw.relaunch_admin"))
-            self._relaunch_btn.setVisible(True)
-
-    def _on_relaunch_admin(self) -> None:
-        import sys
-        rc = admin.relaunch_as_admin()
-        # ShellExecuteW reports success as a value above 32; the macOS and
-        # Linux helpers return 1. Testing "> 32" everywhere made every
-        # successful relaunch off Windows show the failure dialog and leave
-        # this unprivileged copy running next to the elevated one.
-        launched = rc > 32 if sys.platform == "win32" else rc > 0
-        if launched:
-            # New elevated instance is starting. Quit this one.
-            sys.exit(0)
-        else:
-            QMessageBox.warning(
-                self, tr("mw.relaunch_failed_title"),
-                tr("mw.relaunch_failed_body"),
-            )
-
 
 class _UpdateCheckWorker(QThread):
     """Background poll of GitHub Releases. Emits if a newer version is out."""
@@ -1212,44 +338,6 @@ class _NetworkChangeWatchdog(QThread):
         self.wait(3000)
 
 
-class LogsPage(QWidget):
-    """Read-only viewer for sing-box logs."""
-
-    back_clicked = Signal()
-
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.setObjectName("page")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(10)
-
-        header = QHBoxLayout()
-        back_btn = QPushButton(tr("mw.logs_back"))
-        back_btn.clicked.connect(self.back_clicked)
-        header.addWidget(back_btn)
-        header.addStretch(1)
-        clear_btn = QPushButton(tr("mw.logs_clear"))
-        clear_btn.clicked.connect(self._on_clear)
-        header.addWidget(clear_btn)
-        layout.addLayout(header)
-
-        title = QLabel(tr("mw.logs_title"))
-        title.setObjectName("h2")
-        layout.addWidget(title)
-
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(5000)
-        layout.addWidget(self.log_view, stretch=1)
-
-    def append(self, line: str) -> None:
-        self.log_view.appendPlainText(line)
-
-    def _on_clear(self) -> None:
-        self.log_view.clear()
-
-
 # ----- Main window ---------------------------------------------------------
 
 class MainWindow(QMainWindow):
@@ -1290,10 +378,12 @@ class MainWindow(QMainWindow):
         # Size preset: 'standard' (full) or 'compact' (shorter + a touch
         # narrower, for low-resolution / low-DPI screens). 'auto' (default)
         # picks compact when the screen can't comfortably fit standard.
-        _PRESETS = {"standard": (480, 870), "compact": (460, 720)}
+        # v2 (4.1): the window is 460 x 720 as designed; "compact" is the same
+        # layout with a smaller ring for screens that cannot fit 720.
+        _PRESETS = {"standard": (460, 720), "compact": (460, 640)}
         preset = str(saved_settings.get("window_size_preset", "auto")).strip().lower()
         if preset not in _PRESETS:
-            preset = "compact" if self._screen_too_short_for(870) else "standard"
+            preset = "compact" if self._screen_too_short_for(720) else "standard"
         self._compact_preset = (preset == "compact")
         DEFAULT_W, DEFAULT_H = _PRESETS[preset]
         MIN_W, MIN_H = DEFAULT_W, DEFAULT_H - 90  # floor for advanced resizable mode
@@ -1326,7 +416,7 @@ class MainWindow(QMainWindow):
         # once at startup + after any config-list mutation.
         # name → latency in ms, or None (unreachable), or -1 (UDP-only).
         self._tray_pings: dict[str, Optional[int]] = {}
-        self._tray_pinger: Optional[object] = None  # _PingerThread instance
+        self._tray_pinger: Optional[object] = None  # PingerThread instance
         self._connect_worker: Optional[_ConnectWorker] = None
         self._prev_traffic: Optional[xray_stats.TrafficStats] = None
         # v1.15.0: rolling per-minute aggregation for the 24h stats db.
@@ -1447,20 +537,13 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.home_page = HomePage(compact=self._compact_preset)
-        # World-map needs to know the current theme on every paint —
-        # hand it a closure that reads settings live, so a theme switch
-        # immediately reflects in the next map paint (no explicit
-        # refresh wiring per widget).
-        # Custom-painted widgets (read palette per paint) need a getter
-        # that returns the live theme setting. One closure, multiple
-        # widgets — keeps theme propagation one-line per widget.
+        # Custom-painted widgets that still take a theme getter (stats charts)
+        # read the live setting through this closure.
         _theme = lambda: str(self.manager.settings.get("theme", "auto"))
-        self.home_page.world_map.set_theme_getter(_theme)
-        self.home_page.sparkline.set_theme_getter(_theme)
         self.settings_page = SettingsPage(self.manager)
         self.logs_page = LogsPage()
-        self.add_page = AddConfigPage()
-        self.onboarding_page = OnboardingPage()
+        self.add_page = AddServerPage()
+        self.servers_page = ServersPage()
         # v1.15.0: 24-hour bandwidth chart page. Same theme-getter so
         # the chart's colors track live theme switches.
         self.stats_page = StatsPage()
@@ -1469,13 +552,9 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.settings_page)    # index 1
         self.stack.addWidget(self.logs_page)        # index 2
         self.stack.addWidget(self.add_page)         # index 3
-        self.stack.addWidget(self.onboarding_page)  # index 4
+        self.stack.addWidget(self.servers_page)     # index 4
         self.stack.addWidget(self.stats_page)       # index 5
         root.addWidget(self.stack, stretch=1)
-
-        nav_sep = QFrame()
-        nav_sep.setFrameShape(QFrame.HLine)
-        root.addWidget(nav_sep)
 
         self.nav = NavBar()
         root.addWidget(self.nav)
@@ -1503,13 +582,13 @@ class MainWindow(QMainWindow):
 
         self._wire_signals()
         self._refresh_home()
-        # If this is a clean install (no saved configs), open onboarding
-        # instead of the empty Home card — _goto("home") detects this.
-        # First-time UX: user sees Welcome + 3 big actions, not a sad
-        # "Конфиг не выбран" panel.
-        if not self.configs:
-            self._goto("home")  # routes to onboarding via empty-state hijack
+        # A clean install opens on the same home screen as everyone else's:
+        # with no server yet it shows what to do first (home_v2.EmptyCard).
         self.nav.set_active("home")
+        if not self.configs:
+            # Otherwise the first button in the tab order opens with a focus
+            # ring on it, as if something had been pressed already.
+            self.stack.setFocus()
 
         # Kick off the initial tray-pings background scan so the
         # quick-connect block appears within a few seconds of startup.
@@ -1538,13 +617,17 @@ class MainWindow(QMainWindow):
 
     def _wire_signals(self) -> None:
         self.home_page.connect_clicked.connect(self._on_connect_click)
-        self.home_page.card_clicked.connect(self._on_open_picker)
+        self.home_page.card_clicked.connect(self._on_open_servers)
         self.settings_page.sites_clicked.connect(self._on_edit_sites)
         self.settings_page.logs_clicked.connect(lambda: self._goto("logs"))
         self.settings_page.diagnostics_clicked.connect(self._on_open_diagnostics)
         self.settings_page.bypass_apps_clicked.connect(self._on_edit_bypass_apps)
         self.settings_page.subscription_clicked.connect(self._on_import_subscription)
         self.home_page.banner_clicked.connect(self._on_import_subscription)
+        self.home_page.sites_clicked.connect(self._on_edit_sites)
+        self.home_page.settings_clicked.connect(lambda: self._goto("settings"))
+        self.home_page.logs_clicked.connect(lambda: self._goto("logs"))
+        self.home_page.add_clicked.connect(self._on_open_add_page)
         # v1.14.0: nudge custom-painted widgets to repaint after any
         # setting flip (esp. theme — stylesheet change doesn't trigger
         # paintEvent on QPainter-drawn widgets, only on QSS-styled ones).
@@ -1553,19 +636,19 @@ class MainWindow(QMainWindow):
             lambda: self._start_update_check(interactive=True)
         )
         self.logs_page.back_clicked.connect(lambda: self._goto("settings"))
-        self.add_page.back_clicked.connect(lambda: self._goto("home"))
+        self.add_page.back_clicked.connect(lambda: self._goto("servers"))
         self.add_page.config_ready.connect(self._on_add_page_saved)
-        self.add_page.subscription_clicked.connect(self._on_import_subscription)
-        # Onboarding: the two action buttons reuse the existing import-
-        # subscription and add-config-page paths. Same destinations as
-        # the bottom-nav "+" and Settings → Subscription import, just
-        # exposed earlier to brand-new users with zero saved configs.
-        self.onboarding_page.subscription_clicked.connect(self._on_import_subscription)
-        self.onboarding_page.add_config_clicked.connect(self._on_open_add_page)
+        self.add_page.subscription_imported.connect(self._on_subscription_imported)
+        self.servers_page.connect_requested.connect(self._on_server_chosen)
+        self.servers_page.delete_requested.connect(self._on_delete_server)
+        self.servers_page.add_clicked.connect(self._on_open_add_page)
+        self.servers_page.subscription_clicked.connect(self._on_import_subscription)
+        self.servers_page.ping_requested.connect(self._refresh_tray_pings)
+        self.servers_page.refresh_requested.connect(self._on_refresh_subscriptions)
         self.nav.home_clicked.connect(lambda: self._goto("home"))
+        self.nav.servers_clicked.connect(lambda: self._goto("servers"))
         self.nav.stats_clicked.connect(lambda: self._goto("stats"))
         self.nav.settings_clicked.connect(lambda: self._goto("settings"))
-        self.nav.add_clicked.connect(self._on_open_add_page)
         self.log_received.connect(self.logs_page.append)
         # v2.2.0: also scan helper logs for socket-exhaustion so we treat it as
         # its own root cause (not a memory leak to reconnect-loop on).
@@ -1580,20 +663,12 @@ class MainWindow(QMainWindow):
         self.tray.config_selected.connect(self._on_tray_config_picked)
 
     def _goto(self, name: str) -> None:
-        # Empty-state hijack: any "go home" request when the user has
-        # zero saved configs lands on the onboarding screen instead.
-        # The bottom-nav highlight still says "home" so the spatial
-        # model is consistent — onboarding is "what Home looks like
-        # when you haven't done anything yet".
-        if name == "home" and not self.configs:
-            self._fade_to(4)  # onboarding stack index
-            self.nav.set_active("home")
-            return
         target_index, nav_key = {
             "home":     (0, "home"),
             "settings": (1, "settings"),
             "logs":     (2, None),     # no nav highlight for logs
-            "add":      (3, "add"),
+            "add":      (3, "servers"),  # adding a server is part of Servers
+            "servers":  (4, "servers"),
             "stats":    (5, "stats"),  # v1.15.0
         }.get(name, (0, "home"))
         if target_index == self.stack.currentIndex():
@@ -1651,11 +726,13 @@ class MainWindow(QMainWindow):
         """
         if not self.configs:
             self._tray_pings = {}
+            self.servers_page.set_pings({})
+            self.servers_page.set_pinging(False)
             return
-        from .configs_picker import _PingerThread
+        from .pinger import PingerThread
 
         # Stop any previous pinger before starting a new one. quit() — what
-        # this used to call — only ends a thread's event loop, and _PingerThread
+        # this used to call — only ends a thread's event loop, and PingerThread
         # has none, so the old pinger ran to completion and its finished signal
         # then overwrote the newer results with a stale set. Unhook its signals
         # first so nothing it still emits can land, then ask it to stop; it
@@ -1684,11 +761,24 @@ class MainWindow(QMainWindow):
             # quick-connect top-3.
             active_name = self._active_config.name if self._active_config else ""
             self.tray.set_configs(self.configs, active_name, self._tray_pings)
+            # The Servers tab gets the full set (and re-sorts by speed).
+            self.servers_page.set_pings(self._tray_pings)
+            self.servers_page.set_pinging(False)
 
-        self._tray_pinger = _PingerThread(list(self.configs), parent=self)
+        # The Servers tab shows the same measurement as it comes in.
+        self.servers_page.set_pings({}, pending=True)
+        self.servers_page.set_pinging(True)
+        self._tray_pinger = PingerThread(list(self.configs), parent=self)
         self._tray_pinger.pinged.connect(on_pinged)
+        self._tray_pinger.pinged.connect(self._on_tray_pinged)
         self._tray_pinger.finished.connect(on_finished)
         self._tray_pinger.start()
+
+    def _on_tray_pinged(self, name: str, ms) -> None:
+        # Only from the measurement in progress: a result of the one before,
+        # already on its way when that was stopped, must not paint a row.
+        if self.sender() is self._tray_pinger:
+            self.servers_page.set_ping(name, ms)
 
     def _diagnose_component_death(self) -> None:
         """No-op since v3.1.0: sing-box is the single dataplane process, so there
@@ -1753,6 +843,7 @@ class MainWindow(QMainWindow):
         # and we get the success/failure signal.
         if self._connecting:
             self.tray.set_state("connecting", self._active_config.name if self._active_config else "")
+            self._sync_servers_page()
             return
 
         # Detect external crash of the ACTIVE engine's core process. The core
@@ -1861,7 +952,11 @@ class MainWindow(QMainWindow):
             mm, ss = divmod(elapsed, 60)
             hh, mm = divmod(mm, 60)
             timer = f"{hh:d}:{mm:02d}:{ss:02d}" if hh else f"{mm:02d}:{ss:02d}"
-            self.home_page.set_state("connected", f"{timer} · {self._engine_tag()}")
+            # The timer alone in full-TUN mode; proxy mode is worth naming,
+            # since not every app is covered there.
+            detail = timer if self.manager.current_mode() == MODE_TUN \
+                else f"{timer} · {self._engine_tag()}"
+            self.home_page.set_state("connected", detail)
             self.tray.set_state("connected", active_name)
             # v1.15.3: flip the Stats live-block badge based on the
             # connection-manager truth BEFORE attempting to poll xray
@@ -1880,7 +975,8 @@ class MainWindow(QMainWindow):
             if self._reconnect_timer.isActive():
                 self.home_page.set_state(
                     connection_state.RECONNECTING,
-                    f"#{self._reconnect_attempts}/{self._reconnect_max}")
+                    tr("home.attempt", n=self._reconnect_attempts,
+                       total=self._reconnect_max))
                 self.tray.set_state("connecting", active_name)
             elif self._killswitch_holding():
                 self.home_page.set_state(connection_state.KILLSWITCH_ACTIVE)
@@ -1897,7 +993,19 @@ class MainWindow(QMainWindow):
             self.stats_page.set_live_connected(False)
 
         self.home_page.set_config(self._active_config)
+        self.home_page.set_ping(self._tray_pings.get(active_name),
+                                known=active_name in self._tray_pings)
         self.tray.set_configs(self.configs, active_name, self._tray_pings)
+        self._sync_servers_page()
+
+    def _sync_servers_page(self) -> None:
+        """Hand the Servers tab the current list, the active server and
+        whether it is in use. Cheap when nothing changed — it runs on every
+        refresh tick, so no path that changes the list has to remember it."""
+        self.servers_page.set_configs(
+            self.configs,
+            self._active_config.name if self._active_config else "",
+            self.manager.is_connected() or self._connecting)
 
     def _poll_traffic(self) -> None:
         """Pull the latest cumulative byte counters and feed rates to HomePage.
@@ -1923,9 +1031,6 @@ class MainWindow(QMainWindow):
             up_rate, down_rate,
             sample.uplink_bytes, sample.downlink_bytes,
         )
-        # v1.21.0: drive the world-map pulse speed/brightness from the live
-        # total throughput — the pin "breathes" with your traffic.
-        self.home_page.world_map.set_traffic(up_rate + down_rate)
         # v1.15.2: same per-second sample feeds the Stats page live block.
         # Cheap when Stats isn't visible — the widget just updates a few
         # labels and appends to a deque(maxlen=60); no repaint happens
@@ -1965,10 +1070,8 @@ class MainWindow(QMainWindow):
             self._do_disconnect()
             return
         if self._active_config is None:
-            QMessageBox.information(
-                self, tr("mw.no_config_title"),
-                tr("mw.no_config_body"),
-            )
+            kit.notify(self, "info", tr("mw.no_config_title"), tr("mw.no_config_body"),
+                       ok_label=tr("dlg.ok"))
             return
         # User-initiated connect → clear any auto-recovery lockout + storm
         # history and reset the memory-heal budget (a fresh session gets a
@@ -2268,9 +1371,19 @@ class MainWindow(QMainWindow):
                 self._note_killswitch_hold()
                 self._refresh_home()
             return
-        # The message can quote the engine's log; keep it from being sniffed
-        # as rich text.
-        QMessageBox.critical(self, tr("mw.connect_failed_title"), no_markup(msg))
+        self._show_connect_error(msg)
+
+    def _show_connect_error(self, msg: str) -> None:
+        """A failed connect that the user started: say why, and offer the
+        log. The message can quote the engine's log, so it is shown as plain
+        text that scrolls instead of growing the dialog off the window."""
+        dlg = kit.OverlayDialog(self, wide=True)
+        dlg.head("x-circle", tr("mw.connect_failed_title"), "", tone="danger")
+        dlg.add_long_text(str(msg), max_height=260)
+        dlg.add_actions([("close", tr("leak.close_btn"), "primary")], default="close",
+                        left=(("logs", tr("dlg.logs"), "ghost"),), icons={"logs": "file"})
+        if dlg.ask() == "logs":
+            self._goto("logs")
 
     def _arm_reconnect(self, reason: str, attempt: int, total: int) -> bool:
         """Gate + log EVERY auto-reconnect initiation. Returns True if the
@@ -2773,66 +1886,173 @@ class MainWindow(QMainWindow):
             return
         self._do_connect()
 
-    def _on_open_picker(self) -> None:
-        current_name = self._active_config.name if self._active_config else ""
-        dlg = ConfigsPickerDialog(self.configs, current_name, self)
-        result = dlg.exec()
-        # Always reload — picker may have mutated saved list via add/remove
-        self.configs = storage.load_configs()
-        if result == ConfigsPickerDialog.Accepted:
-            chosen = dlg.selected_config()
-            if chosen is not None:
-                self._active_config = chosen
-                self.manager.update_settings(last_config_name=chosen.name)
-        else:
-            # User cancelled but may have added/removed — re-sync selection.
-            names = {c.name for c in self.configs}
-            if self._active_config and self._active_config.name not in names:
-                self._active_config = self.configs[0] if self.configs else None
+    def _on_open_servers(self) -> None:
+        """The server card on the home screen: show the list, on the server
+        in use."""
+        if self._active_config is not None:
+            self.servers_page.select(self._active_config.name)
+        self._goto("servers")
+
+    def _on_server_chosen(self, cfg: ProxyConfig) -> None:
+        """"Connect" on the Servers tab (and "Save and connect" on the add
+        page): make this server the one in use and bring the tunnel up on it.
+        Same meaning as picking a server in the tray menu."""
+        if self._connecting:
+            # A connect is in flight, and it reads the active server when it
+            # lands: changing it now would report "connected to B" over a
+            # tunnel to A. Nothing changes; the user picks again in a moment.
+            show_toast(self, tr("srv.busy"), kind="info")
+            return
+        self._goto("home")
+        if self.manager.is_connected():
+            self._on_tray_config_picked(cfg)
+            return
+        self._active_config = cfg
+        self.manager.update_settings(last_config_name=cfg.name)
         self._refresh_home()
-        # Config list may have changed (add/remove) — re-rank for tray
-        # quick-connect block.
-        self._refresh_tray_pings()
+        self._on_connect_click()
+
+    def _on_delete_server(self, cfg: ProxyConfig) -> None:
+        """The Servers tab asked (and the user confirmed) to delete a server.
+        Names are unique in the saved list, so the name identifies it even if
+        the list was re-read from disk since the page drew its rows."""
+        # The page checked this before asking; the tunnel may have come up
+        # on this very server while the question was on screen.
+        in_use = (self._active_config is not None and self._active_config.name == cfg.name
+                  and (self.manager.is_connected() or self._connecting))
+        if in_use:
+            show_toast(self, tr("srv.del_connected_tip"), kind="info")
+            return
+        self.configs[:] = [c for c in self.configs if c.name != cfg.name]
+        storage.save_configs(self.configs)
+        self._tray_pings.pop(cfg.name, None)
+        if self._active_config is not None and self._active_config.name == cfg.name:
+            self._active_config = self.configs[0] if self.configs else None
+            self.manager.update_settings(
+                last_config_name=self._active_config.name if self._active_config else "")
+        self._refresh_home()
+        show_toast(self, tr("srv.deleted", name=one_line(cfg.name, 40)), kind="info")
+
+    def _rebind_active_config(self) -> None:
+        """After the list was replaced: point the active server at its entry
+        in the new list. A merge that updates a server (a provider rotated
+        its address or key) keeps the name and brings a new object; the old
+        one would keep dialling the dead address."""
+        if self._active_config is not None:
+            name = self._active_config.name
+            self._active_config = next((c for c in self.configs if c.name == name),
+                                       self._active_config)
 
     def _on_open_add_page(self) -> None:
-        """Nav-bar '+' switches to the inline AddConfigPage."""
-        self.add_page.reset()
+        """"Add" on the Servers tab or on the empty home screen."""
+        self.add_page.open(MODE_LINK)
         self._goto("add")
 
     def _on_add_page_saved(self, new_cfg: ProxyConfig) -> None:
-        """User filled out AddConfigPage and clicked Save."""
+        """A single server, parsed and named on the add page."""
         merged, _added, _updated = merge_with_prompt(self, self.configs, [new_cfg])
         self.configs[:] = merged
         storage.save_configs(self.configs)
+        self._rebind_active_config()
         # As stored: under "keep both" the new server lives under its own name.
         new_cfg = next((c for c in self.configs if c.outbound == new_cfg.outbound), new_cfg)
-        self._active_config = new_cfg
-        self.manager.update_settings(last_config_name=new_cfg.name)
-        self._goto("home")
-        self._refresh_home()
         # A new server has no ping yet, and the tray's quick-connect list only
         # shows servers that do — without this it stayed invisible there until
         # the next restart.
         self._refresh_tray_pings()
-        show_toast(self, tr("mw.toast_config_added", name=new_cfg.name), kind="success")
+        show_toast(self, tr("mw.toast_config_added", name=one_line(new_cfg.name, 40)),
+                   kind="success")
+        # The button says "Save and connect" — so connect. (If a connect to
+        # another server is in flight, the new one is saved and waits in the list.)
+        self._goto("servers")
+        self._on_server_chosen(new_cfg)
 
     def _on_import_subscription(self) -> None:
-        from .subscription_dialog import SubscriptionDialog
-        dlg = SubscriptionDialog(self)
-        if dlg.exec() != SubscriptionDialog.Accepted:
+        """Every "import a subscription" entry point — Servers, Settings, the
+        home banner, the empty home screen — opens the same page."""
+        self.add_page.open(MODE_SUB)
+        self._goto("add")
+
+    def _subscription_urls(self) -> list[str]:
+        """Every subscription link imported so far, in order, without
+        repeats. Falls back to the single `subscription_url` of installs that
+        predate the list."""
+        from ..core.subscription import is_https_url
+        s = storage.load_settings()
+        urls = [u for u in (s.get("subscription_urls") or []) if u]
+        if not urls and s.get("subscription_url"):
+            urls = [s["subscription_url"]]
+        # https only, as on import: a link saved by an old version (or typed
+        # into settings.json) over http would send its token, and take the
+        # server list back, in the clear.
+        return [u for u in dict.fromkeys(urls) if is_https_url(u)]
+
+    def _on_refresh_subscriptions(self) -> None:
+        """Re-fetch every saved subscription and merge what it returns."""
+        running = getattr(self, "_subs_refresher", None)
+        if running is not None and running.isRunning():
             return
-        imported = dlg.imported_configs()
+        urls = self._subscription_urls()
+        if not urls:
+            show_toast(self, tr("srv.no_subs"), kind="info", duration_ms=5000)
+            return
+        from .sub_workers import SubscriptionsRefresh
+        self.servers_page.set_refreshing(True)
+        self._subs_refresher = SubscriptionsRefresh(urls, parent=self)
+        self._subs_refresher.done.connect(self._on_subs_refreshed)
+        self._subs_refresher.crashed.connect(self._on_subs_refresh_crashed)
+        self._subs_refresher.start()
+
+    def _on_subs_refresh_crashed(self, text: str) -> None:
+        self._subs_refresher = None
+        self.servers_page.set_refreshing(False)
+        show_toast(self, tr("srv.refresh_failed", n=1, reason=one_line(text, 80)),
+                   kind="error", duration_ms=6000)
+
+    def _on_subs_refreshed(self, agg: dict) -> None:
+        self._subs_refresher = None
+        self.servers_page.set_refreshing(False)
+        # New servers are added, a subscription's own servers are updated
+        # (providers rotate addresses and keys), nothing is ever deleted — a
+        # failed or partial fetch must not wipe a working list.
+        merged, added, updated = merge_with_prompt(self, self.configs, agg["configs"])
+        if added or updated:
+            self.configs[:] = merged
+            storage.save_configs(self.configs)
+            self._rebind_active_config()
+            self._refresh_tray_pings()
+        if agg["ok"] > 0:
+            import time as _t
+            changes = {"subscription_last_refresh": int(_t.time())}
+            if agg["userinfo"] is not None:
+                changes["subscription_userinfo"] = agg["userinfo"].to_dict()
+            storage.update_settings(changes, fallback=self.manager.settings)
+            self.settings_page.refresh_sub_info()
+            self.home_page.refresh_sub_banner()
+        self._refresh_home()
+        text = tr("srv.refresh_done", ok=agg["ok"], total=agg["total"], added=added, updated=updated)
+        errors = agg["errors"]
+        if errors:
+            text += "\n" + tr("srv.refresh_failed", n=len(errors),
+                              reason=one_line(errors[0][1].title, 80))
+        show_toast(self, text, kind="error" if errors else "success", duration_ms=6000)
+
+    def _on_subscription_imported(self, imported: list) -> None:
+        """The add page fetched (or was given) a subscription and the user
+        pressed "Add to list"."""
         if not imported:
             return
-        # The same source-aware merge as the picker's import: a subscription
-        # may update its own servers, never silently another source's.
+        self._goto("servers")
+        # The source-aware merge: a subscription may update its own servers,
+        # never silently another source's.
         merged, added, replaced = merge_with_prompt(self, self.configs, imported)
         self.configs[:] = merged
         storage.save_configs(self.configs)
+        self._rebind_active_config()
         # Same as a single add: freshly imported servers have no ping, so they
         # were missing from the tray's quick-connect list until a restart.
         self._refresh_tray_pings()
-        # Subscription-Userinfo was just persisted by the dialog — reflect
+        # Subscription-Userinfo was just persisted by the page — reflect
         # the fresh remaining-traffic / expiry in the Settings subtitle + the
         # home-screen expiry banner. (refresh_sub_info lives on SettingsPage;
         # calling it on the window raised AttributeError, which the runtime
@@ -2864,7 +2084,7 @@ class MainWindow(QMainWindow):
         """TCP-ping each candidate; once all results in, switch to min-latency."""
         if not candidates:
             return
-        from .configs_picker import _PingerThread
+        from .pinger import PingerThread
         results: dict[str, Optional[int]] = {}
 
         def on_pinged(name: str, ms) -> None:
@@ -2901,7 +2121,7 @@ class MainWindow(QMainWindow):
                 kind="success", duration_ms=6000,
             )
 
-        self._autopick_pinger = _PingerThread(candidates, parent=self)
+        self._autopick_pinger = PingerThread(candidates, parent=self)
         self._autopick_pinger.pinged.connect(on_pinged)
         self._autopick_pinger.finished.connect(on_finished)
         self._autopick_pinger.start()
@@ -2916,9 +2136,10 @@ class MainWindow(QMainWindow):
         paintEvent isn't auto-triggered by a stylesheet change.
         update() schedules one.
         """
-        self.home_page.world_map.update()
-        self.home_page.sparkline.update()
+        self.home_page.refresh_ip_setting()
         self.home_page.circle.update()
+        self.home_page.update()
+        self.nav.update()
 
     def _on_open_diagnostics(self) -> None:
         """Network Diagnostics — adapters, routes, MTU, server, TCP/UDP tests."""
@@ -2984,6 +2205,10 @@ class MainWindow(QMainWindow):
         the app-lifetime workers below (ping / probe / connect / update) may
         still be mid-run; requestInterruption()+quit()+wait() each so none is
         deleted while running. Best-effort + bounded — never let cleanup raise."""
+        try:
+            self.add_page.shutdown()
+        except Exception:
+            pass
         for name in ("_connect_worker", "_ip_probe", "_tray_pinger",
                      "_autopick_pinger", "_update_worker"):
             w = getattr(self, name, None)
@@ -3031,6 +2256,7 @@ class MainWindow(QMainWindow):
         Toast the count so the user knows their list grew.
         """
         self.configs = storage.load_configs()
+        self._rebind_active_config()
         self._refresh_home()
         self._refresh_tray_pings()
         msg = (tr("mw.toast_sub_refreshed_one") if count == 1
@@ -3108,14 +2334,12 @@ class MainWindow(QMainWindow):
             "[!] Правила kill-switch от прошлой сессии остались в файрволе и "
             "блокируют интернет. Снять их может только запуск от администратора."
         )
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle(tr("mw.killswitch_stuck_title"))
-        box.setText(tr("mw.killswitch_stuck_body"))
-        relaunch = box.addButton(tr("mw.relaunch_admin"), QMessageBox.AcceptRole)
-        box.addButton(tr("mw.killswitch_stuck_later"), QMessageBox.RejectRole)
-        box.exec()
-        if box.clickedButton() is relaunch:
+        dlg = kit.OverlayDialog(self, wide=True)
+        dlg.head("shield-alert", tr("mw.killswitch_stuck_title"), "", tone="danger")
+        dlg.add_long_text(tr("mw.killswitch_stuck_body"), max_height=300)
+        dlg.add_actions([("later", tr("mw.killswitch_stuck_later"), "secondary"),
+                         ("relaunch", tr("mw.relaunch_admin"), "primary")], default="relaunch")
+        if dlg.ask() == "relaunch":
             self.settings_page._on_relaunch_admin()
 
     def _note_killswitch_hold(self) -> None:
