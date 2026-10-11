@@ -1088,9 +1088,24 @@ class MainWindow(QMainWindow):
             kit.notify(self, "info", tr("mw.no_config_title"), tr("mw.no_config_body"),
                        ok_label=tr("dlg.ok"))
             return
-        # User-initiated connect → clear any auto-recovery lockout + storm
-        # history and reset the memory-heal budget (a fresh session gets a
-        # fresh chance; only the USER re-enables auto-recovery).
+        self._user_takes_over()
+        app_log.log(f"[reconnect] reason=user_requested, config={self._active_config.name}")
+        self._do_connect()
+
+    def _user_takes_over(self) -> None:
+        """The user asked for a connection (the button, a server in the tray
+        or on the Servers tab). That replaces whatever the client was about
+        to do on its own.
+
+        A reconnect waiting on its timer is cancelled: left armed, it fired
+        into the session the user had just started and connected a second
+        time on top of it (v4.1.2). Its attempt count goes with it, so a
+        failure of THIS connect is shown, not silently retried. And the
+        auto-recovery lockout, the storm history and the memory-heal budget
+        start afresh — a fresh session gets a fresh chance; only the USER
+        re-enables auto-recovery."""
+        self._reconnect_timer.stop()
+        self._reconnect_attempts = 0
         self._auto_recovery_disabled = False
         self._reconnect_history = []
         self._mem_heal_count = 0
@@ -1099,8 +1114,6 @@ class MainWindow(QMainWindow):
         self._mem_breach_streak = 0
         self._sock_exhaust_bursts = 0
         self._last_sock_exhaust_ts = 0.0
-        app_log.log(f"[reconnect] reason=user_requested, config={self._active_config.name}")
-        self._do_connect()
 
     def _do_connect(self) -> None:
         # The in-flight guard lives HERE, not only in the callers. It used to
@@ -1467,6 +1480,10 @@ class MainWindow(QMainWindow):
             app_log.log("[reconnect] stopped: reason=disabled (timer)")
             return
         if self._connecting:
+            return
+        if self.manager.is_connected():
+            # A session is already up (the user connected by hand while this
+            # timer was waiting): there is nothing to recover.
             return
         if self._active_config is None:
             # Never silently fall back to a different/first server — just stop.
@@ -2313,6 +2330,16 @@ class MainWindow(QMainWindow):
         affordance: clicking a server name means "I want to use this
         server NOW".
         """
+        if self._connecting:
+            # A connect is in flight, and it reads the active server when it
+            # lands: changing it now would report "connected to B" over a
+            # tunnel to A — and tearing the engine down under the worker
+            # breaks the connect it is in the middle of. Nothing changes; the
+            # user picks again in a moment. (The Servers tab has said this
+            # since v4.1.0; the tray walked past it.)
+            show_toast(self, tr("srv.busy"), kind="info")
+            return
+        self._user_takes_over()
         self._active_config = cfg
         self.manager.update_settings(last_config_name=cfg.name)
         if self.manager.is_connected():

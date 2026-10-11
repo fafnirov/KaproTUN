@@ -11,7 +11,7 @@ import time
 from typing import Callable, Optional
 
 from . import (
-    admin, app_log, dns_health, ipv6_block, killswitch, linux_tun_route,
+    admin, app_log, dns_health, egress, ipv6_block, killswitch, linux_tun_route,
     paths, proc_stats, proxy_session, storage, tun_recovery, webrtc_block,
     xray_stats,
 )
@@ -344,16 +344,21 @@ class ConnectionManager:
         self._server_ip = ""
         self._egress_fp = None
 
-    def _egress_fingerprint(self) -> Optional[str]:
-        """Local source IP the OS would use to reach the VPN server RIGHT NOW.
+    def _egress_fingerprints(self) -> Optional[list]:
+        """What identifies the physical networks the machine has RIGHT NOW,
+        the preferred one first: for each default route that is not our
+        tunnel — its interface, its address and its gateway (core.egress).
+        Cheap and side-effect-free. None or empty when unknown (transient
+        no-route); callers must treat that as 'no signal', never as a change.
 
-        Cheap and side-effect-free: a UDP `connect` sends no packet, it only
-        makes the kernel resolve the route and bind a source address. No admin,
-        no subprocess. In TUN mode the server IP is auto_route-bypassed to the
-        PHYSICAL NIC, so this is that NIC's address — it changes when the machine
-        roams Ethernet↔Wi-Fi (different adapter → different DHCP lease). Returns
-        None when unknown (no server / transient no-route); callers must treat
-        None as 'no signal', never as a change."""
+        Until v4.1.2 this was the local address of a route to the VPN server
+        — which under a TUN is the tunnel's own address, always, so a roam
+        was never seen. That probe remains only as the fallback for a platform
+        without a route reader, and never reports the tunnel's address."""
+        tun_v4 = sing_box_config.TUN_INET4.split("/")[0]
+        found = egress.fingerprints(tun_v4, (sing_box_config.TUN_DEVICE_NAME,))
+        if found is not egress.UNSUPPORTED:
+            return found
         ip = self._server_ip
         if not ip:
             return None
@@ -361,7 +366,8 @@ class ConnectionManager:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect((ip, 9))          # discard-protocol port; nothing is sent
-            return s.getsockname()[0]
+            local = s.getsockname()[0]
+            return None if local == tun_v4 else [local]
         except OSError:
             return None
         finally:
@@ -371,17 +377,34 @@ class ConnectionManager:
                 except OSError:
                     pass
 
+    def _egress_fingerprint(self) -> Optional[str]:
+        """The network the system prefers right now — the one the tunnel is
+        being built over. Taken once, when the tunnel comes up."""
+        found = self._egress_fingerprints()
+        return found[0] if found else None
+
     def egress_changed(self) -> bool:
-        """True when the physical egress interface changed since connect (e.g.
-        Ethernet unplugged → Wi-Fi). Best-effort: not connected, no snapshot, or
-        an unresolvable current fingerprint (mid-transition) all read as False,
-        so a brief no-route moment during the switch never false-triggers."""
-        if not self.is_connected() or not self._egress_fp:
+        """True when the network the tunnel was built over is gone: no default
+        route with its interface, address and gateway is left (Ethernet
+        unplugged → Wi-Fi, another Wi-Fi network, a new lease).
+
+        Not a change: another network appearing next to it, or the system now
+        preferring another one while ours is still there. And best-effort:
+        not connected, no snapshot, or nothing readable right now
+        (mid-transition) all read as False, so a brief no-route moment during
+        the switch never false-triggers."""
+        if not self.is_connected():
             return False
-        now = self._egress_fingerprint()
+        now = self._egress_fingerprints()
         if not now:
             return False
-        return now != self._egress_fp
+        if not self._egress_fp:
+            # The routes could not be read at the moment the tunnel came up
+            # (it happens right after a roam). Take the snapshot now instead
+            # of leaving this session unwatched.
+            self._egress_fp = now[0]
+            return False
+        return self._egress_fp not in now
 
     def is_connected(self) -> bool:
         return self.sing_box_process.is_running()
@@ -602,24 +625,11 @@ class ConnectionManager:
         """
         if self.is_connected():
             return  # never touch our own live helpers
-        import subprocess
-        no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        killed = False
-        targets = (("sing-box.exe", "tun2socks.exe") if sys.platform == "win32"
-                   else ("sing-box", "tun2socks"))
-        for name in targets:
-            try:
-                if sys.platform == "win32":
-                    r = subprocess.run(["taskkill", "/F", "/IM", name],
-                                       capture_output=True, timeout=3,
-                                       creationflags=no_window)
-                else:
-                    r = subprocess.run(["pkill", "-9", "-x", name],
-                                       capture_output=True, timeout=3)
-                if r.returncode == 0:
-                    killed = True
-            except (OSError, subprocess.SubprocessError):
-                pass
+        # Only sing-box / tun2socks processes started from OUR data folder
+        # (core.orphans) — another VPN client's engine of the same name is
+        # not ours to end, and cannot be holding our adapter anyway.
+        from . import orphans
+        killed = orphans.kill_own_helpers(("sing-box", "tun2socks")) > 0
         if killed:
             # The OS removes the WinTUN/utun adapter when the holder exits, but
             # async — give it a moment so the next create() doesn't race it.

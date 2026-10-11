@@ -111,6 +111,19 @@ _sbx_atexit.register(lambda: _sbx_shutil.rmtree(_SANDBOX_DIR, ignore_errors=True
 
 
 # ---------------------------------------------------------------------------
+# Process sandbox (v4.1.2). The suite runs on machines with a live KaproTUN
+# session, with administrator rights. Nothing in it may end a real process:
+# whatever asks core.orphans to kill is recorded here instead.
+# ---------------------------------------------------------------------------
+from kapro_tun.core import orphans as _orphans_mod
+
+KILL_CALLS: list[int] = []
+_V412_REAL_KILL = _orphans_mod._kill     # only ever called with a fake psutil
+_orphans_mod._kill = lambda pid: (KILL_CALLS.append(int(pid)) or True)
+_orphans_mod._processes = lambda: iter(())      # and nothing real is even listed
+
+
+# ---------------------------------------------------------------------------
 # Firewall sandbox — the suite must never touch the machine's real firewall.
 # Tests call webrtc_block.remove() / killswitch.remove() / manager.disconnect()
 # directly. Run elevated next to a live KaproTUN session, those were real
@@ -1938,35 +1951,38 @@ check("updater: dismissing cancels the download, never installs/quits (v3.3.7)",
 
 def _v34_egress_change_detection() -> None:
     """v3.4.0: ConnectionManager.egress_changed() detects an Ethernet↔Wi-Fi
-    roam via the local source-IP fingerprint for the server. Truth table:
-    same fp → False, different fp → True, unresolvable-now (mid-switch) → False,
-    not connected → False. The fingerprint helper must never raise."""
+    roam. Truth table: the network of the snapshot still there → False, gone
+    → True, unreadable-now (mid-switch) → False, not connected → False. The
+    fingerprint helper must never raise.
+    (v4.1.2: the fingerprint is the physical default route, not the source
+    address towards the server — see the v4.1.2 network check.)"""
     from kapro_tun.core import controller as ctl
     mgr = ctl.ConnectionManager()
 
-    # Fingerprint is best-effort: no server set → None, never raises.
+    # Fingerprint is best-effort: a value or None, never raises.
     mgr._server_ip = ""
-    if mgr._egress_fingerprint() is not None:
-        raise AssertionError("no server → fingerprint must be None")
+    got = mgr._egress_fingerprint()
+    if got is not None and not isinstance(got, str):
+        raise AssertionError(f"fingerprint must be a string or None, got {got!r}")
 
     # Drive the state machine with stubs (no real sockets / sing-box).
     mgr.is_connected = lambda: True         # type: ignore[assignment]
     mgr._server_ip = "203.0.113.7"
-    mgr._egress_fp = "192.168.1.50"         # snapshot = Ethernet source IP
+    mgr._egress_fp = "eth|192.168.1.50|192.168.1.1"     # snapshot = Ethernet
 
-    mgr._egress_fingerprint = lambda: "192.168.1.50"   # same NIC
+    mgr._egress_fingerprints = lambda: ["eth|192.168.1.50|192.168.1.1"]   # same NIC
     if mgr.egress_changed():
-        raise AssertionError("same source IP must NOT read as a roam")
+        raise AssertionError("the same network must NOT read as a roam")
 
-    mgr._egress_fingerprint = lambda: "192.168.0.30"   # roamed to Wi-Fi
+    mgr._egress_fingerprints = lambda: ["wlan|192.168.0.30|192.168.0.1"]  # roamed to Wi-Fi
     if not mgr.egress_changed():
-        raise AssertionError("different source IP must read as a roam")
+        raise AssertionError("a different network must read as a roam")
 
-    mgr._egress_fingerprint = lambda: None             # mid-switch, no route
+    mgr._egress_fingerprints = lambda: None            # mid-switch, no route
     if mgr.egress_changed():
         raise AssertionError("unresolvable fingerprint must NOT false-trigger")
 
-    mgr._egress_fingerprint = lambda: "192.168.0.30"
+    mgr._egress_fingerprints = lambda: ["wlan|192.168.0.30|192.168.0.1"]
     mgr.is_connected = lambda: False        # type: ignore[assignment]
     if mgr.egress_changed():
         raise AssertionError("disconnected → egress_changed must be False")
@@ -5376,12 +5392,16 @@ def _v3_orphan_tun_cleanup() -> None:
     # first's live sing-box and start a reconnect storm.
     import inspect as _ins
     from kapro_tun import main as _main
+    # v4.1.2: both go through core.orphans, which ends a helper only if it was
+    # started from our own data folder — never another VPN client's engine of
+    # the same name (behaviour: the v4.1.2 "own orphans" check).
+    from kapro_tun.core import orphans as _orph
     ksrc = _ins.getsource(_main._kill_orphan_helpers)
-    if "sing-box.exe" not in ksrc or '"sing-box"' not in ksrc:
+    if "kill_own_helpers" not in ksrc or "sing-box" not in _orph.HELPER_NAMES:
         raise AssertionError("startup orphan-killer must include sing-box (both OSes)")
     from kapro_tun.core import controller as _C
     fsrc = _ins.getsource(_C.ConnectionManager._free_tun_device)
-    if "taskkill" not in fsrc or "pkill" not in fsrc:
+    if "kill_own_helpers" not in fsrc:
         raise AssertionError("_free_tun_device must kill orphans on both OSes")
     if "sing-box" not in fsrc or "tun2socks" not in fsrc:
         raise AssertionError("_free_tun_device must target BOTH TUN engines")
@@ -10825,6 +10845,380 @@ check("storage: unreadable files are set aside, failed saves are reported (v4.1.
       _v411_storage_does_not_lose_or_hide)
 check("tun: a system without IPv6 gets an IPv4-only tunnel instead of a dead engine (v4.1.1)",
       _v411_tun_without_ipv6)
+
+
+# ---------------------------------------------------------------------------
+# v4.1.2 — reliability: only our own orphans are killed, a network change is
+# noticed, the user's choice of server replaces a pending reconnect
+# ---------------------------------------------------------------------------
+
+section("v4.1.2: own orphans only, network change, user choice over auto-reconnect")
+
+
+def _v412_only_our_own_orphans_are_killed() -> None:
+    """At startup (and on a busy TUN device) the client used to end every
+    process called sing-box.exe / xray.exe / ... — including the engine of
+    another VPN client running next to it. Now only helpers started from our
+    own data folder."""
+    import inspect
+    import os
+    from kapro_tun import main as _main
+    from kapro_tun.core import controller as _c, orphans
+
+    def _dir(path):
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    with _v4_fresh_data_dir() as tmp, \
+            _v4_patched(_sbx_paths, sing_box_dir=lambda: _dir(tmp / "sing-box"),
+                        tun_dir=lambda: _dir(tmp / "tun")):
+        exe = _sbx_paths.sing_box_exe()
+        if tmp not in exe.parents:
+            raise AssertionError("this check must not look at the real engine folder")
+        win = sys.platform == "win32"
+        suffix = ".exe" if win else ""
+        foreign = "C:\\Program Files\\Happ\\core\\" if win else "/opt/happ/core/"
+        procs = [
+            (101, exe.name, str(exe)),                                    # ours
+            (102, exe.name, foreign + exe.name),                          # another client's engine
+            (103, exe.name, ""),                                          # path unknown
+            (104, "tun2socks" + suffix, str(tmp / "tun" / ("tun2socks" + suffix))),   # ours, legacy
+            (105, "chrome" + suffix, str(tmp / ("chrome" + suffix))),     # in our folder, not a helper
+            (106, "xray" + suffix, foreign + "xray" + suffix),            # another client's
+            (os.getpid(), exe.name, str(exe)),                            # never ourselves
+        ]
+        if win:
+            procs.append((107, exe.name.upper(), str(exe).upper()))       # same file, other case
+        killed: list = []
+        with _v4_patched(orphans, _processes=lambda: iter(procs),
+                         _kill=lambda pid: (killed.append(pid) or True)):
+            count = orphans.kill_own_helpers()
+            want = [101, 104] + ([107] if win else [])
+            if killed != want or count != len(want):
+                raise AssertionError(f"killed {killed}, expected only our own helpers {want}")
+
+            # Only the TUN engines when asked for those.
+            killed.clear()
+            orphans.kill_own_helpers(("sing-box",))
+            if killed != [101] + ([107] if win else []):
+                raise AssertionError(f"a narrower request killed {killed}")
+
+            # The connect path's "free the TUN device" goes the same way.
+            killed.clear()
+            mgr = _c.ConnectionManager(on_log=lambda _l: None)
+            with _v4_patched(_c.time, sleep=lambda _s: None):
+                mgr._free_tun_device()
+            if 102 in killed or 106 in killed or 101 not in killed:
+                raise AssertionError(f"_free_tun_device killed {killed}")
+
+        # A process that was told to go but is slow to leave still counts as
+        # ended (the caller then waits for the adapter); one that cannot be
+        # told does not.
+        import types
+
+        class _Proc:
+            def __init__(self, pid):
+                self.pid = pid
+
+            def kill(self):
+                if self.pid == base + 3:
+                    raise PermissionError("access denied")
+                if self.pid == base + 4:
+                    raise fake_psutil.NoSuchProcess()
+
+            def wait(self, timeout=None):
+                if self.pid == base + 2:
+                    raise TimeoutError("still there")
+
+        # Process ids that cannot exist, so that even a slip in this test
+        # could not reach a real process; and the fake module is put into the
+        # real module table (rebinding sys.modules does not affect imports).
+        base = 990_000_000
+        fake_psutil = types.SimpleNamespace(
+            Process=_Proc, NoSuchProcess=type("NoSuchProcess", (Exception,), {}))
+        saved_psutil = sys.modules.get("psutil")
+        sys.modules["psutil"] = fake_psutil
+        try:
+            outcome = [_V412_REAL_KILL(base + n) for n in (1, 2, 3, 4)]
+        finally:
+            if saved_psutil is None:
+                sys.modules.pop("psutil", None)
+            else:
+                sys.modules["psutil"] = saved_psutil
+        if outcome != [True, True, False, True]:
+            raise AssertionError(f"ended / slow / refused / already gone read as {outcome}")
+
+        # If processes cannot be listed, nothing is killed — never "by name then".
+        def cannot():
+            raise RuntimeError("no psutil")
+
+        killed.clear()
+        with _v4_patched(orphans, _processes=cannot, _kill=lambda pid: killed.append(pid)):
+            if orphans.kill_own_helpers() != 0 or killed:
+                raise AssertionError("with no process list something was still killed")
+
+    for fn in (_main._kill_orphan_helpers, _c.ConnectionManager._free_tun_device):
+        src = inspect.getsource(fn)
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+        if '"/IM"' in code or "pkill" in code.split('"""')[-1]:
+            raise AssertionError(f"{fn.__name__} still kills by process name")
+        if "kill_own_helpers" not in code:
+            raise AssertionError(f"{fn.__name__} does not use the path-checked kill")
+
+
+def _v412_network_change_is_noticed() -> None:
+    """The watchdog compared the source address of a route to the VPN server —
+    and under a TUN that route IS the tunnel, so the address was always
+    10.255.0.2 and a move from cable to Wi-Fi was never seen. It now looks at
+    the physical default route."""
+    from kapro_tun.core import controller as _c, egress
+    from kapro_tun.core import sing_box_config as sc
+    tun = sc.TUN_INET4.split("/")[0]
+    R = egress.Route
+    addrs = {50: tun, 12: "192.168.1.34", 18: "10.0.0.7"}
+    cable = R(iface=12, gateway="192.168.1.1", metric=25)
+    wifi = R(iface=18, gateway="10.0.0.1", metric=50)
+    tunnel = R(iface=50, gateway="0.0.0.0", metric=0)
+
+    on_cable = egress.pick([tunnel, cable, wifi], addrs, tun)
+    if not on_cable or tun in on_cable or "192.168.1.1" not in on_cable:
+        raise AssertionError(f"the physical default route was not picked: {on_cable}")
+    if egress.pick([tunnel, cable], addrs, tun) != on_cable:
+        raise AssertionError("a second network merely being there (or going) reads as a change")
+    on_wifi = egress.pick([tunnel, wifi], addrs, tun)
+    if not on_wifi or on_wifi == on_cable:
+        raise AssertionError("moving from cable to Wi-Fi was not seen")
+    if egress.pick([tunnel], addrs, tun) is not None or egress.pick([], {}, tun) is not None:
+        raise AssertionError("with no physical route the answer must be 'unknown', not a value")
+    both = egress.usable([wifi, tunnel, cable], addrs, tun)
+    if both != [on_cable, on_wifi]:
+        raise AssertionError(f"all physical networks, preferred first, expected: {both}")
+    # The tunnel is also recognised by its name (macOS/Linux have no index map).
+    named = egress.pick([R("KaproTun", "0.0.0.0", 0), R("eth0", "192.168.1.1", 100)],
+                        {"eth0": "192.168.1.34"}, tun, tun_names=("KaproTun",))
+    if not named or "eth0" not in named:
+        raise AssertionError(f"the tunnel was not told apart by name: {named}")
+
+    # Whatever this system gives must be a value or None, never an exception.
+    got = egress.fingerprints(tun)
+    if got is not None and got is not egress.UNSUPPORTED and (
+            not isinstance(got, list) or any(tun in fp for fp in got)):
+        raise AssertionError(f"fingerprints() returned {got!r}")
+    # fingerprints() turns any failure into "unknown" — so the reader itself
+    # is run here, where a wrong structure layout or a parsing slip shows.
+    if sys.platform == "win32":
+        _routes, addr_map = egress._windows()
+        if "127.0.0.1" not in [a for items in addr_map.values() for a in items]:
+            raise AssertionError(f"the Windows address table was misread: {addr_map}")
+    elif sys.platform.startswith("linux"):
+        egress._linux()
+
+    proc_route = (
+        "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+        "wlan0\t00000000\t0100000A\t0003\t0\t0\t600\t00000000\t0\t0\t0\n"
+        "eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+        "eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0\n"
+        "KaproTun\t00000000\t00000000\t0001\t0\t0\t0\t00000000\t0\t0\t0\n")
+    linux = egress._parse_proc_route(proc_route)
+    if [(r.iface, r.gateway, r.metric) for r in linux] != [
+            ("wlan0", "10.0.0.1", 600), ("eth0", "192.168.1.1", 100), ("KaproTun", "0.0.0.0", 0)]:
+        raise AssertionError(f"/proc/net/route misread: {linux}")
+    got = egress.usable(linux, {"eth0": ["192.168.1.34"], "wlan0": ["10.0.0.7"]}, tun, ("KaproTun",))
+    if got != ["eth0|192.168.1.34|192.168.1.1", "wlan0|10.0.0.7|10.0.0.1"]:
+        raise AssertionError(f"Linux routes, preferred first, expected: {got}")
+
+    netstat = (
+        "Routing tables\n\nInternet:\n"
+        "Destination        Gateway            Flags               Netif Expire\n"
+        "default            link#22            UCSg                utun4\n"
+        "default            192.168.1.1        UGScg                 en0\n"
+        "default            10.0.0.1           UGScIg                en5\n"
+        "default            link#19            UCSIg           bridge100      !\n"
+        "127                127.0.0.1          UCS                   lo0\n"
+        "192.168.1          link#6             UCS                   en0      !\n")
+    mac = egress._parse_netstat(netstat)
+    if [(r.iface, r.gateway) for r in sorted(mac, key=lambda r: r.metric)] != [
+            ("en0", "192.168.1.1"), ("en5", "10.0.0.1")]:
+        raise AssertionError(f"netstat output misread: {mac}")
+    # Ethernet plugged in next to Wi-Fi and preferred: Wi-Fi is still listed,
+    # so a session built over it is not torn down.
+    swapped = netstat.replace("UGScg                 en0", "UGScIg                en0") \
+                     .replace("UGScIg                en5", "UGScg                 en5")
+    first, second = egress.usable(egress._parse_netstat(swapped), {}, tun)
+    if not first.startswith("en5|") or not second.startswith("en0|"):
+        raise AssertionError(f"a re-ranked macOS network dropped out of the list: {first} {second}")
+
+    class _Engine:
+        def is_running(self):
+            return True
+
+    mgr = _c.ConnectionManager(on_log=lambda _l: None)
+    mgr.sing_box_process = _Engine()
+    mgr._server_ip = "203.0.113.7"
+    seq: list = []
+    with _v4_patched(_c.egress, fingerprints=lambda *_a, **_k: seq.pop(0)):
+        seq[:] = [["A", "C"]]
+        mgr._egress_fp = mgr._egress_fingerprint()
+        if mgr._egress_fp != "A":
+            raise AssertionError("the snapshot must be the network the system prefers")
+        for now, want in ((["A"], False),          # still there
+                          (None, False),           # cannot be read right now
+                          ([], False),             # between two networks
+                          (["B", "A"], False),     # another one is preferred, ours is still there
+                          (["B"], True),           # ours is gone
+                          (["C"], True)):
+            seq[:] = [now]
+            if mgr.egress_changed() is not want:
+                raise AssertionError(f"networks {now!r} after 'A' read as changed={not want}")
+        # No snapshot (the routes were unreadable when the tunnel came up):
+        # the first readable answer becomes it, instead of an unwatched session.
+        mgr._egress_fp = None
+        seq[:] = [["B"]]
+        if mgr.egress_changed() or mgr._egress_fp != "B":
+            raise AssertionError("a session with no snapshot stayed unwatched")
+        seq[:] = [["A"]]
+        if not mgr.egress_changed():
+            raise AssertionError("a late snapshot does not detect the next change")
+
+    # Where the platform gives no route table, the old probe is the fallback —
+    # but the tunnel's own address is never taken for a network.
+    class _Sock:
+        def __init__(self, *_a):
+            pass
+
+        def connect(self, _addr):
+            pass
+
+        def getsockname(self):
+            return (probe["ip"], 0)
+
+        def close(self):
+            pass
+
+    probe = {"ip": tun}
+    with _v4_patched(_c.egress, fingerprints=lambda *_a, **_k: egress.UNSUPPORTED), \
+            _v4_patched(_c.socket, socket=_Sock):
+        if mgr._egress_fingerprint() is not None:
+            raise AssertionError("the tunnel's own address was taken for the network's")
+        probe["ip"] = "192.168.1.34"
+        if mgr._egress_fingerprint() != "192.168.1.34":
+            raise AssertionError("the fallback probe no longer works")
+
+
+def _v412_user_choice_replaces_a_pending_reconnect() -> None:
+    """A reconnect waiting on its timer (after a crash, a DNS heal, a network
+    change) kept waiting when the user picked a server or pressed Connect —
+    and then fired into the new session. And a pick made while a connect was
+    in flight changed which server the window said it was on."""
+    from kapro_tun.gui import main_window as mw
+    a, b = _v401_cfg("A", "10.0.0.1"), _v401_cfg("B", "10.0.0.2")
+
+    class _Timer:
+        def __init__(self):
+            self.active = False
+
+        def isActive(self):
+            return self.active
+
+        def stop(self):
+            self.active = False
+
+        def start(self, _ms):
+            self.active = True
+
+    class _Mgr:
+        def __init__(self):
+            self.connected, self.saved = False, {}
+
+        def is_connected(self):
+            return self.connected
+
+        def update_settings(self, **kw):
+            self.saved.update(kw)
+
+    class _Page:
+        def __getattr__(self, _name):
+            return lambda *a, **k: None
+
+    class _Win:
+        def __init__(self):
+            self.manager, self._active_config = _Mgr(), a
+            self._reconnect_timer, self._connecting = _Timer(), False
+            self._reconnect_attempts, self._reconnect_max = 0, 3
+            self._auto_recovery_disabled, self._reconnect_history = False, []
+            self._mem_heal_count, self._mem_heal_exhausted_notified = 0, False
+            self._last_mem_heal_ts, self._mem_breach_streak = 0.0, 0
+            self._sock_exhaust_bursts, self._last_sock_exhaust_ts = 0, 0.0
+            self.home_page = self.logs_page = _Page()
+            self.calls: list = []
+
+        def _user_takes_over(self):
+            mw.MainWindow._user_takes_over(self)
+
+        def _do_connect(self):
+            self.calls.append(("connect", self._active_config.name,
+                               self._reconnect_timer.active, self._reconnect_attempts))
+
+        def _do_disconnect(self, reason="user_requested", hold_killswitch=False):
+            self.calls.append(("disconnect", hold_killswitch))
+            self._reconnect_timer.stop()
+            self.manager.connected = False
+
+        def _refresh_home(self):
+            pass
+
+    said: list = []
+    with _v4_patched(mw, show_toast=lambda _w, text, **_k: said.append(text)):
+        # A pick while a connect is in flight changes nothing.
+        w = _Win()
+        w._connecting = True
+        mw.MainWindow._on_tray_config_picked(w, b)
+        if w._active_config is not a or w.calls or w.manager.saved or not said:
+            raise AssertionError("a tray pick made mid-connect changed the active server "
+                                 "or said nothing")
+
+        # A pick while a reconnect is waiting replaces it.
+        for entry in ("tray", "button"):
+            w = _Win()
+            w._reconnect_timer.active, w._reconnect_attempts = True, 2
+            w._auto_recovery_disabled = True
+            if entry == "tray":
+                mw.MainWindow._on_tray_config_picked(w, b)
+                want = "B"
+            else:
+                mw.MainWindow._on_connect_click(w)
+                want = "A"
+            if w.calls != [("connect", want, False, 0)]:
+                raise AssertionError(f"{entry}: the pending reconnect was left armed "
+                                     f"(or its attempt count kept): {w.calls}")
+            if w._auto_recovery_disabled:
+                raise AssertionError(f"{entry}: a connect the user asked for must re-enable recovery")
+
+        # Switching while connected still disconnects first, holding the kill-switch.
+        w = _Win()
+        w.manager.connected = True
+        mw.MainWindow._on_tray_config_picked(w, b)
+        if w.calls != [("disconnect", True), ("connect", "B", False, 0)]:
+            raise AssertionError(f"switching servers while connected: {w.calls}")
+
+        # And a timer that fires into a live session does nothing.
+        w = _Win()
+        w.manager.connected, w._reconnect_attempts = True, 1
+        mw.MainWindow._do_auto_reconnect(w)
+        if w.calls:
+            raise AssertionError("a deferred reconnect connected on top of a live session")
+        w.manager.connected = False
+        mw.MainWindow._do_auto_reconnect(w)
+        if [c[0] for c in w.calls] != ["connect"]:
+            raise AssertionError("a deferred reconnect no longer reconnects")
+
+
+check("startup: only helpers from our own folder are killed, never another VPN's (v4.1.2)",
+      _v412_only_our_own_orphans_are_killed)
+check("network: a change of the physical interface is noticed under a TUN (v4.1.2)",
+      _v412_network_change_is_noticed)
+check("reconnect: the user's choice replaces a pending auto-reconnect (v4.1.2)",
+      _v412_user_choice_replaces_a_pending_reconnect)
 
 
 # ---------------------------------------------------------------------------

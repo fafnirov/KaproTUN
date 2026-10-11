@@ -23,44 +23,24 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _kill_orphan_helpers() -> None:
-    """Force-kill any leftover xray / tun2socks / hysteria / sing-box processes.
+    """End leftover engine processes (sing-box, and the xray / tun2socks /
+    hysteria of older versions) of a previous run of KaproTUN.
 
-    Why this is safe: the single-instance guard runs immediately before
-    this — so if we got this far, we are the ONLY KaproTUN running.
-    Anything with one of those image names is an orphan from a previous
-    crashed/force-closed KaproTUN run, holding file handles or — critically —
-    the shared "KaproTun" TUN adapter, which blocks the next download/start.
-    Kill them.
+    Why: the single-instance guard runs immediately before this — so if we
+    got this far, we are the ONLY KaproTUN running, and a helper of ours that
+    is still alive is an orphan from a crashed/force-closed run. It holds
+    file handles (a fresh engine download then fails with PermissionError)
+    and — critically — the "KaproTun" TUN adapter, which makes the next start
+    die with "configure tun interface: Cannot create a file when that file
+    already exists."
 
-    Why this matters in practice: on Windows, an open file handle in a
-    running process makes the file un-deletable AND un-overwritable (a fresh
-    xray.exe download fails with PermissionError). And BOTH TUN engines name
-    their device "KaproTun" — an orphan sing-box.exe / tun2socks.exe still
-    owning that adapter makes the next sing-box start die with
-    "configure tun interface: Cannot create a file when that file already
-    exists." sing-box was missing from this list before v3.0.6.
+    Whose: only processes started from our own data folder (core.orphans).
+    Until v4.1.2 this was `taskkill /IM sing-box.exe` — by name — and ended
+    the engine of any other VPN client running next to ours.
     """
-    # On Unix `pkill` is the closest equivalent. Both calls are
-    # idempotent — they exit non-zero when no matching process exists,
-    # which we swallow.
-    if sys.platform == "win32":
-        for name in ("xray.exe", "tun2socks.exe", "hysteria.exe", "sing-box.exe"):
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/IM", name],
-                    capture_output=True, timeout=3, creationflags=_NO_WINDOW,
-                )
-            except (OSError, subprocess.SubprocessError):
-                pass
-    else:
-        for name in ("xray", "tun2socks", "hysteria", "sing-box"):
-            try:
-                subprocess.run(
-                    ["pkill", "-9", "-x", name],
-                    capture_output=True, timeout=3,
-                )
-            except (OSError, subprocess.SubprocessError):
-                pass
+    from .core import orphans
+    orphans.kill_own_helpers()
+    if sys.platform != "win32":
         return
 
     # v3.0.9: a force-killed (/F) sing-box can't run its own auto_route cleanup,
