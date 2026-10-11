@@ -692,24 +692,33 @@ check("ipv6_block diagnostics/probe surface cleanly",
 
 def _ipv6_arm_gating() -> None:
     # v3.1.0: sing-box captures IPv6 in-tunnel and rejects global v6 with a RST,
-    # so _maybe_arm_ipv6_block NEVER installs a netsh v6 DROP (which caused
+    # so _maybe_arm_ipv6_block does NOT install a netsh v6 DROP (which caused
     # ERR_NETWORK_ACCESS_DENIED) — it only clears any stale block.
+    # v4.1.1: except when the tunnel has no IPv6 address (IPv6 switched off in
+    # the system): then it captures no IPv6, and the firewall rule is back.
     from kapro_tun.core import controller as ctrl
     mgr = ctrl.ConnectionManager(on_log=lambda _l: None)
-    orig = (ctrl.ipv6_block.is_supported, ctrl.ipv6_block.install, ctrl.ipv6_block.remove)
+    orig = (ctrl.ipv6_block.is_supported, ctrl.ipv6_block.install, ctrl.ipv6_block.remove,
+            ctrl.sing_box_config.tun_carries_ipv6)
     counts = {"install": 0, "remove": 0}
     ctrl.ipv6_block.is_supported = lambda: True
     ctrl.ipv6_block.install = lambda: (counts.__setitem__("install", counts["install"] + 1) or True)
     ctrl.ipv6_block.remove = lambda: counts.__setitem__("remove", counts["remove"] + 1)
     try:
         mgr.settings = {"ipv6_leak_protection": True}
+        ctrl.sing_box_config.tun_carries_ipv6 = lambda: True
         mgr._maybe_arm_ipv6_block()
         if counts["install"] != 0:
             raise AssertionError("must NOT install a netsh v6 block (sing-box handles v6)")
         if counts["remove"] < 1:
             raise AssertionError("must clear any stale v6 block")
+        ctrl.sing_box_config.tun_carries_ipv6 = lambda: False
+        mgr._maybe_arm_ipv6_block()
+        if counts["install"] != 1:
+            raise AssertionError("an IPv4-only tunnel must close IPv6 at the firewall")
     finally:
-        (ctrl.ipv6_block.is_supported, ctrl.ipv6_block.install, ctrl.ipv6_block.remove) = orig
+        (ctrl.ipv6_block.is_supported, ctrl.ipv6_block.install, ctrl.ipv6_block.remove,
+         ctrl.sing_box_config.tun_carries_ipv6) = orig
 
 
 def _http_connect_arms_ipv6_block() -> None:
@@ -5380,7 +5389,9 @@ def _v3_orphan_tun_cleanup() -> None:
     dsrc = _ins.getsource(_C.ConnectionManager.connect)
     if "_free_tun_device" in dsrc:
         raise AssertionError("connect() must NOT proactively kill (sibling-kill risk)")
-    sbsrc = _ins.getsource(_C.ConnectionManager._connect_tun_sing_box)
+    # (v4.1.1: starting the engine and waiting for it moved to _bring_up_tun_engine.)
+    sbsrc = (_ins.getsource(_C.ConnectionManager._connect_tun_sing_box)
+             + _ins.getsource(_C.ConnectionManager._bring_up_tun_engine))
     if "_free_tun_device" not in sbsrc or "already exists" not in sbsrc.lower():
         raise AssertionError("_connect_tun_sing_box must free the TUN reactively on collision")
     # Safety: it must not kill our own live helpers.
@@ -5724,9 +5735,13 @@ def _v3_singbox_skips_firewall_ipv6_block() -> None:
     # clears any stale block a prior build may have left.
     import inspect as _ins
     from kapro_tun.core import controller as _C
+    # v4.1.1: the one exception is a tunnel without an IPv6 address — the rule
+    # may be installed only behind that condition (behaviour: _ipv6_arm_gating).
     src = _ins.getsource(_C.ConnectionManager._maybe_arm_ipv6_block)
-    if "ipv6_block.install()" in src:
-        raise AssertionError("_maybe_arm_ipv6_block must NOT install a netsh v6 block")
+    gate = src.find("tun_carries_ipv6()")
+    if gate < 0 or src.find("ipv6_block.install()") < gate:
+        raise AssertionError("_maybe_arm_ipv6_block must NOT install a netsh v6 block "
+                             "while the tunnel itself captures IPv6")
     if "ipv6_block.remove()" not in src:
         raise AssertionError("_maybe_arm_ipv6_block must clear any stale v6 block")
 
@@ -5848,7 +5863,8 @@ def _v3_connect_is_forgiving() -> None:
     #     - process-up is also polled (no flat sleep that misjudges a slow start).
     import inspect as _ins
     from kapro_tun.core import controller as _C
-    src = _ins.getsource(_C.ConnectionManager._connect_tun_sing_box)
+    src = (_ins.getsource(_C.ConnectionManager._connect_tun_sing_box)
+           + _ins.getsource(_C.ConnectionManager._bring_up_tun_engine))
     # The redundant CDN gate must be GONE — no per-brand-host rollback.
     if "cdn_hosts" in src or "hosts=cdn_hosts" in src:
         raise AssertionError("connect must NOT re-introduce the per-CDN rollback gate")
@@ -7026,9 +7042,12 @@ def _failed_connect_leaves_no_firewall_rules() -> None:
     if mgr.protection_status:
         raise AssertionError("rollback left protection_status claiming rules are active")
 
+    # v4.1.1: every failure after arming goes through one handler in
+    # _connect_tun_sing_box (what it leaves behind is checked by running it,
+    # in the "system without IPv6" check).
     import inspect
-    src = inspect.getsource(_c.ConnectionManager)
-    if src.count("self._disarm_session_firewall()") < 2:
+    src = inspect.getsource(_c.ConnectionManager._connect_tun_sing_box)
+    if "self._disarm_session_firewall()" not in src:
         raise AssertionError("a connect failure path no longer uses the shared rollback")
 
 
@@ -10663,6 +10682,133 @@ def _v411_storage_does_not_lose_or_hide() -> None:
         raise AssertionError("a storage error produced no notice")
 
 
+def _v411_tun_without_ipv6() -> None:
+    """Where Windows has IPv6 switched off, the engine cannot give the tunnel
+    an IPv6 address and exits ("set ipv6 address: Element not found") — the
+    user cannot connect at all. The tunnel is then built with IPv4 only: known
+    in advance where the system says so, learned from the engine otherwise.
+    And IPv6 that the tunnel no longer captures is closed at the firewall."""
+    from kapro_tun.core import controller as _c, sing_box_config as sc
+    from kapro_tun.core.parser import parse
+    cfg = parse(SAMPLE_URLS[1][1])
+
+    def tun_addresses() -> list:
+        conf = sc.build_config(cfg, [], server_ip="203.0.113.7")
+        return next(i for i in conf["inbounds"] if i["type"] == "tun")["address"]
+
+    for value, off in ((0, False), (0x20, False), (0x01, False), (0x10, True), (0x11, True),
+                       (0xFF, True), (0xFFFFFFFF, True), (None, False), ("junk", False)):
+        if sc._ipv6_disabled_by(value) is not off:
+            raise AssertionError(f"DisabledComponents={value!r} read as disabled={not off}")
+
+    fatal = ("FATAL[0000] start service: start inbound/tun[tun-in]: configure tun "
+             "interface: set ipv6 address: Element not found.")
+
+    class _Engine:
+        def __init__(self):
+            self.running, self.started, self.logs, self.other_death = False, [], [], False
+
+        def start(self, path):
+            self.started.append(path)
+            if self.other_death:
+                self.logs.append("FATAL[0000] start service: something else entirely")
+                self.running = False
+            elif path == "v6.json":
+                self.logs.append(fatal)
+                self.running = False
+            else:
+                self.running = True
+
+        def stop(self):
+            self.running = False
+
+        def is_running(self):
+            return self.running
+
+        def recent_logs(self):
+            return list(self.logs)
+
+        def mark_live(self):
+            pass
+
+    with _v4_patched(sc, _tun_ipv6_refused=False, _IS_LINUX=False):
+        # Known in advance.
+        with _v4_patched(sc, _windows_ipv6_disabled=lambda: False):
+            if tun_addresses() != [sc.TUN_INET4, sc.TUN_INET6] or not sc.tun_carries_ipv6():
+                raise AssertionError("with IPv6 available the tunnel must carry both families")
+        with _v4_patched(sc, _windows_ipv6_disabled=lambda: True):
+            if tun_addresses() != [sc.TUN_INET4] or sc.tun_carries_ipv6():
+                raise AssertionError("with IPv6 switched off the tunnel still asks for an IPv6 address")
+
+        # Learned from the engine: the connect that hits it retries by itself.
+        for slow_death in (False, True):
+            sc._tun_ipv6_refused = False
+            said: list = []
+            fw: list = []
+            freed: list = []
+            mgr = _c.ConnectionManager(on_log=said.append)
+            mgr.settings = dict(mgr.settings, kill_switch=False, webrtc_leak_protection=False)
+            engine = mgr.sing_box_process = _Engine()
+            # The complaint this came from: the process outlived the "did it
+            # die at once" wait and fell over during the traffic check.
+            mgr._wait_until_running = lambda _t: engine.running or (
+                slow_death and engine.started[-1] == "v6.json")
+            mgr._wait_for_singbox_ready = lambda _t: engine.running
+            mgr._note_singbox_adblock_once = lambda: None
+            mgr._egress_fingerprint = lambda: "fp"
+            mgr._free_tun_device = lambda: freed.append(1)
+            with _v4_patched(sc, _windows_ipv6_disabled=lambda: False,
+                             write_config=lambda *_a, **_k: (
+                                 "v6.json" if sc.tun_carries_ipv6() else "v4.json"),
+                             check_config=lambda _p: (True, "")), \
+                    _v4_patched(_c.admin, is_admin=lambda: True), \
+                    _v4_patched(_c.sing_box_installer, is_installed=lambda: True), \
+                    _v4_patched(_c.socket, gethostbyname=lambda _h: "203.0.113.7"), \
+                    _v4_patched(_c.linux_tun_route, setup=lambda: None, teardown=lambda: None), \
+                    _v4_patched(_c.ipv6_block, is_supported=lambda: True,
+                                install=lambda: fw.append("install") or True,
+                                remove=lambda: fw.append("remove")):
+                mgr._connect_tun_sing_box(cfg, [])
+                how = "slowly" if slow_death else "at once"
+                if engine.started != ["v6.json", "v4.json"] or not engine.running:
+                    raise AssertionError(f"engine died {how} on the IPv6 address and the "
+                                         f"connect did not retry with IPv4 only: {engine.started}")
+                if mgr._active is not cfg:
+                    raise AssertionError("the IPv4-only retry did not end in a connected state")
+                if freed:
+                    raise AssertionError("the refusal was taken for a busy TUN device")
+                if fw[-1:] != ["install"]:
+                    raise AssertionError(f"IPv6 outside the tunnel was left open: {fw}")
+                if not any("ipv6" in line.lower() for line in said):
+                    raise AssertionError("the user is not told why the tunnel is IPv4-only")
+
+                # Remembered: the next connect does not fail first.
+                mgr.disconnect()
+                if fw[-1:] != ["remove"]:
+                    raise AssertionError("the IPv6 rule outlived the session")
+                engine.started.clear()
+                mgr._connect_tun_sing_box(cfg, [])
+                if engine.started != ["v4.json"] or fw[-1:] != ["install"]:
+                    raise AssertionError(f"the next connect tried IPv6 again: {engine.started}")
+                mgr.disconnect()
+
+                # Any other death is not retried, and leaves no rule behind.
+                engine.started.clear()
+                engine.other_death = True
+                try:
+                    mgr._connect_tun_sing_box(cfg, [])
+                except _c.ConnectionError:
+                    pass
+                else:
+                    raise AssertionError("a dead engine was reported as connected")
+                if len(engine.started) != 1 or fw[-1:] != ["remove"]:
+                    raise AssertionError(f"an unrelated failure was retried, or left the "
+                                         f"IPv6 rule behind: {engine.started} {fw[-3:]}")
+
+        # A failed IPv4-only retry is a failed connect, with nothing left armed.
+        sc._tun_ipv6_refused = False
+
+
 check("integrity: a verified file cannot be swapped while it is held (v4.1.1)",
       _v411_held_file)
 check("integrity: a held file is started by its real path, and the path is pinned (v4.1.1)",
@@ -10677,6 +10823,8 @@ check("installer: the downloaded application must match the one built with it (v
       _v411_installer_verifies_the_app_it_downloads)
 check("storage: unreadable files are set aside, failed saves are reported (v4.1.1)",
       _v411_storage_does_not_lose_or_hide)
+check("tun: a system without IPv6 gets an IPv4-only tunnel instead of a dead engine (v4.1.1)",
+      _v411_tun_without_ipv6)
 
 
 # ---------------------------------------------------------------------------

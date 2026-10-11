@@ -754,10 +754,10 @@ class ConnectionManager:
             self._log("[!] Движок отверг конфиг с правилами для игр — "
                       "пересобираю без них (игры пойдут через VPN).")
             app_log.log(f"[games-direct] config rejected, retrying without it: {msg}")
+            plan = dict(plan, games_direct=False)
             cfg_path = sing_box_config.write_config(
                 config, direct_domains, server_ip=server_ip,
-                block_ads=block_ads, on_log=self._log,
-                **dict(plan, games_direct=False),
+                block_ads=block_ads, on_log=self._log, **plan,
             )
             ok, msg = self._check_engine_config(cfg_path)
         if not ok:
@@ -784,66 +784,35 @@ class ConnectionManager:
         # regardless of which interface the route would take.
         self._maybe_arm_webrtc_block()
 
-        try:
-            self.sing_box_process.start(cfg_path)
-        except Exception as e:
-            self._disarm_session_firewall()
-            paths.remove_runtime_configs()
-            raise ConnectionError(tr("err.singbox_start_failed", error=e)) from e
+        # If the tunnel will not capture IPv6, close it at the firewall.
+        self._maybe_arm_ipv6_block()
 
         try:
-            # Did it die immediately (bad config / driver / TUN collision)?
-            # Poll for a few seconds rather than a flat sleep — a slightly-slow
-            # WinTUN init on a busy machine must NOT be misjudged as an instant
-            # crash (that errored out tunnels that were merely slow to come up).
-            if not self._wait_until_running(4.0):
-                tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
-                low = tail.lower()
-                tun_busy = ("already exists" in low or "configure tun" in low
-                            or "create tun" in low)
-                if tun_busy:
-                    # An orphan helper is still holding "KaproTun". Free it
-                    # REACTIVELY (only here, on a real collision — not on every
-                    # connect) and retry ONCE.
-                    self._log("[*] TUN «KaproTun» занят орфаном — освобождаю и "
-                              "пробую ещё раз…")
-                    self._free_tun_device()
-                    try:
-                        self.sing_box_process.start(cfg_path)
-                    except Exception as e:
-                        raise ConnectionError(
-                            tr("err.singbox_restart_failed", error=e)) from e
-                if not self._wait_until_running(4.0):
-                    tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
-                    if tun_busy:
-                        raise ConnectionError(
-                            tr("err.tun_device_busy")
-                            + (tr("err.singbox_log_tail", tail=tail) if tail else ""))
-                    raise ConnectionError(
-                        tr("err.singbox_died_on_start")
-                        + (f":\n{tail}" if tail else "."))
-            # Linux (kernel 7.0+): sing-box ran with auto_route OFF because its
-            # netlink route-add is rejected by the kernel. Now that the TUN
-            # device exists, lay the routing + DNS ourselves via iproute2/
-            # resolvectl. No-op on Windows/macOS, where auto_route already did it.
-            linux_tun_route.setup()
-            # The process being alive and DNS resolving are not enough: encrypted
-            # DNS is intentionally independent of the VPN transport. Require a
-            # real HTTP request whose route falls through final=proxy.
-            self._log("[*] Проверяю, что туннель sing-box живой…")
-            if not self._wait_for_singbox_ready(15.0):
-                # Surface the startup-relevant sing-box lines (missing default
-                # interface / no route / config) as a connect diagnostic.
-                diag = [l for l in self.sing_box_process.recent_logs()
-                        if not is_benign_noise(l, live=False)]
-                tail = "\n".join(diag[-6:])
-                raise ConnectionError(
-                    tr("err.singbox_no_real_traffic")
-                    + (tr("err.singbox_diag_tail", tail=tail) if tail else ""))
-            # Confirmed live → switch the log filter to steady-state, so
-            # ambiguous network errors become transient noise instead of alarms.
-            self.sing_box_process.mark_live()
-            self._log("[*] sing-box TUN активен — DNS и реальный трафик через VPN проходят.")
+            try:
+                self._bring_up_tun_engine(cfg_path)
+            except ConnectionError:
+                if not self._tun_ipv6_was_refused():
+                    raise
+                # IPv6 is switched off in this Windows, in a way we could not
+                # see in advance: the engine could not give the tunnel its
+                # IPv6 address and exited. Without the address it works — so
+                # build the tunnel IPv4-only and try once more, rather than
+                # leave the user unable to connect at all.
+                self.sing_box_process.stop()
+                linux_tun_route.teardown()
+                sing_box_config.note_tun_ipv6_refused()
+                self._log("[*] Система не дала туннелю IPv6-адрес (IPv6 в Windows "
+                          "отключён) — поднимаю туннель только с IPv4…")
+                app_log.log("[tun] ipv6 address refused by the system, retrying IPv4-only")
+                cfg_path = sing_box_config.write_config(
+                    config, direct_domains, server_ip=server_ip,
+                    block_ads=block_ads, **plan,
+                )
+                ok, msg = self._check_engine_config(cfg_path)
+                if not ok:
+                    raise ConnectionError(tr("err.singbox_rejected_config", msg=msg))
+                self._maybe_arm_ipv6_block()
+                self._bring_up_tun_engine(cfg_path)
         except Exception:
             self.sing_box_process.stop()
             linux_tun_route.teardown()
@@ -859,6 +828,80 @@ class ConnectionManager:
         # can detect an Ethernet↔Wi-Fi roam and clean-reconnect (v3.4.0).
         self._server_ip = server_ip
         self._egress_fp = self._egress_fingerprint()
+
+    def _tun_ipv6_was_refused(self) -> bool:
+        """Did the engine just die because the system would not let it set
+        the tunnel's IPv6 address? (False once we have stopped asking for
+        one, so the retry happens once.)"""
+        if not sing_box_config.tun_carries_ipv6():
+            return False
+        recent = "\n".join(self.sing_box_process.recent_logs()[-30:]).lower()
+        return sing_box_config.IPV6_REFUSED_MARK in recent
+
+    def _bring_up_tun_engine(self, cfg_path: str) -> None:
+        """Start the engine on `cfg_path` and wait until the tunnel carries
+        real traffic. Raises ConnectionError; the caller cleans up."""
+        try:
+            self.sing_box_process.start(cfg_path)
+        except Exception as e:
+            raise ConnectionError(tr("err.singbox_start_failed", error=e)) from e
+
+        # Did it die immediately (bad config / driver / TUN collision)?
+        # Poll for a few seconds rather than a flat sleep — a slightly-slow
+        # WinTUN init on a busy machine must NOT be misjudged as an instant
+        # crash (that errored out tunnels that were merely slow to come up).
+        if not self._wait_until_running(4.0):
+            tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
+            low = tail.lower()
+            if sing_box_config.IPV6_REFUSED_MARK in low:
+                # Also a "configure tun" line, but not a busy device: freeing
+                # the device and starting the same config again cannot help.
+                raise ConnectionError(tr("err.singbox_died_on_start") + f":\n{tail}")
+            tun_busy = ("already exists" in low or "configure tun" in low
+                        or "create tun" in low)
+            if tun_busy:
+                # An orphan helper is still holding "KaproTun". Free it
+                # REACTIVELY (only here, on a real collision — not on every
+                # connect) and retry ONCE.
+                self._log("[*] TUN «KaproTun» занят орфаном — освобождаю и "
+                          "пробую ещё раз…")
+                self._free_tun_device()
+                try:
+                    self.sing_box_process.start(cfg_path)
+                except Exception as e:
+                    raise ConnectionError(
+                        tr("err.singbox_restart_failed", error=e)) from e
+            if not self._wait_until_running(4.0):
+                tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
+                if tun_busy:
+                    raise ConnectionError(
+                        tr("err.tun_device_busy")
+                        + (tr("err.singbox_log_tail", tail=tail) if tail else ""))
+                raise ConnectionError(
+                    tr("err.singbox_died_on_start")
+                    + (f":\n{tail}" if tail else "."))
+        # Linux (kernel 7.0+): sing-box ran with auto_route OFF because its
+        # netlink route-add is rejected by the kernel. Now that the TUN
+        # device exists, lay the routing + DNS ourselves via iproute2/
+        # resolvectl. No-op on Windows/macOS, where auto_route already did it.
+        linux_tun_route.setup()
+        # The process being alive and DNS resolving are not enough: encrypted
+        # DNS is intentionally independent of the VPN transport. Require a
+        # real HTTP request whose route falls through final=proxy.
+        self._log("[*] Проверяю, что туннель sing-box живой…")
+        if not self._wait_for_singbox_ready(15.0):
+            # Surface the startup-relevant sing-box lines (missing default
+            # interface / no route / config) as a connect diagnostic.
+            diag = [l for l in self.sing_box_process.recent_logs()
+                    if not is_benign_noise(l, live=False)]
+            tail = "\n".join(diag[-6:])
+            raise ConnectionError(
+                tr("err.singbox_no_real_traffic")
+                + (tr("err.singbox_diag_tail", tail=tail) if tail else ""))
+        # Confirmed live → switch the log filter to steady-state, so
+        # ambiguous network errors become transient noise instead of alarms.
+        self.sing_box_process.mark_live()
+        self._log("[*] sing-box TUN активен — DNS и реальный трафик через VPN проходят.")
 
     def _connect_proxy_sing_box(self, config: ProxyConfig,
                                 direct_domains: list[str]) -> None:
@@ -968,6 +1011,10 @@ class ConnectionManager:
             self.release_killswitch()
         try:
             webrtc_block.remove()
+        except Exception:
+            pass
+        try:
+            ipv6_block.remove()
         except Exception:
             pass
         self.protection_status = {}
@@ -1090,16 +1137,35 @@ class ConnectionManager:
             app_log.log("[protection] kill_switch requested but NOT armed")
 
     def _maybe_arm_ipv6_block(self) -> None:
-        """No-op firewall-wise for the sing-box TUN: the tunnel itself captures
-        IPv6 (inet6 address + auto_route) and REJECTS global-unicast v6 in-tunnel
-        with a TCP RST, so a netsh v6 DROP is both redundant AND the cause of
-        ERR_NETWORK_ACCESS_DENIED. Just clear any stale firewall block a prior
-        build left behind. (The sing-box connect path no longer calls this; kept
-        callable for safety.)"""
+        """Keep IPv6 from going around the tunnel.
+
+        Normally there is nothing to do at the firewall: the tunnel itself
+        captures IPv6 (inet6 address + auto_route) and REJECTS global-unicast
+        v6 in-tunnel with a TCP RST — a netsh v6 DROP on top would be
+        redundant AND is the cause of ERR_NETWORK_ACCESS_DENIED. So any stale
+        rule is cleared.
+
+        The exception (v4.1.1): a tunnel built without an IPv6 address
+        (sing_box_config.tun_carries_ipv6() is False) captures no IPv6 at all.
+        If the network still has working IPv6, it would leave past the VPN —
+        so there the firewall rule is the protection again."""
+        if sing_box_config.tun_carries_ipv6() or not ipv6_block.is_supported():
+            try:
+                ipv6_block.remove()
+            except Exception:
+                pass
+            return
         try:
-            ipv6_block.remove()
+            armed = ipv6_block.install()
         except Exception:
-            pass
+            armed = False
+        if armed:
+            self._log("[*] Туннель без IPv6 — исходящий IPv6 закрыт правилом "
+                      "firewall, чтобы он не шёл мимо VPN")
+        else:
+            self._log("[!] Туннель без IPv6, а правило firewall для IPv6 поставить "
+                      "не удалось — IPv6-трафик может идти мимо VPN")
+            app_log.log("[protection] ipv6 block requested (IPv4-only tunnel) but NOT armed")
 
     def _maybe_arm_webrtc_block(self) -> None:
         """If user enabled WebRTC-leak protection, install the STUN-block

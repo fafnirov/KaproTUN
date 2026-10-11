@@ -42,6 +42,54 @@ TUN_INET4 = "10.255.0.2/30"
 # in-tunnel we instead REJECT global-unicast v6 with a clean TCP RST (see the
 # route rules), so Happy-Eyeballs falls back to IPv4 instantly and v6 never leaks.
 TUN_INET6 = "fdfe:dcba:9876::1/126"
+
+# v4.1.1: the IPv6 address is not always possible. Where Windows has IPv6
+# switched off for its adapters, the engine cannot give the tunnel one and
+# exits — "configure tun interface: set ipv6 address: Element not found" —
+# and the user cannot connect at all. The tunnel is then built IPv4-only:
+# known in advance where the system says so (the registry policy below), and
+# learned from the engine's own words otherwise (the controller sees the line
+# and calls note_tun_ipv6_refused()). IPv6 that the tunnel then no longer
+# captures is closed at the firewall instead — controller._maybe_arm_ipv6_block.
+IPV6_REFUSED_MARK = "set ipv6 address"
+_tun_ipv6_refused = False     # learned from the engine in this run
+
+
+def _ipv6_disabled_by(value) -> bool:
+    """Does this DisabledComponents value switch IPv6 off on ordinary (non-
+    tunnel) adapters? That is bit 0x10; 0xFF — the usual "disable IPv6" recipe
+    — includes it. 0x20 ("prefer IPv4") and 0x01 (tunnel interfaces only) do
+    not: our TUN is an ordinary virtual adapter."""
+    try:
+        return bool(int(value) & 0x10)
+    except (TypeError, ValueError):
+        return False
+
+
+def _windows_ipv6_disabled() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters") as key:
+            value, _kind = winreg.QueryValueEx(key, "DisabledComponents")
+    except OSError:
+        return False              # not set: IPv6 is on
+    return _ipv6_disabled_by(value)
+
+
+def note_tun_ipv6_refused() -> None:
+    """The engine could not set the tunnel's IPv6 address on this system.
+    Remembered until the app exits, so later connects do not fail first."""
+    global _tun_ipv6_refused
+    _tun_ipv6_refused = True
+
+
+def tun_carries_ipv6() -> bool:
+    """Will the TUN be given an IPv6 address (and so capture IPv6)? Never on
+    Linux (see build_config), and not where the system cannot do it."""
+    return not (_IS_LINUX or _tun_ipv6_refused or _windows_ipv6_disabled())
 # Conservative internet-safe MTU. A jumbo 9000-byte TUN MTU made tiny probes
 # succeed while larger TLS/WebSocket/video flows stalled on paths where PMTUD or
 # fragmentation was filtered. 1400 leaves room for VLESS/REALITY and other
@@ -663,7 +711,7 @@ def build_config(
         "type": "tun",
         "tag": "tun-in",
         "interface_name": TUN_DEVICE_NAME,
-        "address": [TUN_INET4] if _IS_LINUX else [TUN_INET4, TUN_INET6],
+        "address": [TUN_INET4, TUN_INET6] if tun_carries_ipv6() else [TUN_INET4],
         "mtu": TUN_MTU,
         "auto_route": not _IS_LINUX,
         "strict_route": False,
