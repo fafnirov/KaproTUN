@@ -13,7 +13,10 @@ directly on your real connection, everything else goes through the tunnel.
 Free and open-source forever — GPL v3, no paid tier, no telemetry.
 
 <p align="center">
-  <img src="docs/screenshots/main-window.png" alt="KaproTUN main window — dark theme, single-screen layout" width="640">
+  <img src="docs/screenshots/main-window.png" alt="KaproTUN home screen: connected, exit IP and location, live speed" width="210">
+  <img src="docs/screenshots/servers.png" alt="Server list with ping, search and sorting" width="210">
+  <img src="docs/screenshots/statistics.png" alt="Statistics: live speed and traffic for the last 24 hours" width="210">
+  <img src="docs/screenshots/settings.png" alt="Settings: startup, kill switch, leak protection" width="210">
 </p>
 
 ---
@@ -137,14 +140,23 @@ interface and straight into the block they're being tunnelled to avoid.
   and real TCP/UDP/proxy tests in one copy-pasteable report. Plus an opt-in
   **Network Debug Mode** with millisecond event logging to catch rare problems.
 - 🔒 **Encrypted-on-disk configs** — Windows DPAPI (the mechanism Chrome uses
-  for saved passwords). Old plaintext configs auto-upgrade on first launch.
+  for saved passwords). Old plaintext configs auto-upgrade on first launch. A
+  file that cannot be read is set aside, never overwritten.
+- ✅ **Only verified files are run** — the engine and the driver are compared
+  with SHA-256 digests pinned in the source before every start, and on Windows
+  held against replacement while they run. The installer and the in-app
+  updater install nothing that does not match its digest.
 - 🚫 **Leak protection** — IPv6 rejected in-tunnel (no `ERR_NETWORK_ACCESS_DENIED`
   fallout; an unreachable route on Linux), WebRTC/STUN blocked on Windows, DNS
-  hijacked into the tunnel's resolver.
+  hijacked into the tunnel's resolver. Where Windows has IPv6 switched off the
+  tunnel is built IPv4-only and outbound IPv6 is closed at the firewall.
 - 📡 **Tray quick-connect** — top-3 fastest configs by ping, one click to switch.
 - 🌍 **EN / RU localisation**, light/dark themes, live traffic graph, per-config
   ping.
-- 🔄 **In-app auto-update** — checks GitHub Releases, downloads, installs.
+- 🔄 **In-app auto-update** — checks GitHub Releases, downloads the installer
+  (our mirror first, GitHub second), verifies its checksum, installs.
+- 🤝 **Leaves other VPN clients alone** — on startup it cleans up only its own
+  leftover processes, never another client's engine of the same name.
 
 ## Privacy
 
@@ -166,7 +178,7 @@ address.
 | macOS | 13+ (Apple Silicon and Intel) |
 | Linux | glibc 2.31+ (Ubuntu 20.04+ and equivalents) |
 
-Disk: ~90 MB total (~57 MB app + ~33 MB for the sing-box engine and, on
+Disk: ~105 MB total (~66 MB app + ~38 MB for the sing-box engine and, on
 Windows, the WinTUN driver — both downloaded on first connect).
 
 ## Install & run
@@ -197,11 +209,12 @@ On first connect the app downloads its engine into `%LOCALAPPDATA%\KaproTUN\`
 (Windows) or `~/.local/share/KaproTUN/` (macOS / Linux): **sing-box**
 (`sing-box/`) and, on Windows, the **WinTUN** driver (`tun/`).
 
-> The sing-box version is **pinned to the 1.12.x line** on purpose. The 1.13
+> The sing-box version is **pinned to one build, 1.12.9**, on purpose. The 1.13
 > line regressed the VLESS data-path on Windows — the tunnel establishes and
 > the handshake succeeds, but payload bytes never flow, which `sing-box check`
-> cannot catch because it's a runtime bug, not a config error. An already
-> installed 1.13.x is detected and replaced automatically.
+> cannot catch because it's a runtime bug, not a config error. The pin is the
+> file's SHA-256: any other build found in the engine folder — newer, older or
+> modified — is not run and is replaced with the pinned one.
 
 ## How it works
 
@@ -240,9 +253,12 @@ kapro_tun/
 ├── core/
 │   ├── parser.py             # share-URL parsers (vless / vmess / trojan / ss / hy2)
 │   ├── sing_box_config.py    # generates the sing-box JSON: routing, DNS, TUN, transport gate
-│   ├── sing_box_installer.py # downloads sing-box (mirror → GitHub), enforces the 1.12.x pin
+│   ├── sing_box_installer.py # downloads sing-box (mirror → GitHub), pins the build by SHA-256
+│   ├── file_guard.py         # checks a file against its digest and holds it while it runs
 │   ├── sing_box_process.py   # sing-box subprocess + log-noise classifier
 │   ├── controller.py         # connect/disconnect lifecycle, health verdict, roam detection
+│   ├── egress.py             # which physical network the machine is on (for roam detection)
+│   ├── orphans.py            # ends only our own leftover engine processes
 │   ├── net_diag.py           # Network Diagnostics snapshot + TCP/UDP probes
 │   ├── dns_health.py         # bounded DNS / tunnel-transport probes
 │   ├── network_routes.py     # Windows route + interface queries
@@ -256,7 +272,8 @@ kapro_tun/
 │   ├── i18n.py               # EN/RU translation tables
 │   └── paths.py
 ├── gui/
-│   ├── main_window.py        # home / settings / logs, watchdogs, connect flow
+│   ├── main_window.py        # window shell, navigation, watchdogs, connect flow
+│   ├── home_v2.py            # home screen: connect button, server card, IP and speed
 │   ├── diagnostics_dialog.py # Network Diagnostics screen
 │   ├── bypass_apps_dialog.py # user-defined apps that skip the VPN
 │   ├── servers_page.py, add_server_v2.py, settings_v2.py, stats_page.py
