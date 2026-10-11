@@ -19,18 +19,20 @@ client (first launch / update)
 
 ## What is served
 
-Exactly three things, and nothing else:
+Exactly four things, and nothing else:
 
 | Asset | Upstream | Required? |
 |---|---|---|
 | `sing-box-<pin>-<platform>.zip` / `.tar.gz` (6 platforms) | `SagerNet/sing-box` | **yes** — no engine, no VPN |
 | `wintun-<ver>.zip` | `wintun.net` | no — wintun.net isn't blocked in RU |
 | `KaproTUN-Setup-v<ver>.exe` | our own release, asset `KaproTUN-Setup.exe` | **yes** — the auto-updater's only RU-reachable path |
+| `KaproTUN-v<ver>.exe` | our own release, asset `KaproTUN.exe` | **yes** — what the installer downloads (since v4.1.3 it asks the mirror first) |
 
 The geoip zone file is **not** mirrored: `geoip_ru.py` fetches ipdeny.com
 directly and ipdeny is not blocked.
 
-Disk usage: roughly 250 MB with three installers retained.
+Disk usage: roughly 450 MB with three installers and three application
+files retained.
 
 Versions are **not** pinned in the sync script. It reads
 `SINGBOX_PINNED_VERSION` and `WINTUN_FILENAME` straight out of

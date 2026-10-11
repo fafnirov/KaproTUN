@@ -198,7 +198,7 @@ def acquire_main_exe(version: str, progress: ProgressCb = None) -> Path:
     Order of preference:
       1. Locally embedded payload (if anyone re-enables the embed in the
          spec — keeps offline-installer scenarios working).
-      2. GitHub Releases download of the matching version tag.
+      2. Download of the matching version: our mirror, then GitHub Releases.
 
     Range 5..50 of the overall progress is reserved for this step.
     """
@@ -250,9 +250,60 @@ def _sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
+def _main_exe_sources(version: str) -> list:
+    """Where KaproTUN.exe is fetched from, in order: (host, url).
+
+    Our mirror first. Release downloads from github.com stall for many
+    people in Russia — the page opens, the file starts, and then the read
+    times out (a user reported exactly that on a 126 Mbit/s line) — and
+    until v4.1.3 GitHub was the only place this installer asked, once. The
+    mirror is a convenience, not a trust decision: whatever arrives must
+    match the digest, from either place."""
+    return [("kaprovpn.pro", paths.mirror_exe_url(version)),
+            ("github.com", paths.github_release_exe_url(version))]
+
+
+def _fetch_main_exe(url: str, tmp: Path, progress: ProgressCb) -> None:
+    """Stream `url` into `tmp`. Raises requests.RequestException on a network
+    failure and RuntimeError when the size limit is exceeded."""
+    # Bypass system proxy — installer runs on a fresh machine where
+    # there shouldn't be one, but if a previous KaproTUN crashed and
+    # left a stale 127.0.0.1:2080 entry in the registry, this would
+    # try to tunnel through a dead port and fail with WinError 10061.
+    with requests.get(url, stream=True, timeout=(15, 30),
+                      proxies={"http": "", "https": ""}) as r:
+        r.raise_for_status()
+        total = int(r.headers.get("Content-Length", 0))
+        # Reject an over-size download up front (declared size).
+        if total > _MAX_MAIN_EXE:
+            raise RuntimeError(
+                f"файл подозрительно большой ({total // (1024 * 1024)} МБ, лимит "
+                f"{_MAX_MAIN_EXE // (1024 * 1024)} МБ)")
+        downloaded = 0
+        last_pct = 5
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                downloaded += len(chunk)
+                # ...and abort mid-stream if the server lied / omitted it.
+                if downloaded > _MAX_MAIN_EXE:
+                    raise RuntimeError("скачивание превысило лимит размера")
+                if not (progress and total):
+                    continue
+                # Map download progress to the 5..50 slice of overall.
+                pct = 5 + int(downloaded * 45 / total)
+                if pct == last_pct:
+                    continue
+                last_pct = pct
+                mb = downloaded // (1024 * 1024)
+                total_mb = total // (1024 * 1024)
+                progress(f"Скачиваю KaproTUN.exe… {mb} / {total_mb} МБ", pct)
+
+
 def _download_main_exe(version: str, target: Path,
                        progress: ProgressCb = None) -> Path:
-    url = paths.github_release_exe_url(version)
     # What the download must hash to. Known before a single byte is fetched:
     # from this installer itself when it is a release build, else from the
     # release. Without it nothing is installed — an application that runs
@@ -272,68 +323,28 @@ def _download_main_exe(version: str, target: Path,
     # still locked (app didn't fully exit), the swap fails cleanly with a
     # clear message instead of corrupting the installed binary.
     tmp = target.with_name(target.name + ".download")
-    try:
-        # Bypass system proxy — installer runs on a fresh machine where
-        # there shouldn't be one, but if a previous KaproTUN crashed and
-        # left a stale 127.0.0.1:2080 entry in the registry, this would
-        # try to tunnel through a dead port and fail with WinError 10061.
-        with requests.get(url, stream=True, timeout=(15, 30),
-                          proxies={"http": "", "https": ""}) as r:
-            r.raise_for_status()
-            total = int(r.headers.get("Content-Length", 0))
-            # Reject an over-size download up front (declared size).
-            if total > _MAX_MAIN_EXE:
-                raise RuntimeError(
-                    f"KaproTUN.exe подозрительно большой "
-                    f"({total // (1024 * 1024)} МБ, лимит "
-                    f"{_MAX_MAIN_EXE // (1024 * 1024)} МБ) — скачивание отклонено."
-                )
-            downloaded = 0
-            last_pct = 5
-            with open(tmp, "wb") as f:
-                for chunk in r.iter_content(chunk_size=64 * 1024):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    # ...and abort mid-stream if the server lied / omitted it.
-                    if downloaded > _MAX_MAIN_EXE:
-                        raise RuntimeError(
-                            "Скачивание KaproTUN.exe превысило лимит размера "
-                            "— прервано."
-                        )
-                    if not (progress and total):
-                        continue
-                    # Map download progress to the 5..50 slice of overall.
-                    pct = 5 + int(downloaded * 45 / total)
-                    if pct == last_pct:
-                        continue
-                    last_pct = pct
-                    mb = downloaded // (1024 * 1024)
-                    total_mb = total // (1024 * 1024)
-                    progress(
-                        f"Скачиваю KaproTUN.exe… {mb} / {total_mb} МБ",
-                        pct,
-                    )
-    except requests.RequestException as e:
+    problems: list = []
+    for host, url in _main_exe_sources(version):
+        try:
+            _fetch_main_exe(url, tmp, progress)
+        except (requests.RequestException, RuntimeError, OSError) as e:
+            _silent_unlink(tmp)
+            problems.append(f"{host}: {e}")
+            continue
+        got = _sha256_of(tmp)
+        if got == want:
+            break
+        # Not the file this installer was built with (a stale or damaged
+        # copy, or one changed on the way). It is not installed; the next
+        # source may have the right one.
         _silent_unlink(tmp)
+        problems.append(f"{host}: контрольная сумма не совпала (получена {got[:16]}…)")
+    else:
         raise RuntimeError(
-            f"Не удалось скачать KaproTUN.exe с GitHub:\n{e}\n\n"
-            "Проверь интернет и доступ к github.com."
-        ) from e
-    except RuntimeError:
-        # Size-limit (or other) failure — clean the partial temp file, surface.
-        _silent_unlink(tmp)
-        raise
-
-    got = _sha256_of(tmp)
-    if got != want:
-        _silent_unlink(tmp)
-        raise RuntimeError(
-            "Скачанный KaproTUN.exe не совпал с контрольной суммой и не "
-            "установлен — файл повреждён или подменён по дороге.\n\n"
-            f"Ожидалась: {want}\nПолучена:  {got}\n\n"
-            "Запусти установщик заново. Если повторяется — напиши в Issues."
+            "Не удалось скачать KaproTUN.exe:\n"
+            + "\n".join(problems)
+            + "\n\nПроверь интернет и запусти установщик заново. Если не помогает, "
+            f"скачай KaproTUN.exe вручную:\n{paths.release_page_url(version)}"
         )
 
     try:

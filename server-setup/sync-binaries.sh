@@ -5,11 +5,13 @@
 #   run:      sudo /usr/local/bin/kaprotun-sync
 #   schedule: see kaprotun-mirror.timer (systemd) or cron in README.md
 #
-# What it mirrors — exactly the three things the client asks us for:
+# What it mirrors — exactly the four things the client asks us for:
 #
 #   sing-box-<pin>-<platform>.<zip|tar.gz>   engine        (SagerNet/sing-box)
 #   wintun-<ver>.zip                         Windows TUN   (wintun.net)
 #   KaproTUN-Setup-v<ver>.exe                installer     (our own release)
+#   KaproTUN-v<ver>.exe                      application   (our own release;
+#                                            what the installer downloads)
 #
 # Nothing else. The geoip zone file is NOT mirrored — geoip_ru.py fetches
 # ipdeny.com directly, and ipdeny is not blocked in RU.
@@ -137,6 +139,16 @@ if [ -n "${LATEST_TAG:-}" ]; then
     else
         fail "  [FAIL] no usable KaproTUN-Setup.exe on ${LATEST_TAG}"
     fi
+    # The application itself: the installer above is a downloader, and what
+    # it downloads is this file (installer/paths.mirror_exe_url). It checks
+    # the file against a digest built into it, so a stale copy here is
+    # refused and the installer goes on to GitHub.
+    if fetch "https://github.com/${REPO}/releases/download/${LATEST_TAG}/KaproTUN.exe" \
+             "$TMP_DIR/KaproTUN-v${VER}.exe" 5242880; then
+        note "  mirrored application v${VER}"
+    else
+        fail "  [FAIL] no usable KaproTUN.exe on ${LATEST_TAG}"
+    fi
 else
     fail "  [FAIL] couldn't resolve the latest release tag"
 fi
@@ -163,6 +175,13 @@ note "  $promoted file(s) promoted"
 # the version it started with. Everything older goes.
 mapfile -t old_installers < <(ls -1t "$MIRROR_DIR"/KaproTUN-Setup-v*.exe 2>/dev/null | tail -n +$((KEEP_INSTALLERS + 1)))
 for old in "${old_installers[@]:-}"; do
+    [ -n "$old" ] || continue
+    note "  pruning $(basename "$old")"
+    rm -f "$old"
+done
+# Same for the application files those installers download.
+mapfile -t old_apps < <(ls -1t "$MIRROR_DIR"/KaproTUN-v*.exe 2>/dev/null | tail -n +$((KEEP_INSTALLERS + 1)))
+for old in "${old_apps[@]:-}"; do
     [ -n "$old" ] || continue
     note "  pruning $(basename "$old")"
     rm -f "$old"

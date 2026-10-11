@@ -55,3 +55,13 @@ def bundled_main_exe() -> Optional[Path]:
 def github_release_exe_url(version: str) -> str:
     """Direct download URL for KaproTUN.exe attached to a tagged release."""
     return f"https://github.com/fafnirov/KaproTUN/releases/download/v{version}/{APP_EXE_NAME}"
+
+
+def mirror_exe_url(version: str) -> str:
+    """The same file on our mirror (server-setup/sync-binaries.sh puts it
+    there under a flat, versioned name)."""
+    return f"https://kaprovpn.pro/files/KaproTUN-v{version}.exe"
+
+
+def release_page_url(version: str) -> str:
+    return f"https://github.com/fafnirov/KaproTUN/releases/tag/v{version}"

@@ -118,7 +118,8 @@ invisible downgrade.
    versions. There is no recurring poll.
 3. **`kaprovpn.pro/files`** — our mirror for the sing-box binary and the
    WinTUN driver, with upstream fallback (github.com/SagerNet/sing-box,
-   wintun.net). Downloaded once and cached.
+   wintun.net). Downloaded once and cached. The Windows installer also takes
+   `KaproTUN.exe` from there (since v4.1.3), with github.com as the fallback.
 4. **`ipdeny.com`** — the aggregated RU geoip-CIDR zone file, fetched
    directly. It is not mirrored. This list decides which destinations leave
    the tunnel and it has no signature to pin (it changes hourly), so it is

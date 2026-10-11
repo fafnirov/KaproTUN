@@ -11222,6 +11222,127 @@ check("reconnect: the user's choice replaces a pending auto-reconnect (v4.1.2)",
 
 
 # ---------------------------------------------------------------------------
+# v4.1.3 — the installer has more than one place to get the application from
+# ---------------------------------------------------------------------------
+
+section("v4.1.3: the installer falls back between the mirror and GitHub")
+
+
+def _v413_installer_has_two_sources() -> None:
+    """Setup downloaded KaproTUN.exe from github.com only, in one attempt.
+    Where release downloads from GitHub stall (a user's report: "Read timed
+    out" on a 126 Mbit/s line) the application could not be installed at all.
+    It now tries our mirror as well; the file must match the digest either
+    way, so which source it came from decides nothing."""
+    import requests as _rq
+    from installer import operations as ops, paths as ipaths, payload_digest
+
+    app = b"MZ the application" * 500
+    asked: list = []
+
+    class _Resp:
+        def __init__(self, body: bytes, status: int = 200):
+            self._body, self.status_code = body, status
+            self.headers = {"Content-Length": str(len(body))}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise _rq.exceptions.HTTPError(f"{self.status_code} Client Error")
+
+        def iter_content(self, chunk_size=65536):
+            for i in range(0, len(self._body), chunk_size):
+                yield self._body[i:i + chunk_size]
+
+    def web(mirror, github):
+        """requests.get, answering by host. A value is bytes to serve, an
+        int HTTP status, or an exception to raise."""
+        def get(url, *_a, **_k):
+            host = url.split("/")[2]
+            asked.append(host)
+            what = mirror if host == "kaprovpn.pro" else github
+            if isinstance(what, Exception):
+                raise what
+            if isinstance(what, int):
+                return _Resp(b"", what)
+            return _Resp(what)
+        return get
+
+    def attempt(target):
+        asked.clear()
+        try:
+            ops._download_main_exe("9.9.9", target)
+        except RuntimeError as e:
+            return str(e)
+        return ""
+
+    stalled = _rq.exceptions.ReadTimeout("Read timed out. (read timeout=30)")
+    refused = _rq.exceptions.ConnectionError("connection refused")
+    other = b"MZ something else" * 500
+
+    if "kaprovpn.pro" not in ipaths.mirror_exe_url("9.9.9") or "9.9.9" not in ipaths.mirror_exe_url("9.9.9"):
+        raise AssertionError("the installer does not know where the mirror keeps the application")
+
+    with _v4_fresh_data_dir() as tmp, \
+            _v4_patched(payload_digest, MAIN_EXE_SHA256=_v411_sha(app)):
+        target = tmp / "KaproTUN.exe"
+
+        def leftovers():
+            return [p.name for p in tmp.iterdir() if p.name != "KaproTUN.exe"]
+
+        def installed(case: str, want_hosts: list):
+            if not target.is_file() or target.read_bytes() != app or leftovers():
+                raise AssertionError(f"{case}: the application was not installed cleanly")
+            if asked != want_hosts:
+                raise AssertionError(f"{case}: sources tried {asked}, expected {want_hosts}")
+            target.unlink()
+
+        # The report: GitHub stalls. The mirror is asked first and is enough.
+        with _v4_patched(ops.requests, get=web(app, stalled)):
+            if attempt(target):
+                raise AssertionError("with GitHub stalled and the mirror up the install failed")
+            installed("GitHub stalled", ["kaprovpn.pro"])
+
+        # The mirror is down, has no such version yet, or serves something else:
+        # GitHub is next, and the wrong file is not installed.
+        for case, mirror in (("mirror down", refused), ("not on the mirror yet", 404),
+                             ("mirror serves another file", other)):
+            with _v4_patched(ops.requests, get=web(mirror, app)):
+                if attempt(target):
+                    raise AssertionError(f"{case}: GitHub was not used as the fallback")
+                installed(case, ["kaprovpn.pro", "github.com"])
+
+        # Nothing works: one error that names both, and nothing left on disk.
+        with _v4_patched(ops.requests, get=web(refused, stalled)):
+            said = attempt(target)
+        if not said or "kaprovpn.pro" not in said or "github.com" not in said \
+                or "Read timed out" not in said or "releases" not in said:
+            raise AssertionError(f"the failure does not say what was tried and what to do: {said}")
+        if target.exists() or leftovers():
+            raise AssertionError("a failed download left files behind")
+
+        # Everything answers, nothing matches: still not installed.
+        with _v4_patched(ops.requests, get=web(other, other)):
+            if not attempt(target) or target.exists() or leftovers():
+                raise AssertionError("a file that matches no digest was installed")
+
+    # The mirror script publishes what the installer asks for.
+    script = (_Path(_REPO_ROOT) / "server-setup" / "sync-binaries.sh").read_text(encoding="utf-8")
+    if "KaproTUN-v${VER}.exe" not in script or "/KaproTUN.exe" not in script:
+        raise AssertionError("the mirror script does not publish KaproTUN.exe under the name "
+                             "the installer asks for")
+
+
+check("installer: the application comes from the mirror or GitHub, verified either way (v4.1.3)",
+      _v413_installer_has_two_sources)
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 
