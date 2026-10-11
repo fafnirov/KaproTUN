@@ -11338,8 +11338,30 @@ def _v413_installer_has_two_sources() -> None:
                              "the installer asks for")
 
 
+def _v413_units_follow_the_language() -> None:
+    """Speed and traffic on the home and statistics screens were written with
+    Russian units ("МБ/с") whatever the interface language was."""
+    from kapro_tun.core import i18n as _i18n, xray_stats
+    prev = _i18n._current
+    try:
+        _i18n.set_locale("en")
+        got = (xray_stats.format_rate(512), xray_stats.format_rate(86.3 * 1024),
+               xray_stats.format_rate(2.4 * 1024 * 1024), xray_stats.format_bytes(900),
+               xray_stats.format_bytes(int(9.6 * 2**20)), xray_stats.format_bytes(3 * 2**30))
+        if got != ("512 B/s", "86.3 KB/s", "2.4 MB/s", "900 B", "9.6 MB", "3.00 GB"):
+            raise AssertionError(f"English units: {got}")
+        _i18n.set_locale("ru")
+        got = (xray_stats.format_rate(2.4 * 1024 * 1024), xray_stats.format_bytes(int(9.6 * 2**20)))
+        if got != ("2.4 МБ/с", "9.6 МБ"):
+            raise AssertionError(f"Russian units: {got}")
+    finally:
+        _i18n.set_locale(prev)
+
+
 check("installer: the application comes from the mirror or GitHub, verified either way (v4.1.3)",
       _v413_installer_has_two_sources)
+check("ui: speed and traffic units follow the interface language (v4.1.3)",
+      _v413_units_follow_the_language)
 
 
 # ---------------------------------------------------------------------------

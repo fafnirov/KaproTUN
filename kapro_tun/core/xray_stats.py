@@ -86,23 +86,25 @@ def query_tun_iface_stats(iface_name: str) -> Optional[TrafficStats]:
 
 
 def format_rate(bps: float) -> str:
-    """Bytes/second → human-readable string."""
+    """Bytes/second → human-readable string, in the interface language."""
+    from .i18n import tr
     if bps < 1024:
-        return f"{bps:.0f} Б/с"
+        return tr("bw.rate_bps", val=f"{bps:.0f}")
     if bps < 1024 * 1024:
-        return f"{bps / 1024:.1f} КБ/с"
-    return f"{bps / (1024 * 1024):.1f} МБ/с"
+        return tr("bw.rate_kbps", val=f"{bps / 1024:.1f}")
+    return tr("bw.rate_mbps", val=f"{bps / (1024 * 1024):.1f}")
 
 
 def format_bytes(total: int) -> str:
-    """Cumulative bytes → human-readable string."""
+    """Cumulative bytes → human-readable string, in the interface language."""
+    from .i18n import tr
     if total < 1024:
-        return f"{total} Б"
+        return tr("bw.size_b", val=total)
     if total < 1024 * 1024:
-        return f"{total / 1024:.1f} КБ"
+        return tr("bw.size_kb", val=f"{total / 1024:.1f}")
     if total < 1024 * 1024 * 1024:
-        return f"{total / (1024 * 1024):.1f} МБ"
-    return f"{total / (1024 * 1024 * 1024):.2f} ГБ"
+        return tr("bw.size_mb", val=f"{total / (1024 * 1024):.1f}")
+    return tr("bw.size_gb", val=f"{total / (1024 * 1024 * 1024):.2f}")
 
 
 def query_clash_totals(host: str, port: int, secret: str,
