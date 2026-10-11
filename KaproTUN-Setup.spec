@@ -11,6 +11,19 @@ copies KaproTUN.exe to %LOCALAPPDATA%\\Programs\\KaproTUN, creates Start
 Menu + Desktop shortcuts, registers an uninstaller. No admin required.
 """
 import glob
+import os
+
+# A release installer must know the digest of the KaproTUN.exe it will
+# install (installer/payload_digest.py, filled in by
+# packaging/write_payload_digest.py between the two builds). Building it
+# without one in CI would silently ship an installer that has to ask GitHub
+# what to trust — so there, that is an error.
+if os.environ.get("GITHUB_ACTIONS") == "true":
+    import re as _re
+    _src = open(os.path.join("installer", "payload_digest.py"), encoding="utf-8").read()
+    if not _re.search(r'^MAIN_EXE_SHA256 = "[0-9a-f]{64}"$', _src, _re.M):
+        raise SystemExit("installer/payload_digest.py is empty — run "
+                         "packaging/write_payload_digest.py after building KaproTUN.exe")
 
 # Note: we deliberately do NOT embed dist/KaproTUN.exe here any more.
 # Doing so doubled the installer's download size to ~100 MB. Instead,

@@ -25,7 +25,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QTextBrowser, QVBoxLayout
 
 from .. import __version__
-from ..core import app_log
+from ..core import app_log, file_guard, net_download
 from ..core.i18n import tr
 from ..core.updater import UpdateInfo
 from . import kit, tokens
@@ -34,6 +34,14 @@ from .merge_prompt import one_line
 
 
 SETUP_FILENAME = "KaproTUN-Setup.exe"
+
+# Installers that were verified and started, kept from changing until this
+# process ends (see UpdaterDialog._on_downloaded).
+_launch_guards: list = []
+
+
+def release_launch_guards() -> None:
+    file_guard.release_all(_launch_guards)
 # Our own mirror — reachable from RU/CIS where github.com is frequently
 # DNS-blocked / throttled. That block (getaddrinfo failed for github.com)
 # is exactly what made auto-update dead-on-arrival for those users.
@@ -174,16 +182,15 @@ class _DownloadWorker(Background):
         errors: list[str] = []
         urls = list(self._urls)
         if not self._expect_sha256:
-            # GitHub did not report a digest for the installer, so we have
-            # nothing to check the mirror's bytes against. Drop the mirror and
-            # use only the canonical source: the release asset is served by the
-            # same host, under the same TLS, as the API response that told us
-            # this release exists — trusting one and not the other would be
-            # theatre. The mirror is the path that needs the hash, and without
-            # one it does not get used.
-            urls = [u for u in urls if KAPROTUN_MIRROR_BASE not in u]
-            app_log.log("[integrity] no digest from GitHub — mirror skipped, "
-                        "installer will come from github.com only")
+            # GitHub did not report a digest for the installer, so there is
+            # nothing to check the downloaded file against — neither the
+            # mirror's bytes, nor the file as it sits in the temp folder
+            # between download and launch. A file we cannot check is not one
+            # we run with administrator rights: the user is sent to the
+            # release page instead.
+            app_log.log("[integrity] no digest from GitHub — installer not downloaded")
+            self.failed.emit(tr("upd.no_digest"))
+            return
         for url in urls:
             if self._cancelled:
                 return
@@ -303,6 +310,9 @@ class UpdaterDialog(kit.OverlayDialog):
         self.status_label.style().polish(self.status_label)
 
     def _start_download(self) -> None:
+        # An installer held for a launch that then did not happen would block
+        # the download from replacing it.
+        release_launch_guards()
         self._cancelled = False
         self.update_btn.setEnabled(False)
         self._set_status(tr("upd.downloading", filename=SETUP_FILENAME,
@@ -342,10 +352,24 @@ class UpdaterDialog(kit.OverlayDialog):
         self._set_status(tr("upd.launching"))
         self.percent_label.setText("")
         self.progress_bar.set_fraction(None)
+        # The download was checked when it finished — but it sits in the
+        # temp folder, which any program of this user can write to, and we
+        # are about to run it with administrator rights. Check it again
+        # through a handle that keeps it from being changed, and start it
+        # while that handle is open: there is no moment in which a swapped
+        # file could be the one that runs.
+        try:
+            held = file_guard.hold_verified(self._setup_path,
+                                            getattr(self._info, "setup_sha256", ""))
+        except (net_download.IntegrityError, OSError) as e:
+            app_log.log(f"[integrity] installer refused before launch: {type(e).__name__}")
+            self._on_failed(str(e))
+            return
+        _launch_guards.append(held)
         # The installer takes over in silent mode and starts the new version.
         try:
             subprocess.Popen(
-                [str(self._setup_path), "--silent"],
+                [str(held.real_path), "--silent"],
                 creationflags=(
                     getattr(subprocess, "DETACHED_PROCESS", 0)
                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -353,8 +377,11 @@ class UpdaterDialog(kit.OverlayDialog):
                 close_fds=True,
             )
         except OSError as e:
+            release_launch_guards()
             self._on_failed(tr("upd.launch_failed", error=e))
             return
+        # The guard stays open until this process exits: the installer waits
+        # for us to quit before it does anything.
         self.accept()
         QApplication.quit()
 

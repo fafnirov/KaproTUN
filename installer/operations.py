@@ -16,7 +16,7 @@ from typing import Callable, Optional
 
 import requests
 
-from . import paths
+from . import paths, payload_digest
 
 
 ProgressCb = Optional[Callable[[str, int], None]]  # (status_text, percent 0-100)
@@ -225,9 +225,45 @@ def acquire_main_exe(version: str, progress: ProgressCb = None) -> Path:
 _MAX_MAIN_EXE = 150 * 1024 * 1024
 
 
+def _release_digest(version: str) -> str:
+    """SHA-256 of KaproTUN.exe as GitHub reports it for the release of
+    `version`, or "" if it cannot be had. Used only by an installer that was
+    built without its own digest (payload_digest)."""
+    api = f"https://api.github.com/repos/fafnirov/KaproTUN/releases/tags/v{version}"
+    try:
+        r = requests.get(api, timeout=(10, 15), proxies={"http": "", "https": ""})
+        r.raise_for_status()
+        for asset in r.json().get("assets") or []:
+            if str(asset.get("name") or "") == paths.APP_EXE_NAME:
+                return str(asset.get("digest") or "").removeprefix("sha256:").strip().lower()
+    except (requests.RequestException, ValueError, AttributeError):
+        pass
+    return ""
+
+
+def _sha256_of(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def _download_main_exe(version: str, target: Path,
                        progress: ProgressCb = None) -> Path:
     url = paths.github_release_exe_url(version)
+    # What the download must hash to. Known before a single byte is fetched:
+    # from this installer itself when it is a release build, else from the
+    # release. Without it nothing is installed — an application that runs
+    # with administrator rights is not put on disk unverified.
+    want = (payload_digest.MAIN_EXE_SHA256 or "").strip().lower() or _release_digest(version)
+    if len(want) != 64:
+        raise RuntimeError(
+            "Не удалось получить контрольную сумму KaproTUN.exe, поэтому "
+            "установка остановлена: файл нечем проверить.\n\n"
+            "Проверь интернет и доступ к github.com и запусти установщик заново."
+        )
     if progress:
         progress(f"Скачиваю KaproTUN.exe v{version}…", 5)
     # Download to a sibling temp file, then os.replace() it into place
@@ -289,6 +325,16 @@ def _download_main_exe(version: str, target: Path,
         # Size-limit (or other) failure — clean the partial temp file, surface.
         _silent_unlink(tmp)
         raise
+
+    got = _sha256_of(tmp)
+    if got != want:
+        _silent_unlink(tmp)
+        raise RuntimeError(
+            "Скачанный KaproTUN.exe не совпал с контрольной суммой и не "
+            "установлен — файл повреждён или подменён по дороге.\n\n"
+            f"Ожидалась: {want}\nПолучена:  {got}\n\n"
+            "Запусти установщик заново. Если повторяется — напиши в Issues."
+        )
 
     try:
         os.replace(tmp, target)

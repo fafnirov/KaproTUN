@@ -160,14 +160,21 @@ def download_to_file(url: str, dest: Path, max_bytes: int,
     BEFORE it is moved into place, so a file that fails the check never
     exists at `dest` for another process to pick up."""
     dest = Path(dest)
-    tmp = dest.with_name(dest.name + ".part")
+    # The partial file gets a random name and is created exclusively. Under a
+    # predictable name it could be put there first — as a link, to make this
+    # (elevated) process overwrite what it points to, or as a file somebody
+    # keeps a write handle on, to change it after the check below.
+    import tempfile
+    fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), prefix=dest.name + ".", suffix=".part")
+    tmp = Path(tmp_name)
     try:
         with requests.get(url, stream=True, timeout=timeout, proxies=_NO_PROXY) as r:
             r.raise_for_status()
             _reject_if_declared_too_big(r, max_bytes, url)
             total = _content_length(r)
             downloaded = 0
-            with open(tmp, "wb") as f:
+            with os.fdopen(fd, "wb") as f:
+                fd = None
                 for chunk in r.iter_content(chunk_size=256 * 1024):
                     if not chunk:
                         continue
@@ -181,6 +188,11 @@ def download_to_file(url: str, dest: Path, max_bytes: int,
         os.replace(tmp, dest)
         return dest
     except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             tmp.unlink()
         except OSError:

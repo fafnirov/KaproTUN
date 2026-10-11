@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import io
 import platform
-import re
 import stat
 import sys
 import tarfile
@@ -47,10 +46,6 @@ SINGBOX_LATEST = "https://api.github.com/repos/SagerNet/sing-box/releases/latest
 # route.default_domain_resolver) that 1.11 would reject.
 SINGBOX_PINNED_VERSION = "v1.12.9"
 
-# Release lines known to break the VLESS data-plane on Windows. A binary at or
-# above this (major, minor) is treated as "not installed" so we replace it with
-# the pinned 1.12.x. Bump this once upstream fixes the regression.
-_BLOCKED_MINOR = (1, 13)
 
 KAPROTUN_MIRROR_BASE = "https://kaprovpn.pro/files"
 
@@ -83,6 +78,45 @@ _PINNED_SHA256: dict[str, str] = {
         "0d571bf961c651cc5a4eaffe9715d7759edb484b90473f3fa25aaab87fa11961",
     "wintun-0.14.1.zip":
         "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51",
+}
+
+
+# SHA-256 of the files that actually get EXECUTED (or, for the driver, loaded
+# into the network stack), per platform: what is inside the archives above.
+#
+# The archive digests prove what was downloaded. They say nothing about what
+# is in the folder an hour later — and that folder is in the user's profile,
+# writable by any program of theirs, while the engine is started from it with
+# administrator rights. So before every start the files on disk are compared
+# with these, and held against changes while the engine runs (hold_engine()).
+#
+# It also pins the engine to exactly one build: a sing-box of another version
+# in that folder — including the 1.13.x line whose VLESS data-plane stalls on
+# Windows — is simply not the pinned file, and is replaced.
+#
+# Computed from the pinned archives (each first checked against its digest
+# above). Refresh together with SINGBOX_PINNED_VERSION / the WinTUN archive.
+_PINNED_BINARY_SHA256: dict[str, dict[str, str]] = {
+    "windows-amd64": {
+        "sing-box.exe": "5c94a0a25b1b61b2f50c00815e72d6f3e5e5d234e6adf7d8a02526b5b173bc79",
+        "wintun.dll": "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce",
+    },
+    "windows-arm64": {
+        "sing-box.exe": "27f9b8f808496809b8a2f8e6a670d759c6054360688a625c23743e391f74ff2b",
+        "wintun.dll": "f7ba89005544be9d85231a9e0d5f23b2d15b3311667e2dad0debd344918a3f80",
+    },
+    "darwin-amd64": {
+        "sing-box": "1667b65743297d4dec53c491b472e3e2f62fac8052c857d55cbf8d21f8a34599",
+    },
+    "darwin-arm64": {
+        "sing-box": "6ca4a7cc11a7b5ce126d3a7266238d3865692659e0d3f5388143f181249caa3d",
+    },
+    "linux-amd64": {
+        "sing-box": "d883cf185b05564674485b64973014955c8060493e597ddb90369a6860bf5441",
+    },
+    "linux-arm64": {
+        "sing-box": "849d1a59d7ad94483f70a6233d85c7c63042e06b1f0ad70ef1a04faecb2d7aae",
+    },
 }
 
 
@@ -141,52 +175,128 @@ def _pinned_fallback_url() -> str:
             f"{SINGBOX_PINNED_VERSION}/{_pinned_filename()}")
 
 
-def _parse_minor(version_str: str) -> Optional[tuple[int, int]]:
-    """Extract (major, minor) from a `sing-box version 1.12.9` string, or None
-    if it can't be parsed."""
-    m = re.search(r"(\d+)\.(\d+)\.\d+", version_str or "")
-    if not m:
-        return None
-    return int(m.group(1)), int(m.group(2))
-
-
-def is_blocked_version() -> bool:
-    """True if the on-disk sing-box is from a release line we've blacklisted for
-    breaking the VLESS data-plane on Windows (>= 1.13). Returns False if there's
-    no binary or its version can't be parsed (don't churn a possibly-fine one)."""
-    if not paths.sing_box_exe().is_file():
-        return False
-    mm = _parse_minor(get_installed_version() or "")
-    return mm is not None and mm >= _BLOCKED_MINOR
-
-
-def is_installed() -> bool:
-    if not paths.sing_box_exe().is_file():
-        return False
-    # A previously-downloaded 1.13.x stalls VLESS payloads — treat it as "not
-    # installed" so callers re-download the pinned 1.12.x over it (v3.1.2).
-    if is_blocked_version():
-        return False
-    # On Windows sing-box (like tun2socks) needs the WinTUN driver.
+def engine_files() -> dict:
+    """{file name: path} of everything that must be on disk, and must be the
+    pinned build, for the engine to be started on this platform."""
+    files = {paths.sing_box_exe().name: paths.sing_box_exe()}
     if sys.platform == "win32":
-        return paths.wintun_dll().is_file()
+        files[paths.wintun_dll().name] = paths.wintun_dll()     # the WinTUN driver
+    return files
+
+
+def expected_binary_sha256(name: str) -> str:
+    """Pinned digest of the engine file `name` for this platform, or ""."""
+    return _PINNED_BINARY_SHA256.get(_asset_marker(), {}).get(name, "")
+
+
+# is_installed() is asked several times around every connect, and hashing the
+# engine takes a moment. Remember the answer per file for as long as the file
+# looks untouched (same size, same modification time). This is a shortcut for
+# the question "is a download needed?" only — the check that guards the start
+# is hold_engine(), which always reads the bytes.
+_seen_good: dict[str, tuple] = {}
+
+
+def _matches_pin(name: str, path) -> bool:
+    want = expected_binary_sha256(name)
+    if not want:
+        return False
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    stamp = (want, st.st_size, st.st_mtime_ns)
+    if _seen_good.get(str(path)) == stamp:
+        return True
+    try:
+        net_download.verify_sha256(path, want)
+    except (net_download.IntegrityError, OSError):
+        _seen_good.pop(str(path), None)
+        return False
+    _seen_good[str(path)] = stamp
     return True
 
 
+def is_installed() -> bool:
+    """True when every engine file is present AND is the pinned build. A file
+    that is there but different — another version, a damaged download, one
+    that was tampered with — counts as not installed, so the caller downloads
+    the pinned build over it."""
+    return all(_matches_pin(name, path) for name, path in engine_files().items())
+
+
 def get_installed_version() -> Optional[str]:
-    if not paths.sing_box_exe().is_file():
+    """The engine's version, or None if the pinned build is not installed.
+
+    Known from the digest: a file that matches the pin IS that version. The
+    engine is not run to ask it — that would execute, with our rights, a file
+    nobody has checked yet."""
+    name = paths.sing_box_exe().name
+    if not _matches_pin(name, paths.sing_box_exe()):
         return None
-    import subprocess
+    return SINGBOX_PINNED_VERSION.lstrip("v")
+
+
+class EngineGuard:
+    """The engine's files, checked and held against changes. Keep it for as
+    long as the engine process runs; close() lets the files go."""
+
+    def __init__(self, held: list):
+        self._held = held
+
+    def real_path(self, name: str):
+        """Where the held file `name` really is — the path to start it by.
+        (Not the path we looked it up under: that one may lead through a
+        junction, which can be re-pointed; see file_guard.)"""
+        for item in self._held:
+            if item.path.name == name:
+                return item.real_path
+        raise KeyError(name)
+
+    def close(self) -> None:
+        from . import file_guard
+        file_guard.release_all(self._held)
+
+    def __enter__(self) -> "EngineGuard":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+
+def hold_engine() -> EngineGuard:
+    """Check every engine file against its pinned digest and keep it from
+    being changed, replaced or deleted until the returned guard is closed.
+
+    Call right before starting the engine and keep the guard while it runs.
+    Raises FileNotFoundError if a file is missing and
+    net_download.IntegrityError if one is not the pinned build."""
+    from . import file_guard
+    held: list = []
     try:
-        proc = subprocess.run(
-            [str(paths.sing_box_exe()), "version"],
-            capture_output=True, text=True, timeout=5,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        out = (proc.stdout or proc.stderr or "").strip().splitlines()
-        return out[0].strip() if out else None
+        for name, path in engine_files().items():
+            held.append(file_guard.hold_verified(path, expected_binary_sha256(name)))
+    except file_guard.HoldError as e:
+        # Nothing wrong with the bytes as far as we know — the file could not
+        # be held. Downloading it again would change nothing; say what it is.
+        file_guard.release_all(held)
+        app_log.log(f"[integrity] engine file could not be held: {type(e.__cause__).__name__}")
+        raise
+    except net_download.IntegrityError as e:
+        file_guard.release_all(held)
+        # Forget the "looked fine" shortcut: a file can be swapped for one of
+        # the same size and time stamp, and is_installed() must then stop
+        # saying yes — or the download that would repair it never starts.
+        _seen_good.clear()
+        app_log.log(f"[integrity] engine file refused before start: {type(e).__name__}")
+        raise net_download.IntegrityError(
+            "Файл движка VPN на диске не совпадает с проверенной сборкой "
+            f"sing-box {SINGBOX_PINNED_VERSION.lstrip('v')} и не будет запущен.\n"
+            "Подключись ещё раз — KaproTUN скачает движок заново.\n\n" + str(e)) from e
     except Exception:
-        return None
+        file_guard.release_all(held)
+        raise
+    return EngineGuard(held)
 
 
 def _fetch_release() -> ReleaseInfo:
@@ -257,6 +367,29 @@ def _download_wintun(url: str, progress: ProgressCb, attempts: int = 2,
     raise RuntimeError(f"Не удалось скачать WinTUN: {last_err}")
 
 
+def _write_verified(target, payload: bytes, name: str) -> None:
+    """Put `payload` at `target` only if it is the pinned build of `name`.
+    Written next to the target and moved into place, so a file that fails the
+    check never exists where the engine is started from."""
+    net_download.verify_sha256(payload, expected_binary_sha256(name))
+    # A new file under a random name, created exclusively: a predictable
+    # name could be planted as a link and make this (elevated) process
+    # overwrite whatever it points to.
+    import os
+    import tempfile
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".new")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        os.replace(tmp_name, target)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def _install_wintun(progress: ProgressCb) -> None:
     """Windows-only: fetch + extract the WinTUN driver DLL (mirror → upstream)."""
     want = expected_sha256(WINTUN_FILENAME)
@@ -268,16 +401,17 @@ def _install_wintun(progress: ProgressCb) -> None:
         data = _download_wintun(WINTUN_URL, progress, expect_sha256=want)
     except RuntimeError:
         data = _download_wintun(WINTUN_URL, progress, expect_sha256=want)
+    # The archive carries one DLL per architecture; take this machine's.
+    arch = "arm64" if _asset_marker().endswith("arm64") else "amd64"
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         dll_member = next(
             (n for n in zf.namelist()
-             if n.endswith("wintun.dll") and "amd64" in n),
+             if n.endswith("wintun.dll") and f"/{arch}/" in n),
             None,
         )
         if not dll_member:
-            raise RuntimeError("wintun.dll (amd64) not found in the archive")
-        with zf.open(dll_member) as src:
-            paths.wintun_dll().write_bytes(src.read())
+            raise RuntimeError(f"wintun.dll ({arch}) not found in the archive")
+        _write_verified(paths.wintun_dll(), zf.read(dll_member), paths.wintun_dll().name)
 
 
 def _extract_binary(data: bytes, target) -> None:
@@ -292,7 +426,7 @@ def _extract_binary(data: bytes, target) -> None:
             )
             if not member:
                 raise RuntimeError("sing-box.exe not found in the archive")
-            target.write_bytes(zf.read(member))
+            _write_verified(target, zf.read(member), want)
         return
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
         member = next(
@@ -305,7 +439,7 @@ def _extract_binary(data: bytes, target) -> None:
         src = tf.extractfile(member)
         if src is None:
             raise RuntimeError("sing-box binary unreadable in the archive")
-        target.write_bytes(src.read())
+        _write_verified(target, src.read(), want)
     try:
         st = target.stat()
         target.chmod(st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -316,22 +450,26 @@ def _extract_binary(data: bytes, target) -> None:
 def download_and_install(progress: ProgressCb = None) -> None:
     """Install sing-box (and the WinTUN driver on Windows).
 
-    v3.1.2: if a blacklisted 1.13.x binary is already on disk, delete it first
-    so we replace it with the pinned 1.12.x (otherwise the is_file() guard would
-    keep the broken engine forever). Best-effort unlink — a held file (sing-box
-    still running) is reaped by main._kill_orphan_helpers before we get here."""
+    A file that is already there but is not the pinned build — another
+    version, a damaged download, one somebody changed — is replaced. It is
+    not deleted first: the new file is written next to it and moved over it
+    only once it has passed its own check (_write_verified), so a download
+    that fails leaves things as they were, and a file that cannot be replaced
+    (still held by a running engine) is an error the caller sees — not a
+    silent "nothing happened"."""
     exe = paths.sing_box_exe()
-    if exe.is_file() and is_blocked_version():
-        try:
-            exe.unlink()
-        except OSError:
-            pass
-    if not exe.is_file():
+    if not _matches_pin(exe.name, exe):
+        if exe.is_file():
+            app_log.log("[integrity] sing-box on disk is not the pinned build — replacing it")
         release = _fetch_release()
         data = _download_with_fallback(release.filename, release.url, progress)
         _extract_binary(data, exe)
-    if sys.platform == "win32" and not paths.wintun_dll().is_file():
-        _install_wintun(progress)
+    if sys.platform == "win32":
+        dll = paths.wintun_dll()
+        if not _matches_pin(dll.name, dll):
+            if dll.is_file():
+                app_log.log("[integrity] wintun.dll on disk is not the pinned build — replacing it")
+            _install_wintun(progress)
 
 
 def ensure_installed(progress: ProgressCb = None) -> None:

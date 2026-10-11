@@ -40,7 +40,9 @@ class UpdateInfo:
     # GitHub computes this from the bytes it stores, so it is an independent
     # statement of what we published — which is what lets the installer be
     # fetched from the mirror and still be trustworthy. Empty when the API
-    # omitted it; the updater treats that as "cannot verify" and refuses.
+    # omitted it: the in-app updater then does not download or run anything
+    # (it has nothing to check the file against, and it would run it with
+    # administrator rights) and points to the release page instead.
     setup_sha256: str = ""
 
 
@@ -58,6 +60,24 @@ def is_newer(remote: str, local: str = __version__) -> bool:
     return _parse_version(remote) > _parse_version(local)
 
 
+def check_for_update(timeout: tuple[float, float] = (5, 10)) -> tuple[str, Optional[UpdateInfo]]:
+    """Ask GitHub and say which of three things is true:
+
+      ("newer", info)   a release newer than this build exists;
+      ("latest", info)  the newest release is this build or older;
+      ("failed", None)  we could not find out — no network, GitHub
+                        unreachable, an answer that is not a release.
+
+    "Could not find out" must never be shown as "you have the latest
+    version": a client that cannot reach GitHub would then say it is up to
+    date forever.
+    """
+    info = latest_release(timeout)
+    if info is None:
+        return "failed", None
+    return ("newer" if is_newer(info.version) else "latest"), info
+
+
 def latest_release(timeout: tuple[float, float] = (5, 10)) -> Optional[UpdateInfo]:
     """Query GitHub for the latest release. Returns None on any failure.
 
@@ -70,6 +90,10 @@ def latest_release(timeout: tuple[float, float] = (5, 10)) -> Optional[UpdateInf
         response.raise_for_status()
         data = response.json()
     except (requests.exceptions.RequestException, ValueError):
+        return None
+    if not isinstance(data, dict):
+        # A 200 that is JSON but not a release: a captive portal, a proxy's
+        # own page. Not an answer about releases.
         return None
     tag = str(data.get("tag_name") or "").strip()
     # The version is shown in labels and becomes part of a file name. A tag

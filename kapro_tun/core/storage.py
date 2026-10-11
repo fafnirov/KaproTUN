@@ -52,9 +52,171 @@ def last_error() -> Optional[str]:
 
 
 def _record_error(msg: str) -> None:
+    """Note a storage problem. It goes to app.log: the `kaprotun.storage`
+    logger alone has no handler in the packaged app, so until v4.1.1 these
+    lines were written nowhere."""
     global _last_error
     _last_error = msg
     _log.warning("storage/secrets: %s", msg)
+    try:
+        from . import app_log
+        app_log.log(f"[storage] {msg}")
+    except Exception:
+        pass
+
+
+# --- telling the user ---------------------------------------------------------
+# A problem the user has to know about (the server list could not be read, a
+# save failed) is passed to the listener — the main window, which shows it.
+# Until a listener is set, messages wait here, so a problem found while
+# starting up is not lost.
+_error_listener = None
+_pending_notices: list[str] = []
+_notice_lock = threading.Lock()     # saves run on worker threads as well
+
+
+def set_error_listener(listener) -> None:
+    """`listener(message)` is called for every problem worth showing. It may
+    be called from any thread. None removes it."""
+    global _error_listener
+    with _notice_lock:
+        _error_listener = listener
+        waiting = _pending_notices[:] if listener is not None else []
+        if listener is not None:
+            _pending_notices.clear()
+    for message in waiting:
+        _deliver(message)
+
+
+def _deliver(message: str) -> None:
+    with _notice_lock:
+        listener = _error_listener
+        if listener is None:
+            _pending_notices.append(message)
+            del _pending_notices[:-10]
+            return
+    try:
+        listener(message)
+    except Exception:
+        pass
+
+
+def _notify(key: str, **fmt) -> None:
+    from .i18n import tr
+    message = tr(key, **fmt)
+    _record_error(message)
+    _deliver(message)
+
+
+# --- files that could not be read ---------------------------------------------
+# "Could not read it" used to be treated as "it is empty", and the next save
+# then wrote the empty (or freshly re-imported) state over the file — the one
+# way to lose a server list for good. Now a file that could not be read is
+# remembered, and before anything is written over it, it is moved aside.
+MAX_UNREADABLE_COPIES = 3
+# Both are keyed by the full path, not the file name: the data folder can
+# change within one run (portable mode, tests), and a mark left by one
+# folder's configs.json must not send another folder's good file aside.
+_unreadable: set[str] = set()       # found unreadable, not yet set aside
+_checked: set[str] = set()          # read or written fine in this process
+
+
+def unreadable_files() -> list[str]:
+    """Names of files that could not be read and are still where they were."""
+    return sorted({Path(p).name for p in list(_unreadable)})
+
+
+def _mark_unreadable(path: Path, why: str) -> None:
+    key = str(path)
+    _checked.discard(key)
+    if key in _unreadable:
+        return                      # already known; do not repeat the notice
+    _unreadable.add(key)
+    _record_error(f"{path.name} is unreadable: {why}")
+    _notify("mw.storage_unreadable", name=path.name)
+
+
+def _mark_readable(path: Path) -> None:
+    _unreadable.discard(str(path))
+    _checked.add(str(path))
+
+
+def _set_aside(path: Path) -> Path:
+    """Move an unreadable file out of the way of the write that is about to
+    replace it, and return where it went. Raises OSError if it cannot be
+    moved: the caller's write must then not happen — a save that fails can be
+    repeated, a file that was written over cannot be brought back."""
+    import time
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    copy = path.with_name(f"{path.stem}.unreadable-{stamp}{path.suffix}")
+    n = 1
+    while copy.exists():
+        n += 1
+        copy = path.with_name(f"{path.stem}.unreadable-{stamp}-{n}{path.suffix}")
+    try:
+        os.replace(path, copy)
+    except OSError as e:
+        _record_error(f"could not set {path.name} aside, so it is not overwritten: {e}")
+        raise
+    _unreadable.discard(str(path))
+    _checked.discard(str(path))
+    # Keep the newest few: enough to recover from, not a pile. The copy just
+    # made is never among those removed — it is counted separately, because a
+    # moved file keeps its old modification time and could look like the
+    # oldest one. The names carry the time they were set aside, so they sort
+    # in that order.
+    others = sorted((p for p in path.parent.glob(f"{path.stem}.unreadable-*{path.suffix}")
+                     if p.name != copy.name), key=lambda p: p.stem)
+    keep = MAX_UNREADABLE_COPIES - 1
+    for stale in (others[:-keep] if keep > 0 else others):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    _notify("mw.storage_set_aside", name=path.name, copy=copy.name)
+    return copy
+
+
+def _is_readable_json(path: Path, shape: Optional[type] = None) -> bool:
+    """Can this encrypted-at-rest JSON file be read back right now — and, if
+    `shape` is given, is it that kind of value (a list of servers, an object)?
+
+    False means "there is content here and we cannot make sense of it". A
+    file that cannot be opened at all (locked, an I/O error) is a different
+    thing — that says nothing about what is in it — and raises OSError. An
+    empty file is readable: there is nothing in it to lose."""
+    raw = path.read_bytes()
+    if not raw.strip():
+        return True
+    try:
+        if secrets_store.looks_encrypted(raw):
+            raw = secrets_store.decrypt(raw)
+        value = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return False
+    return shape is None or isinstance(value, shape)
+
+
+def _protect_before_overwrite(path: Path, readable=None) -> None:
+    """Called right before `path` is written. If what is there now cannot be
+    read, it is moved aside first instead of being destroyed.
+
+    A file found unreadable when it was loaded is set aside whether or not it
+    can be read by now (a keystore that was away and is back): what we hold in
+    memory did not come from it, so writing would replace content nobody has
+    seen. Only a successful load clears that. Raises OSError — and the write
+    must not happen — if the file cannot be opened to look at, or cannot be
+    moved aside."""
+    if not path.is_file():
+        _unreadable.discard(str(path))
+        return
+    if str(path) in _unreadable:
+        _set_aside(path)
+        return
+    if str(path) in _checked:
+        return                      # we read or wrote it fine in this run
+    if not (readable or _is_readable_json)(path):
+        _set_aside(path)
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -68,13 +230,18 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     invalid UTF-8). On any failure the partial .tmp is removed and the
     error re-raised, so the original is never replaced by garbage.
     """
-    tmp = path.with_name(path.name + ".tmp")
+    # A random name, created exclusively: a predictable "<name>.tmp" could be
+    # put there first as a link, and this process — which runs with
+    # administrator rights — would write through it.
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
-        tmp.write_bytes(data)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
         os.replace(tmp, path)
     except Exception:
         try:
-            tmp.unlink()
+            os.unlink(tmp)
         except OSError:
             pass
         raise
@@ -94,16 +261,16 @@ def _read_encrypted(path: Path) -> bytes:
             return secrets_store.decrypt(raw)
         except Exception as e:
             # Blob unreadable (different Windows user, lost DEK, tamper).
-            # Surface as "empty" rather than crashing at startup — the user
-            # re-imports. Not a privacy regression: we simply can't read
-            # ciphertext that isn't ours. Record it so a "my servers
-            # vanished" report is diagnosable instead of silent.
-            _record_error(f"could not decrypt {path.name}: {type(e).__name__}: {e}")
+            # Surface as "empty" rather than crashing at startup. Not a
+            # privacy regression: we simply can't read ciphertext that isn't
+            # ours. But it is remembered as unreadable — the user is told,
+            # and the file is moved aside, not overwritten, by the next save.
+            _mark_unreadable(path, f"could not decrypt: {type(e).__name__}: {e}")
             return b""
     return raw  # legacy plaintext
 
 
-def _write_encrypted(path: Path, data: bytes) -> None:
+def _write_encrypted(path: Path, data: bytes, shape: Optional[type] = None) -> None:
     """Write `data` to `path`, encrypted-at-rest where the platform supports
     it, atomically and with user-only file permissions.
 
@@ -130,7 +297,9 @@ def _write_encrypted(path: Path, data: bytes) -> None:
     else:
         _log.info("secrets_store unsupported on %s — %s written in plaintext "
                   "(file-permission protected)", sys.platform, path.name)
+    _protect_before_overwrite(path, readable=lambda p: _is_readable_json(p, shape))
     _atomic_write_bytes(path, data)
+    _mark_readable(path)
     if not paths.harden_file_perms(path):
         _record_error(f"could not chmod 0600 {path.name} (defence-in-depth only)")
 
@@ -143,19 +312,27 @@ def _read_configs_bytes() -> bytes:
 def _write_configs_bytes(data: bytes) -> None:
     """Write configs.json encrypted-at-rest. Raises SecretsError if the
     platform supports encryption but it failed (never plaintext-leaks)."""
-    _write_encrypted(paths.configs_file(), data)
+    _write_encrypted(paths.configs_file(), data, shape=list)
 
 
 # --- saved proxy configs --------------------------------------------------
 
 def load_configs() -> list[ProxyConfig]:
+    path = paths.configs_file()
     raw_bytes = _read_configs_bytes()
-    if not raw_bytes:
+    if not raw_bytes.strip():
         return []
     try:
         raw = json.loads(raw_bytes.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        # Not an empty list — a list we cannot read. The difference decides
+        # whether the next save may overwrite the file.
+        _mark_unreadable(path, f"not valid JSON: {type(e).__name__}")
         return []
+    if not isinstance(raw, list):
+        _mark_unreadable(path, "not a list of servers")
+        return []
+    _mark_readable(path)
     out: list[ProxyConfig] = []
     for item in raw if isinstance(raw, list) else []:
         try:
@@ -196,11 +373,21 @@ def save_configs(configs: list[ProxyConfig]) -> bool:
     """
     data = [asdict(c) for c in configs]
     payload = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    name = paths.configs_file().name
     try:
         _write_configs_bytes(payload)
         return True
     except SecretsError as e:
         _record_error(f"configs not saved (encryption failure, not leaked): {e}")
+        _notify("mw.storage_save_failed", name=name, reason=type(e).__name__)
+        return False
+    except OSError as e:
+        # Disk full, no permission, the file locked by something else. It
+        # used to escape into whatever button handler asked for the save and
+        # vanish there; the list in memory looked saved and was not.
+        _record_error(f"configs not saved: {type(e).__name__}: {e}")
+        _notify("mw.storage_save_failed", name=name,
+                reason=e.strerror or type(e).__name__)
         return False
 
 
@@ -254,14 +441,20 @@ _SUBSCRIPTION_SECRET_KEYS = (
 
 def load_subscription_secrets() -> dict[str, Any]:
     """Decrypt and return the subscription-secrets blob ({} if absent)."""
-    raw = _read_encrypted(paths.secrets_file())
-    if not raw:
+    path = paths.secrets_file()
+    raw = _read_encrypted(path)
+    if not raw.strip():
         return {}
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        _mark_unreadable(path, f"not valid JSON: {type(e).__name__}")
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        _mark_unreadable(path, "not a secrets object")
+        return {}
+    _mark_readable(path)
+    return data
 
 
 def save_subscription_secrets(secrets: dict[str, Any]) -> None:
@@ -290,7 +483,7 @@ def save_subscription_secrets(secrets: dict[str, Any]) -> None:
         else:
             payload[k] = incoming
     data = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
-    _write_encrypted(paths.secrets_file(), data)
+    _write_encrypted(paths.secrets_file(), data, shape=dict)
 
 
 # --- app settings ---------------------------------------------------------
@@ -412,10 +605,38 @@ def _read_settings_checked() -> tuple[dict[str, Any], bool]:
     if not f.is_file():
         return {}, True
     try:
-        parsed = json.loads(f.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        parsed = _parse_settings(f.read_bytes())
+    except OSError as e:
+        # Could not be opened this instant. Not readable for the caller — but
+        # nothing is known about its content, so it is not marked damaged
+        # (save_settings looks again, and refuses to write over a file it
+        # cannot open).
+        _record_error(f"{f.name} could not be opened: {type(e).__name__}: {e}")
         return {}, False
-    return (parsed, True) if isinstance(parsed, dict) else ({}, False)
+    if parsed is None:
+        _mark_unreadable(f, "not a settings object")
+        return {}, False
+    _mark_readable(f)
+    return parsed, True
+
+
+def _parse_settings(raw: bytes) -> Optional[dict[str, Any]]:
+    """The settings object in `raw`, or None if it is not one. An empty file
+    is an empty object: there is nothing in it to lose."""
+    if not raw.strip():
+        return {}
+    try:
+        # utf-8-sig: a file edited by hand in Notepad starts with a BOM, and
+        # that is not damage.
+        parsed = json.loads(raw.decode("utf-8-sig"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _settings_readable(path: Path) -> bool:
+    """For _protect_before_overwrite: OSError if the file cannot be opened."""
+    return _parse_settings(path.read_bytes()) is not None
 
 
 def _read_settings_file() -> dict[str, Any]:
@@ -430,7 +651,10 @@ def _read_settings_file() -> dict[str, Any]:
 
 
 def load_settings(_raw: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    raw_data = _read_settings_file() if _raw is None else dict(_raw)
+    if _raw is None:
+        raw_data, on_disk_ok = _read_settings_checked()
+    else:
+        raw_data, on_disk_ok = dict(_raw), True
     raw_data, migration_notes = _migrate_settings(raw_data)
     for note in migration_notes:
         _log.info("settings migration: %s", note)
@@ -454,7 +678,10 @@ def load_settings(_raw: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     # stamp in particular MUST reach disk: without it _migrate_settings runs
     # again on the next launch and would undo a user who deliberately turned
     # route_ru_direct back off, every single time.
-    if migration_notes or any(k in raw_data for k in _SUBSCRIPTION_SECRET_KEYS):
+    # Never when the file could not be read: what we hold then is defaults,
+    # and "migrating" would save them in the place of the user's settings.
+    if on_disk_ok and (migration_notes
+                       or any(k in raw_data for k in _SUBSCRIPTION_SECRET_KEYS)):
         try:
             save_settings(merged)
         except Exception as e:  # never let migration crash startup
@@ -546,8 +773,19 @@ def save_settings(settings: dict[str, Any]) -> None:
             if k in existing:
                 clean[k] = existing[k]
 
-    _atomic_write_bytes(
-        paths.settings_file(),
-        json.dumps(clean, indent=2, ensure_ascii=False).encode("utf-8"),
-    )
-    paths.harden_file_perms(paths.settings_file())
+    settings_path = paths.settings_file()
+    # An unreadable settings.json is about to be replaced by what we hold in
+    # memory. Keep the original next to it rather than destroy it.
+    try:
+        _protect_before_overwrite(settings_path, readable=_settings_readable)
+        _atomic_write_bytes(
+            settings_path,
+            json.dumps(clean, indent=2, ensure_ascii=False).encode("utf-8"),
+        )
+    except OSError as e:
+        _record_error(f"settings not saved: {type(e).__name__}: {e}")
+        _notify("mw.storage_save_failed", name=settings_path.name,
+                reason=e.strerror or type(e).__name__)
+        raise
+    _mark_readable(settings_path)
+    paths.harden_file_perms(settings_path)

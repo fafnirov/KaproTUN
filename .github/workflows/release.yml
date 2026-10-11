@@ -61,6 +61,9 @@ jobs:
             artifact_name: KaproTUN-Windows-x64.exe
             build_cmd: |
               python -m PyInstaller KaproTUN.spec --noconfirm --log-level WARN
+              # Bind the installer to the binary just built: it will install
+              # KaproTUN.exe only if it hashes to this.
+              python packaging/write_payload_digest.py
               python -m PyInstaller KaproTUN-Setup.spec --noconfirm --log-level WARN
             payload_path: |
               dist/KaproTUN-Setup.exe

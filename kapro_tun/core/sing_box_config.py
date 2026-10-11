@@ -888,13 +888,21 @@ def check_config(config_path: str) -> tuple[bool, str]:
     exe = paths.sing_box_exe()
     if not exe.is_file():
         return False, f"sing-box not found at {exe}"
+    # This runs the engine binary too — so the same rule as for the real
+    # start: only the pinned build, held while it runs.
+    # A refusal here (IntegrityError) is NOT returned as "config rejected":
+    # the caller reacts to a rejected config by rebuilding it, which cannot
+    # help and would bury the real reason. It propagates.
+    from . import sing_box_installer
+    guard = sing_box_installer.hold_engine()
     try:
-        result = subprocess.run(
-            [str(exe), "check", "-c", config_path],
-            capture_output=True, text=True, timeout=10,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            cwd=str(paths.tun_dir()),
-        )
+        with guard:
+            result = subprocess.run(
+                [str(guard.real_path(exe.name)), "check", "-c", config_path],
+                capture_output=True, text=True, timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                cwd=str(paths.tun_dir()),
+            )
         if result.returncode == 0:
             return True, "OK"
         return False, (result.stderr or result.stdout or "Unknown error").strip()

@@ -298,8 +298,9 @@ class ConnectionManager:
             proxy_session.end()
         except Exception as e:
             self._log(f"[!] Системный прокси: не удалось вернуть настройки: {e}")
-        if self.sing_box_process.is_running():
-            self.sing_box_process.stop()
+        # Unconditionally: stop() on a process that already exited still
+        # releases the hold on the engine's files.
+        self.sing_box_process.stop()
         # Linux: undo the manual routes + resolvectl DNS we laid in place of
         # auto_route. Idempotent no-op on other platforms / if never set up.
         linux_tun_route.teardown()
@@ -743,7 +744,7 @@ class ConnectionManager:
             config, direct_domains, server_ip=server_ip,
             block_ads=block_ads, on_log=self._log, **plan,
         )
-        ok, msg = sing_box_config.check_config(cfg_path)
+        ok, msg = self._check_engine_config(cfg_path)
         if not ok and plan["games_direct"] and not plan["lockdown"]:
             # Safety net (v3.5.0): the games bypass uses process-based rules
             # (process_name / process_path_regex). If the installed engine build
@@ -758,7 +759,7 @@ class ConnectionManager:
                 block_ads=block_ads, on_log=self._log,
                 **dict(plan, games_direct=False),
             )
-            ok, msg = sing_box_config.check_config(cfg_path)
+            ok, msg = self._check_engine_config(cfg_path)
         if not ok:
             paths.remove_runtime_configs()
             raise ConnectionError(tr("err.singbox_rejected_config", msg=msg))
@@ -901,7 +902,7 @@ class ConnectionManager:
                 route_ru_direct=bool(self.settings.get("route_ru_direct", True)),
                 api_secret=self._api_secret,
             )
-            ok, msg = sing_box_config.check_config(cfg_path)
+            ok, msg = self._check_engine_config(cfg_path)
             if not ok:
                 raise ConnectionError(tr("err.singbox_rejected_config", msg=msg))
             try:
@@ -1009,6 +1010,18 @@ class ConnectionManager:
             return
         self.killswitch_held = self._killswitch_armed = False
         self._held_server_ip = ""
+
+    def _check_engine_config(self, cfg_path: str) -> tuple[bool, str]:
+        """`sing-box check` on the config just written. If the engine itself
+        is refused (not the pinned build, or missing), the config — which
+        holds the server's credentials — is removed and the reason is raised
+        as it is, not dressed up as a rejected config."""
+        from . import net_download
+        try:
+            return sing_box_config.check_config(cfg_path)
+        except (net_download.IntegrityError, FileNotFoundError) as e:
+            paths.remove_runtime_configs()
+            raise ConnectionError(str(e)) from e
 
     def _routing_plan(self) -> dict:
         """Split-routing switches for the next TUN session. Under the

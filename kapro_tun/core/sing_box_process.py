@@ -153,6 +153,11 @@ class SingBoxProcess:
         as a connect diagnostic) to 'live' (treat them as transient noise)."""
         self._live = True
 
+    def _release_guard(self) -> None:
+        guard, self._guard = getattr(self, "_guard", None), None
+        if guard is not None:
+            guard.close()
+
     def _build_args(self, exe, config_path: str) -> list[str]:
         """The sing-box command line. Split out so it's unit-testable without
         spawning a real TUN device (which needs admin)."""
@@ -167,20 +172,39 @@ class SingBoxProcess:
             raise FileNotFoundError(f"sing-box binary not found at {exe}")
         if sys.platform == "win32" and not paths.wintun_dll().is_file():
             raise FileNotFoundError(f"wintun.dll not found at {paths.wintun_dll()}")
-
-        # cwd = tun_dir() so the WinTUN DLL (shared with the classic engine) is
-        # on the loader search path on Windows.
-        cwd = paths.tun_dir() if sys.platform == "win32" else paths.sing_box_dir()
-        self._proc = subprocess.Popen(
-            self._build_args(exe, config_path),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=CREATE_NO_WINDOW,
-            cwd=str(cwd),
-        )
+        # We are about to run this with administrator rights, from a folder
+        # that needs none to write to. Check the files against the pinned
+        # build and hold them so they cannot be swapped — from here until the
+        # engine has stopped. Raises IntegrityError if they are not the build.
+        from . import sing_box_installer
+        self._release_guard()
+        # Held in a local until the engine is up: stop() on another thread
+        # (Disconnect pressed while connecting) lets go of self._guard, and
+        # must not be able to do that between the check and the start.
+        guard = sing_box_installer.hold_engine()
+        try:
+            exe = guard.real_path(exe.name)      # start the checked file, by its real path
+            # cwd = tun_dir() so the WinTUN DLL (shared with the classic
+            # engine) is on the loader search path on Windows — the folder the
+            # checked DLL really is in.
+            if sys.platform == "win32":
+                cwd = guard.real_path(paths.wintun_dll().name).parent
+            else:
+                cwd = paths.sing_box_dir()
+            self._proc = subprocess.Popen(
+                self._build_args(exe, config_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=CREATE_NO_WINDOW,
+                cwd=str(cwd),
+            )
+        except BaseException:
+            guard.close()
+            raise
+        self._guard = guard
         self._started_at = time.time()
         self._last_pid = self._proc.pid
         # Kernel backstop (v3.0.9): bind sing-box to the GUI's kill-on-close Job
@@ -199,6 +223,7 @@ class SingBoxProcess:
     def stop(self, timeout: float = 3.0) -> None:
         proc = self._proc
         if proc is None:
+            self._release_guard()
             return
         if proc.poll() is None:
             try:
@@ -211,6 +236,7 @@ class SingBoxProcess:
                 except subprocess.TimeoutExpired:
                     pass
         self._proc = None
+        self._release_guard()       # the engine is gone: its files may change again
 
     def is_running(self) -> bool:
         proc = self._proc

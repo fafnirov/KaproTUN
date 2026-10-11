@@ -58,13 +58,21 @@ class _UpdateCheckWorker(QThread):
     """Background poll of GitHub Releases. Emits if a newer version is out."""
     update_available = Signal(object)  # updater.UpdateInfo
     no_update = Signal()
+    check_failed = Signal()            # could not find out — not "no update"
 
     def run(self) -> None:
-        info = updater.latest_release()
-        if info is not None and updater.is_newer(info.version):
+        try:
+            status, info = updater.check_for_update()
+        except Exception:
+            # Whatever went wrong, the check did not complete — and whoever
+            # is showing "checking…" must be told so.
+            status, info = "failed", None
+        if status == "newer":
             self.update_available.emit(info)
-        else:
+        elif status == "latest":
             self.no_update.emit()
+        else:
+            self.check_failed.emit()
 
 
 class _ConnectWorker(QThread):
@@ -342,6 +350,7 @@ class _NetworkChangeWatchdog(QThread):
 
 class MainWindow(QMainWindow):
     log_received = Signal(str)
+    storage_error = Signal(str)     # from storage, possibly from another thread
 
     def __init__(self):
         super().__init__()
@@ -581,6 +590,12 @@ class MainWindow(QMainWindow):
         self.tray.show()
 
         self._wire_signals()
+        # Storage problems (a file that could not be read, a save that
+        # failed) reach the user here. Through a signal: a save can fail on
+        # a background thread. Anything found while starting up was waiting
+        # for this and is delivered now.
+        self.storage_error.connect(self._on_storage_error)
+        storage.set_error_listener(self.storage_error.emit)
         self._refresh_home()
         # A clean install opens on the same home screen as everyone else's:
         # with no server yet it shows what to do first (home_v2.EmptyCard).
@@ -1839,6 +1854,9 @@ class MainWindow(QMainWindow):
         self._update_worker.no_update.connect(
             lambda: self._on_no_update(interactive)
         )
+        self._update_worker.check_failed.connect(
+            lambda: self._on_update_check_failed(interactive)
+        )
         self._update_worker.start()
 
     def _on_update_available(self, info: "updater.UpdateInfo",
@@ -1871,6 +1889,18 @@ class MainWindow(QMainWindow):
             self.settings_page.set_update_status(
                 tr("mw.update_latest", version=__version__), accent=False,
             )
+
+    def _on_update_check_failed(self, interactive: bool) -> None:
+        """The check itself failed. Say so when the user asked; a background
+        check that could not reach GitHub is not worth interrupting anyone."""
+        if interactive:
+            self.settings_page.set_update_status(tr("mw.update_check_failed"), accent=False)
+
+    def _on_storage_error(self, message: str) -> None:
+        """A file could not be read or saved. Until v4.1.1 this was written
+        nowhere and shown to no one."""
+        self.logs_page.append(f"[!] {message}")
+        show_toast(self, message, kind="error", duration_ms=12000)
 
     def _open_updater(self, info: "updater.UpdateInfo") -> None:
         """Open the in-app updater. Handles download + silent install."""

@@ -10,15 +10,9 @@ polling, which is what the UI does.
 """
 from __future__ import annotations
 
-import json
-import subprocess
 import time
 from dataclasses import dataclass
 from typing import Optional
-
-from . import paths
-
-CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 API_LISTEN_HOST = "127.0.0.1"
 API_LISTEN_PORT = 10085
@@ -41,43 +35,6 @@ class TrafficStats:
         return up, down
 
 
-def query_stats() -> Optional[TrafficStats]:
-    """Query Xray's StatsService for `outbound>>>proxy>>>traffic`.
-
-    Returns None if xray isn't running, the API inbound isn't up, or the
-    subprocess errors out — caller treats that as "no data yet".
-    """
-    exe = paths.xray_exe()
-    if not exe.is_file():
-        return None
-    api_addr = f"{API_LISTEN_HOST}:{API_LISTEN_PORT}"
-    try:
-        result = subprocess.run(
-            [str(exe), "api", "stats", f"-server={api_addr}", "-reset=false"],
-            capture_output=True, text=True, timeout=2,
-            creationflags=CREATE_NO_WINDOW,
-            cwd=str(paths.xray_dir()),
-        )
-        if result.returncode != 0:
-            return None
-        data = json.loads(result.stdout or "{}")
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
-        return None
-
-    stats = TrafficStats(timestamp=time.time())
-    for entry in data.get("stat", []):
-        name = entry.get("name", "")
-        try:
-            value = int(entry.get("value", 0))
-        except (TypeError, ValueError):
-            continue
-        if name == "outbound>>>proxy>>>traffic>>>uplink":
-            stats.uplink_bytes = value
-        elif name == "outbound>>>proxy>>>traffic>>>downlink":
-            stats.downlink_bytes = value
-    return stats
-
-
 def query_tun_iface_stats(iface_name: str) -> Optional[TrafficStats]:
     """Read cumulative byte counters straight off the TUN network interface.
 
@@ -97,7 +54,7 @@ def query_tun_iface_stats(iface_name: str) -> Optional[TrafficStats]:
 
     Caller (controller / main_window) should pick:
       - MODE_TUN  → query_tun_iface_stats(TUN_DEVICE_NAME)
-      - MODE_HTTP → query_stats() (xray api stats subprocess)
+      - MODE_HTTP → nothing: the xray-based counter was removed (v4.1.1)
 
     Returns None when:
       - psutil isn't available (shouldn't happen — it's in requirements,

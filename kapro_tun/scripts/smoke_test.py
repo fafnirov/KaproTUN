@@ -1861,7 +1861,8 @@ def _v3_updater_dismiss_cancels_download() -> None:
     tried: list[str] = []
     emitted: list[str] = []
     w = ud._DownloadWorker(["https://a/x.exe", "https://b/x.exe"],
-                           _pl.Path("nonexistent.exe"))
+                           _pl.Path("nonexistent.exe"),
+                           expect_sha256="0" * 64)   # without one nothing is fetched (v4.1.1)
     w.finished_ok.connect(lambda p: emitted.append("ok"))
     w.failed.connect(lambda m: emitted.append("failed"))
 
@@ -3754,7 +3755,7 @@ def _atomic_round_trip() -> None:
     _storage._atomic_write_bytes(target, b'[]')
     if target.read_bytes() != b'[]':
         raise AssertionError("atomic overwrite mismatch")
-    if (_rel_tmp / "configs.json.tmp").exists():
+    if [p.name for p in _rel_tmp.iterdir()] != ["configs.json"]:
         raise AssertionError("temp file not cleaned up after write")
 
 
@@ -6793,22 +6794,37 @@ def _integrity_check_rejects_and_leaves_nothing() -> None:
 
 
 def _updater_will_not_take_the_mirror_unverified() -> None:
-    """v3.7.3: the installer digest rides along with version discovery, and
-    without one the mirror — the path we do not fully control — is skipped
-    rather than trusted."""
+    """v3.7.3: the installer digest rides along with version discovery.
+    v4.1.1: without one the installer is not downloaded from anywhere — the
+    updater has nothing to check it against and would run it elevated."""
     import inspect
+    from kapro_tun.core import net_download as _nd
     from kapro_tun.core.updater import UpdateInfo
     from kapro_tun.gui import updater_dialog as _ud
 
     if "setup_sha256" not in {f for f in UpdateInfo.__dataclass_fields__}:
         raise AssertionError("UpdateInfo lost its setup_sha256 field")
-
-    src = inspect.getsource(_ud._DownloadWorker.run)
-    if "KAPROTUN_MIRROR_BASE" not in src or "_expect_sha256" not in src:
-        raise AssertionError(
-            "download worker no longer drops the mirror when it has no digest")
-    if "expect_sha256=" not in src:
+    if "expect_sha256=" not in inspect.getsource(_ud._DownloadWorker.run):
         raise AssertionError("download worker stopped passing the digest down")
+
+    fetched: list = []
+    said: list = []
+    done: list = []
+    orig = _nd.download_to_file
+    _nd.download_to_file = lambda url, *a, **k: fetched.append(url)
+    try:
+        worker = _ud._DownloadWorker(["https://mirror.invalid/s.exe", "https://github.com/s.exe"],
+                                     _Path(_tempfile.gettempdir()) / "kapro-never-written.exe",
+                                     expect_sha256="")
+        worker.failed.connect(said.append)
+        worker.finished_ok.connect(done.append)
+        worker.run()
+    finally:
+        _nd.download_to_file = orig
+    if fetched or done:
+        raise AssertionError(f"with no digest the installer was still fetched: {fetched}")
+    if len(said) != 1 or not said[0].strip():
+        raise AssertionError("with no digest the user is not told why nothing was downloaded")
 
 
 check("integrity: every executed binary has a pinned SHA-256 (v3.7.3)",
@@ -9887,6 +9903,780 @@ check("ui v2: leak test, downloads, updater, background jobs, notices (v4.1.0)",
       _v41_in_russian(_v41_leak_and_download_dialogs))
 check("ui v2: the old picker, dialogs and message boxes are gone (v4.1.0)",
       _v41_old_interface_is_gone)
+
+
+# ---------------------------------------------------------------------------
+# v4.1.1 — what gets executed is what was verified; storage neither loses a
+# file nor hides an error
+# ---------------------------------------------------------------------------
+
+section("v4.1.1: verified engine and updates, storage that does not lose files")
+
+
+def _v411_sha(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def _v411_must_fail(what: str, fn) -> None:
+    try:
+        fn()
+    except OSError:
+        return
+    raise AssertionError(f"{what} was possible while the file was held")
+
+
+def _v411_held_file() -> None:
+    """A file checked against a digest stays exactly that file until it is
+    let go: on Windows it cannot be written, replaced, renamed or deleted."""
+    import os
+    from kapro_tun.core import file_guard, net_download
+    with _v4_fresh_data_dir() as tmp:
+        target = tmp / "tool.bin"
+        target.write_bytes(b"good bytes")
+        held = file_guard.hold_verified(target, _v411_sha(b"good bytes"))
+        try:
+            if held.sha256() != _v411_sha(b"good bytes"):
+                raise AssertionError("the held file hashes differently on a second read")
+            if sys.platform == "win32":
+                _v411_must_fail("overwriting", lambda: target.write_bytes(b"evil"))
+                _v411_must_fail("deleting", lambda: os.remove(target))
+                _v411_must_fail("renaming", lambda: os.rename(target, tmp / "moved.bin"))
+                (tmp / "other.bin").write_bytes(b"evil")
+                _v411_must_fail("replacing", lambda: os.replace(tmp / "other.bin", target))
+        finally:
+            held.close()
+        held.close()                      # closing twice is harmless
+        target.write_bytes(b"changed")    # ... and the file is free again
+
+        try:
+            file_guard.hold_verified(target, _v411_sha(b"good bytes"))
+        except net_download.IntegrityError:
+            pass
+        else:
+            raise AssertionError("a changed file passed the digest check")
+        os.remove(target)                 # a refused file is not left held
+        for bad in ("", "abc"):
+            target.write_bytes(b"x")
+            try:
+                file_guard.hold_verified(target, bad)
+            except net_download.IntegrityError:
+                pass
+            else:
+                raise AssertionError(f"an expected digest of {bad!r} must be refused, not skipped")
+            os.remove(target)
+        try:
+            file_guard.hold_verified(tmp / "absent.bin", _v411_sha(b"x"))
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("a missing file must be reported as missing")
+
+
+def _v411_junction(link, target) -> bool:
+    """Make `link` a junction to `target`. False if this system will not."""
+    import subprocess
+    done = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                          capture_output=True)
+    return done.returncode == 0 and link.is_dir()
+
+
+def _v411_held_file_stays_where_it_is() -> None:
+    """Holding the file is half of it: a process is started by path, and a
+    folder on that path can be a junction that is re-pointed after the check.
+    So the real path is the one that is used, and it is pinned."""
+    import os
+    from kapro_tun.core import file_guard
+    if sys.platform != "win32":
+        return
+    with _v4_fresh_data_dir() as tmp:
+        good_dir, evil_dir = tmp / "real" / "engine", tmp / "evil"
+        good_dir.mkdir(parents=True)
+        evil_dir.mkdir()
+        (good_dir / "tool.bin").write_bytes(b"good bytes")
+        (evil_dir / "tool.bin").write_bytes(b"evil bytes")
+        link = tmp / "link"
+        if not _v411_junction(link, good_dir):
+            raise AssertionError("could not create a junction to test with")
+        held = file_guard.hold_verified(link / "tool.bin", _v411_sha(b"good bytes"))
+        try:
+            # The path to start by leads through no junction ...
+            if not os.path.samefile(held.real_path, good_dir / "tool.bin"):
+                raise AssertionError(f"real_path is not the held file: {held.real_path}")
+            if "link" in [part.lower() for part in held.real_path.parts]:
+                raise AssertionError(f"real_path still leads through the junction: {held.real_path}")
+            # A link is told apart from a plain folder — it is links that are
+            # refused on the real path, not every special folder.
+            k32 = file_guard._k32
+            seen = {}
+            for label, folder in (("link", link), ("folder", good_dir)):
+                h = file_guard._create(str(folder), 7, 0x02200000,
+                                       access=file_guard._FILE_READ_ATTRIBUTES)
+                try:
+                    seen[label] = file_guard._is_link(h)
+                finally:
+                    k32.CloseHandle(h)
+            if seen != {"link": True, "folder": False}:
+                raise AssertionError(f"junctions are not told apart from folders: {seen}")
+            # ... so re-pointing the junction changes nothing about what runs.
+            os.rmdir(link)
+            if not _v411_junction(link, evil_dir):
+                raise AssertionError("could not re-point the junction")
+            if (link / "tool.bin").read_bytes() != b"evil bytes":
+                raise AssertionError("the test's own swap did not take")
+            if held.real_path.read_bytes() != b"good bytes":
+                raise AssertionError("after the swap, real_path leads to another file")
+            # And no folder on the real path can be moved away or replaced.
+            _v411_must_fail("renaming the file's folder",
+                            lambda: os.rename(good_dir, tmp / "real" / "moved"))
+            _v411_must_fail("renaming a folder above it",
+                            lambda: os.rename(tmp / "real", tmp / "moved"))
+        finally:
+            held.close()
+            os.rmdir(link)
+        os.rename(tmp / "real", tmp / "moved")      # free again once released
+        os.rename(tmp / "moved", tmp / "real")
+
+        # Another program holding the folder open in its own way (a backup
+        # tool, a sync client) does not stop the file from being used — and
+        # the folder still cannot be moved from under it.
+        foreign = k32.CreateFileW(str(good_dir), 0x80010000, 7, None, 3, 0x02000000, None)
+        if foreign in (None, file_guard._INVALID_HANDLE):
+            raise AssertionError("could not open the folder the way the test needs")
+        try:
+            with file_guard.hold_verified(good_dir / "tool.bin", _v411_sha(b"good bytes")):
+                _v411_must_fail("renaming the file's folder (held by someone else too)",
+                                lambda: os.rename(good_dir, tmp / "real" / "moved"))
+        finally:
+            k32.CloseHandle(foreign)
+
+
+def _v411_engine_files(si) -> dict:
+    """{file name: path} of what must be on disk for the engine to run here."""
+    from kapro_tun.core import paths as _p
+    files = {_p.sing_box_exe().name: _p.sing_box_exe()}
+    if sys.platform == "win32":
+        files["wintun.dll"] = _p.wintun_dll()
+    return files
+
+
+def _v411_engine_is_verified_before_it_runs() -> None:
+    """The engine runs with administrator rights from a folder any program of
+    the user can write to. So: nothing in that folder is executed unless it
+    is byte for byte the pinned build, and it cannot be swapped between the
+    check and the start."""
+    import io
+    import re
+    import tarfile
+    import zipfile
+    from kapro_tun.core import net_download, sing_box_config as sc
+    from kapro_tun.core import sing_box_installer as si, sing_box_process as sp
+
+    table = si._PINNED_BINARY_SHA256
+    for marker in ("windows-amd64", "windows-arm64", "darwin-amd64", "darwin-arm64",
+                   "linux-amd64", "linux-arm64"):
+        entry = table.get(marker) or {}
+        need = {"sing-box.exe", "wintun.dll"} if marker.startswith("windows") else {"sing-box"}
+        if set(entry) != need or not all(re.fullmatch(r"[0-9a-f]{64}", v) for v in entry.values()):
+            raise AssertionError(f"no pinned binary digests for {marker}: {entry}")
+
+    marker = si._asset_marker()
+    good = {name: f"pinned build of {name}".encode() for name in table[marker]}
+    fake_pins = dict(table)
+    fake_pins[marker] = {name: _v411_sha(data) for name, data in good.items()}
+    ran: list = []
+
+    class _NoRun:
+        """subprocess, except nothing may be started."""
+        PIPE, STDOUT = -1, -2
+
+        @staticmethod
+        def run(cmd, *a, **k):
+            ran.append(("run", cmd))
+            raise AssertionError("an engine file was executed")
+
+        @staticmethod
+        def Popen(cmd, *a, **k):
+            ran.append(("popen", cmd))
+
+            class _P:
+                pid, stdout = 4242, None
+
+                def poll(self):
+                    return None
+
+                def terminate(self):
+                    pass
+
+                def wait(self, timeout=None):
+                    return 0
+
+                def kill(self):
+                    pass
+
+            return _P()
+
+    def _dir(path):
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    # The suite keeps the engine and driver folders pointing at the REAL ones
+    # (another check runs the real sing-box). This check writes and deletes
+    # engine files, so it gets folders of its own — and refuses to go on if
+    # it does not.
+    with _v4_fresh_data_dir() as tmp, \
+            _v4_patched(_sbx_paths, sing_box_dir=lambda: _dir(tmp / "sing-box"),
+                        tun_dir=lambda: _dir(tmp / "tun")), \
+            _v4_patched(si, _PINNED_BINARY_SHA256=fake_pins):
+        files = _v411_engine_files(si)
+        if any(tmp not in path.parents for path in files.values()):
+            raise AssertionError(f"this check would write into the real engine folder: {files}")
+        if si.is_installed() or si.get_installed_version() is not None:
+            raise AssertionError("nothing is installed yet")
+        for name, path in files.items():
+            path.write_bytes(good[name])
+
+        # Installed and of the pinned version — known from the digest, not
+        # from running the file to ask it.
+        import subprocess as _real_subprocess
+        with _v4_patched(_real_subprocess, run=_NoRun.run):
+            if not si.is_installed() or si.get_installed_version() != si.SINGBOX_PINNED_VERSION.lstrip("v"):
+                raise AssertionError("the pinned build on disk is not recognized")
+        if ran:
+            raise AssertionError("the engine was executed just to learn its version")
+
+        # While it runs, the files are held.
+        with _v4_patched(sp, subprocess=_NoRun):
+            proc = sp.SingBoxProcess(on_log=lambda _l: None)
+            with _v4_patched(sp.threading, Thread=lambda *a, **k: type("T", (), {"start": lambda s: None})()):
+                proc.start("config.json")
+            if [kind for kind, _c in ran] != ["popen"]:
+                raise AssertionError(f"the engine was not started exactly once: {ran}")
+            import os as _os
+            started = ran[0][1][0]
+            exe_now = files[next(n for n in files if n.startswith("sing-box"))]
+            if not _os.path.samefile(started, exe_now) or \
+                    str(started) != str(proc._guard.real_path(exe_now.name)):
+                raise AssertionError(f"the engine was not started by its pinned path: {started}")
+            if sys.platform == "win32":
+                exe = files["sing-box.exe"]
+                _v411_must_fail("replacing the engine under a running session",
+                                lambda: exe.write_bytes(b"evil"))
+                _v411_must_fail("replacing the driver under a running session",
+                                lambda: files["wintun.dll"].write_bytes(b"evil"))
+            proc._proc = None            # the fake process "exited"
+            proc.stop()
+
+            # A start that fails after the check lets the files go again.
+            def no_start(*_a, **_k):
+                raise OSError(2, "cannot start")
+
+            with _v4_patched(_NoRun, Popen=staticmethod(no_start)):
+                try:
+                    sp.SingBoxProcess(on_log=lambda _l: None).start("config.json")
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("a failed start was not reported")
+            ran.clear()
+        for name, path in files.items():
+            path.write_bytes(good[name])  # ... and are free once it has stopped
+
+        # A changed file is not installed, has no version, and is not run.
+        ran.clear()
+        victim = next(iter(files.values()))
+        victim.write_bytes(b"something else entirely")
+        if si.is_installed() or si.get_installed_version() is not None:
+            raise AssertionError("a modified engine file still counts as installed")
+        try:
+            si.hold_engine().close()
+        except net_download.IntegrityError:
+            pass
+        else:
+            raise AssertionError("a modified engine file passed the pre-launch check")
+        with _v4_patched(sp, subprocess=_NoRun):
+            try:
+                sp.SingBoxProcess(on_log=lambda _l: None).start("config.json")
+            except net_download.IntegrityError:
+                pass
+            else:
+                raise AssertionError("a modified engine was started")
+        with _v4_patched(_real_subprocess, run=_NoRun.run):
+            try:
+                sc.check_config("config.json")
+            except net_download.IntegrityError:
+                pass
+            else:
+                raise AssertionError("a modified engine must be refused, not reported "
+                                     "as 'the engine rejected the config'")
+        if ran:
+            raise AssertionError(f"a modified engine was run to check the config: {ran}")
+        # The connect path turns that into the reason shown to the user and
+        # does not leave the config (the server's credentials) on disk.
+        from kapro_tun.core import controller as _ctl
+        removed: list = []
+        with _v4_patched(_ctl.paths, remove_runtime_configs=lambda: removed.append(1) or []):
+            try:
+                _ctl.ConnectionManager._check_engine_config(None, "config.json")
+            except _ctl.ConnectionError as e:
+                if "sing-box" not in str(e):
+                    raise AssertionError(f"the refusal does not say what was refused: {e}")
+            else:
+                raise AssertionError("a refused engine did not stop the connect")
+        if not removed:
+            raise AssertionError("a refused engine left the runtime config on disk")
+
+        # Reinstalling replaces it — and only with the pinned bytes.
+        def archive(payload: bytes) -> bytes:
+            buf = io.BytesIO()
+            if sys.platform == "win32":
+                with zipfile.ZipFile(buf, "w") as zf:
+                    zf.writestr("sing-box-x/sing-box.exe", payload)
+            else:
+                with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+                    info = tarfile.TarInfo("sing-box-x/sing-box")
+                    info.size = len(payload)
+                    tf.addfile(info, io.BytesIO(payload))
+            return buf.getvalue()
+
+        exe = _v411_engine_files(si)[next(n for n in good if n.startswith("sing-box"))]
+        exe.write_bytes(b"tampered")
+        with _v4_patched(si, _download_with_fallback=lambda *_a, **_k: archive(b"not the pinned build")):
+            try:
+                si.download_and_install()
+            except net_download.IntegrityError:
+                pass
+            else:
+                raise AssertionError("an archive with a different binary was installed")
+        # What was there is still there (nothing is deleted before the new
+        # file has passed its check) — but it does not count as installed, no
+        # stray files are left next to it, and the archive's binary is not it.
+        if exe.read_bytes() != b"tampered" or si.is_installed():
+            raise AssertionError("a failed reinstall changed what is on disk, or calls it installed")
+        if [p.name for p in exe.parent.iterdir()] != [exe.name]:
+            raise AssertionError(f"a failed reinstall left files behind: {list(exe.parent.iterdir())}")
+        with _v4_patched(si, _download_with_fallback=lambda *_a, **_k: archive(good[exe.name])):
+            si.download_and_install()
+        if exe.read_bytes() != good[exe.name] or not si.is_installed():
+            raise AssertionError("reinstalling did not restore the pinned build")
+
+
+def _v411_update_check_says_when_it_failed() -> None:
+    """"Could not check" is not "you are up to date"."""
+    import requests as _rq
+    from kapro_tun.core import updater as _upd
+    from kapro_tun.gui import main_window as mw
+
+    class _Reply:
+        def __init__(self, tag):
+            self._tag = tag
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"tag_name": self._tag, "html_url": "https://github.com/x", "body": "",
+                    "assets": []}
+
+    def boom(*_a, **_k):
+        raise _rq.exceptions.ConnectionError("no route")
+
+    with _v4_patched(_upd.requests, get=boom):
+        if _upd.check_for_update()[0] != "failed":
+            raise AssertionError("a failed request must be reported as a failed check")
+    with _v4_patched(_upd.requests, get=lambda *_a, **_k: _Reply("v999.0.0")):
+        status, info = _upd.check_for_update()
+        if status != "newer" or info is None or info.version != "999.0.0":
+            raise AssertionError("a newer release was not reported")
+    with _v4_patched(_upd.requests, get=lambda *_a, **_k: _Reply("v0.0.1")):
+        if _upd.check_for_update()[0] != "latest":
+            raise AssertionError("an older release must mean 'you have the latest'")
+    with _v4_patched(_upd.requests, get=lambda *_a, **_k: _Reply("nonsense")):
+        if _upd.check_for_update()[0] != "failed":
+            raise AssertionError("an answer that is not a release must not read as 'latest'")
+
+    # The worker passes the difference on, and the window says it.
+    heard: list = []
+    worker = mw._UpdateCheckWorker()
+    worker.update_available.connect(lambda _i: heard.append("newer"))
+    worker.no_update.connect(lambda: heard.append("latest"))
+    worker.check_failed.connect(lambda: heard.append("failed"))
+    with _v4_patched(_upd.requests, get=boom):
+        worker.run()
+    if heard != ["failed"]:
+        raise AssertionError(f"the update worker reported {heard} for a failed check")
+
+    shown: list = []
+
+    class _Win:
+        settings_page = type("S", (), {"set_update_status":
+                                       staticmethod(lambda text, accent=False: shown.append(text))})()
+
+    mw.MainWindow._on_update_check_failed(_Win(), True)
+    mw.MainWindow._on_update_check_failed(_Win(), False)
+    if len(shown) != 1 or "v" + mw.__version__ in shown[0] or not shown[0].strip():
+        raise AssertionError(f"a failed manual check must say so, a background one stay quiet: {shown}")
+
+
+def _v411_updater_runs_only_what_it_verified() -> None:
+    """Between "the installer's digest is right" and "the installer is
+    running", nobody can swap the file: it is checked and started while held."""
+    from kapro_tun.core.updater import UpdateInfo
+    from kapro_tun.gui import updater_dialog as ud
+    _v41_app()
+    payload = b"MZ installer bytes" * 1000
+    launched: list = []
+    quits: list = []
+    tamper: dict = {}
+
+    class _Sub:
+        DETACHED_PROCESS = 0
+        CREATE_NEW_PROCESS_GROUP = 0
+
+        @staticmethod
+        def Popen(cmd, *a, **k):
+            launched.append(cmd[0])
+            try:
+                with open(cmd[0], "wb") as fh:      # an attacker's last chance
+                    fh.write(b"evil")
+                tamper["wrote"] = True
+            except OSError:
+                tamper["wrote"] = False
+
+    class _App:
+        @staticmethod
+        def quit(*_a, **_k):
+            quits.append(1)
+
+    with _v4_fresh_data_dir() as tmp, _v4_patched(ud, subprocess=_Sub, QApplication=_App):
+        setup = tmp / "KaproTUN-Setup-v9.9.9.exe"
+
+        def dialog(digest: str):
+            return ud.UpdaterDialog(UpdateInfo(version="9.9.9", tag="v9.9.9", url="",
+                                               notes="x", setup_sha256=digest))
+
+        # The right file: started, and not writable at that moment.
+        setup.write_bytes(payload)
+        dlg = dialog(_v411_sha(payload))
+        dlg._on_downloaded(str(setup))
+        import os as _os
+        if len(launched) != 1 or not _os.path.samefile(launched[0], setup) or not quits:
+            raise AssertionError("a verified installer was not started")
+        if sys.platform == "win32" and tamper.get("wrote"):
+            raise AssertionError("the installer could be rewritten while it was being started")
+        ud.release_launch_guards()
+
+        # Swapped after the download: not started, and the dialog says why.
+        launched.clear()
+        quits.clear()
+        setup.write_bytes(b"swapped after the download")
+        dlg = dialog(_v411_sha(payload))
+        dlg._on_downloaded(str(setup))
+        if launched or quits:
+            raise AssertionError("an installer that fails its digest was started")
+        if dlg.status_label.property("tone") != "error" or not dlg.update_btn.isEnabled():
+            raise AssertionError("a refused installer must be reported, with a way to retry")
+        ud.release_launch_guards()
+
+        # No digest to check against: the file is not started, whatever it is.
+        setup.write_bytes(payload)
+        dlg = dialog("")
+        dlg._on_downloaded(str(setup))
+        if launched or quits or dlg.status_label.property("tone") != "error":
+            raise AssertionError("an installer was started with nothing to check it against")
+        ud.release_launch_guards()
+
+
+def _v411_installer_verifies_the_app_it_downloads() -> None:
+    """Setup downloads KaproTUN.exe separately. It must install only the
+    exact binary that was built together with it."""
+    from installer import operations as ops, payload_digest
+
+    app = b"MZ the application" * 500
+
+    class _Resp:
+        def __init__(self, body: bytes):
+            self._body = body
+            self.headers = {"Content-Length": str(len(body))}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size=65536):
+            for i in range(0, len(self._body), chunk_size):
+                yield self._body[i:i + chunk_size]
+
+    def serving(body: bytes):
+        return lambda *_a, **_k: _Resp(body)
+
+    def attempt(target):
+        try:
+            ops._download_main_exe("9.9.9", target)
+        except RuntimeError as e:
+            return str(e)
+        return ""
+
+    with _v4_fresh_data_dir() as tmp:
+        target = tmp / "KaproTUN.exe"
+        leftovers = lambda: [p.name for p in tmp.iterdir() if p.name != "KaproTUN.exe"]
+
+        with _v4_patched(payload_digest, MAIN_EXE_SHA256=_v411_sha(app)), \
+                _v4_patched(ops, _release_digest=lambda _v: "f" * 64):
+            with _v4_patched(ops.requests, get=serving(app)):
+                if attempt(target) or target.read_bytes() != app:
+                    raise AssertionError("the application built with this installer was refused")
+            target.unlink()
+            with _v4_patched(ops.requests, get=serving(b"MZ something else" * 500)):
+                if not attempt(target) or target.exists() or leftovers():
+                    raise AssertionError("a different binary was installed, or left on disk")
+
+        # An installer built without the digest asks GitHub for it instead.
+        with _v4_patched(payload_digest, MAIN_EXE_SHA256=""):
+            with _v4_patched(ops, _release_digest=lambda _v: _v411_sha(app)), \
+                    _v4_patched(ops.requests, get=serving(app)):
+                if attempt(target) or target.read_bytes() != app:
+                    raise AssertionError("the digest from the release was not accepted")
+            target.unlink()
+            with _v4_patched(ops, _release_digest=lambda _v: ""), \
+                    _v4_patched(ops.requests, get=serving(app)):
+                if not attempt(target) or target.exists() or leftovers():
+                    raise AssertionError("with no digest at all the binary was installed unverified")
+
+
+def _v411_storage_does_not_lose_or_hide() -> None:
+    """An unreadable file is set aside, never overwritten; a failed save is
+    reported, never swallowed."""
+    from kapro_tun.core import app_log as _al, paths as _p, storage
+    cfg = _v401_cfg("Keep me", "10.0.0.1")
+    heard: list = []
+    logged: list = []
+    before = storage._error_listener
+    storage._unreadable.clear()         # what earlier checks left behind is theirs
+    with _v4_fresh_data_dir() as tmp, _v4_patched(_al, log=lambda m: logged.append(str(m))):
+        storage.set_error_listener(heard.append)
+        heard.clear()                   # ... and so are the notices that were waiting
+        logged.clear()
+        try:
+            def set_aside(stem: str) -> list:
+                return sorted(p for p in tmp.iterdir() if p.name.startswith(stem + ".unreadable-"))
+
+            # Healthy files are never set aside.
+            if not storage.save_configs([cfg]) or not storage.save_configs([cfg]):
+                raise AssertionError("a plain save failed")
+            if set_aside("configs") or storage.unreadable_files() or heard:
+                raise AssertionError("a healthy file was treated as unreadable")
+
+            # The list cannot be read: say so, and keep the file.
+            garbage = b"\x00\x01 this is not a server list"
+            _p.configs_file().write_bytes(garbage)
+            if storage.load_configs() != [] or _p.configs_file().name not in storage.unreadable_files():
+                raise AssertionError("an unreadable server list was taken for an empty one")
+            if not heard or not logged:
+                raise AssertionError("an unreadable server list was not reported anywhere")
+            heard.clear()
+
+            # The next save must not destroy it.
+            other = _v401_cfg("New one", "10.0.0.2")
+            if not storage.save_configs([other]):
+                raise AssertionError("saving after an unreadable file failed")
+            kept = set_aside("configs")
+            if len(kept) != 1 or kept[0].read_bytes() != garbage:
+                raise AssertionError("the unreadable server list was overwritten instead of set aside")
+            if [c.name for c in storage.load_configs()] != ["New one"] or storage.unreadable_files():
+                raise AssertionError("the new list is not what was saved")
+            if not any(kept[0].name in h for h in heard):
+                raise AssertionError("the user is not told where the old file went")
+
+            # Only a few such copies are kept.
+            for i in range(6):
+                _p.configs_file().write_bytes(garbage + bytes([i]))
+                storage.load_configs()
+                storage.save_configs([other])
+            if len(set_aside("configs")) > storage.MAX_UNREADABLE_COPIES:
+                raise AssertionError("unreadable copies pile up without limit")
+            # ... and the one just made is always among them, even when the
+            # file it came from is older than every copy already there.
+            import os as _os
+            _p.configs_file().write_bytes(garbage + b"the newest")
+            _os.utime(_p.configs_file(), (1_000_000_000, 1_000_000_000))
+            storage.load_configs()
+            storage.save_configs([other])
+            if not any(p.read_bytes() == garbage + b"the newest" for p in set_aside("configs")):
+                raise AssertionError("the copy just set aside was pruned as the oldest")
+            if len(set_aside("configs")) > storage.MAX_UNREADABLE_COPIES:
+                raise AssertionError("unreadable copies pile up without limit")
+
+            # A mark belongs to one file, not to every file of that name: a
+            # second data folder with a good list of its own is left alone.
+            _p.configs_file().write_bytes(garbage)
+            storage.load_configs()
+            with _v4_fresh_data_dir() as tmp2:
+                if not storage.save_configs([cfg]):
+                    raise AssertionError("saving in another data folder failed")
+                storage._checked.discard(str(_p.configs_file()))
+                if not storage.save_configs([cfg]):
+                    raise AssertionError("saving in another data folder failed")
+                if [p for p in tmp2.iterdir() if ".unreadable-" in p.name]:
+                    raise AssertionError("a good file was set aside because a file of the "
+                                         "same name elsewhere was unreadable")
+            storage.save_configs([other])
+
+            # The file could not be read when it was loaded and can be now (a
+            # keystore that was away came back). What is in memory did not
+            # come from it — so a save keeps it, readable or not ...
+            storage.save_configs([cfg, other])
+            real_list = _p.configs_file().read_bytes()
+            n = len(set_aside("configs"))
+            storage._mark_unreadable(_p.configs_file(), "test: the keystore was away")
+            storage.save_configs([other])
+            if not any(p.read_bytes() == real_list for p in set_aside("configs")):
+                raise AssertionError("a list that was never loaded was overwritten "
+                                     "because it happened to be readable at save time")
+            # ... while loading it successfully is what clears the mark.
+            n = len(set_aside("configs"))
+            storage._mark_unreadable(_p.configs_file(), "test: the keystore was away")
+            if [c.name for c in storage.load_configs()] != ["New one"] or storage.unreadable_files():
+                raise AssertionError("a successful load did not clear the mark")
+            storage.save_configs([other])
+            if len(set_aside("configs")) != n:
+                raise AssertionError("a file that was loaded fine was set aside")
+
+            # An empty file is not "unreadable": there is nothing in it to keep.
+            _p.configs_file().write_bytes(b"")
+            storage._checked.discard(str(_p.configs_file()))
+            if storage.load_configs() != [] or storage.unreadable_files():
+                raise AssertionError("an empty file was reported as unreadable")
+            storage.save_configs([other])
+            if len(set_aside("configs")) != n:
+                raise AssertionError("an empty file was set aside")
+
+            # Cannot be opened right now (locked, an I/O error): that says
+            # nothing about its content. It is neither set aside nor written
+            # over — the save fails and can be repeated.
+            storage._checked.discard(str(_p.configs_file()))
+            heard.clear()
+
+            def locked(_path, _shape=None):
+                raise PermissionError(13, "Permission denied")
+
+            with _v4_patched(storage, _is_readable_json=locked):
+                if storage.save_configs([cfg]) is not False:
+                    raise AssertionError("a file that could not be opened was written over")
+            if len(set_aside("configs")) != n or not heard:
+                raise AssertionError("a file that could not be opened was set aside, or nobody was told")
+            if [c.name for c in storage.load_configs()] != ["New one"]:
+                raise AssertionError("the file that could not be opened did not survive")
+
+            # Cannot be moved aside: then it is not written over either.
+            _p.configs_file().write_bytes(garbage)
+            storage.load_configs()
+            heard.clear()
+
+            def stuck(src, dst):
+                raise PermissionError(13, "Permission denied")
+
+            real_replace = storage.os.replace
+            with _v4_patched(storage.os, replace=lambda src, dst: stuck(src, dst)
+                             if ".unreadable-" in str(dst) else real_replace(src, dst)):
+                if storage.save_configs([cfg]) is not False:
+                    raise AssertionError("the save went ahead although the old file could not be kept")
+            if _p.configs_file().read_bytes() != garbage or not heard:
+                raise AssertionError("an unreadable file that could not be set aside was overwritten")
+            storage.save_configs([other])            # now it can be: set aside, then saved
+            if [c.name for c in storage.load_configs()] != ["New one"]:
+                raise AssertionError("saving did not recover once the file could be moved")
+
+            # The subscription secrets file follows the same rule.
+            storage.update_settings({"subscription_url": "https://example.invalid/sub"})
+            _p.secrets_file().write_bytes(b"\x00 not a secrets file")
+            if storage.load_subscription_secrets() != {} or \
+                    _p.secrets_file().name not in storage.unreadable_files():
+                raise AssertionError("an unreadable secrets file was taken for an empty one")
+            storage.update_settings({"subscription_url": "https://example.invalid/sub2"})
+            if not set_aside("secrets"):
+                raise AssertionError("an unreadable secrets file was overwritten without a copy")
+
+            # Settings: the same rule.
+            storage.update_settings({"theme": "dark"})
+            _p.settings_file().write_bytes(b"{ broken")
+            storage.update_settings({"theme": "light"}, fallback={"theme": "dark"})
+            if not set_aside("settings") or storage.load_settings().get("theme") != "light":
+                raise AssertionError("an unreadable settings file was overwritten without a copy")
+            # A settings file saved by Notepad (with a BOM) is not damage.
+            n_settings = len(set_aside("settings"))
+            _p.settings_file().write_bytes(b"\xef\xbb\xbf" + b'{"theme": "dark"}')
+            if storage.load_settings().get("theme") != "dark" or storage.unreadable_files():
+                raise AssertionError("a settings file with a BOM was taken for a broken one")
+            storage.update_settings({"theme": "light"})
+            if len(set_aside("settings")) != n_settings:
+                raise AssertionError("a settings file with a BOM was set aside")
+            # Merely loading unreadable settings writes nothing: the defaults
+            # we fall back to are not "migrated" over the user's file.
+            n_settings = len(set_aside("settings"))
+            _p.settings_file().write_bytes(b"{ broken again")
+            storage.load_settings()
+            if _p.settings_file().read_bytes() != b"{ broken again" or \
+                    len(set_aside("settings")) != n_settings:
+                raise AssertionError("loading an unreadable settings file rewrote it")
+            storage.update_settings({"theme": "light"}, fallback={"theme": "dark"})
+
+            # A save that fails is reported and returns False; nothing raises.
+            heard.clear()
+            logged.clear()
+
+            def refuse(_path, _data):
+                raise OSError(28, "No space left on device")
+
+            if [p.name for p in tmp.iterdir() if p.name.endswith(".tmp")]:
+                raise AssertionError("temporary files were left in the data folder")
+
+            with _v4_patched(storage, _atomic_write_bytes=refuse):
+                if storage.save_configs([cfg]) is not False:
+                    raise AssertionError("a failed save claimed success")
+            if not heard or not logged or "configs" not in heard[-1]:
+                raise AssertionError(f"a failed save was not reported: {heard} {logged}")
+            if [c.name for c in storage.load_configs()] != ["New one"]:
+                raise AssertionError("a failed save damaged the file that was there")
+        finally:
+            storage.set_error_listener(before)
+            storage._unreadable.clear()
+
+    # The window shows it.
+    import inspect
+    from kapro_tun.gui import main_window as mw
+    if "storage.set_error_listener(" not in inspect.getsource(mw.MainWindow.__init__):
+        raise AssertionError("the window never learns about storage errors")
+    said: list = []
+
+    class _Win:
+        logs_page = type("L", (), {"append": staticmethod(lambda _line: None)})()
+
+    with _v4_patched(mw, show_toast=lambda _w, text, **_k: said.append(text)):
+        mw.MainWindow._on_storage_error(_Win(), "configs.json: disk full")
+    if not said:
+        raise AssertionError("a storage error produced no notice")
+
+
+check("integrity: a verified file cannot be swapped while it is held (v4.1.1)",
+      _v411_held_file)
+check("integrity: a held file is started by its real path, and the path is pinned (v4.1.1)",
+      _v411_held_file_stays_where_it_is)
+check("engine: only the pinned build is ever executed, and it is held while it runs (v4.1.1)",
+      _v411_engine_is_verified_before_it_runs)
+check("updater: a failed check is not 'you have the latest version' (v4.1.1)",
+      _v411_update_check_says_when_it_failed)
+check("updater: the installer is checked and started while held (v4.1.1)",
+      _v411_updater_runs_only_what_it_verified)
+check("installer: the downloaded application must match the one built with it (v4.1.1)",
+      _v411_installer_verifies_the_app_it_downloads)
+check("storage: unreadable files are set aside, failed saves are reported (v4.1.1)",
+      _v411_storage_does_not_lose_or_hide)
 
 
 # ---------------------------------------------------------------------------

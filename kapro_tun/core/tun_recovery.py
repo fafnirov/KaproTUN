@@ -54,10 +54,18 @@ def mark(iface_name: str, iface_index: Optional[int]) -> bool:
             "iface_index": int(iface_index) if iface_index is not None else None,
             "dns_cleared": True,
         }
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-        os.replace(tmp, path)
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         return True
     except Exception:
         return False

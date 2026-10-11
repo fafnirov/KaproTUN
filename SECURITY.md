@@ -327,9 +327,46 @@ the bytes are the ones we published.
   to ask GitHub for the expected value would be missing exactly when needed.
 - **The installer** — its digest comes from the GitHub release API, in the same
   response that tells the app an update exists. There is no path where we learn
-  about a release but cannot verify it. If that digest is ever absent, the
-  mirror is skipped and the installer is taken only from github.com, rather
-  than accepted unverified.
+  about a release but cannot verify it. If that digest is ever absent, the app
+  does not download or run the installer at all (since v4.1.1): it has nothing
+  to check the file against, says so, and points you to the release page.
+
+**What runs is checked again right before it runs** (v4.1.1). A digest checked
+at download time proves what was downloaded, not what is on disk an hour later
+— and the engine and the driver sit in your profile folder, which any program
+you run can write to, while the engine is started with administrator rights.
+So:
+
+- Before every start, `sing-box` and (on Windows) `wintun.dll` are compared
+  with digests pinned in the source — digests of the files themselves, not of
+  the archives they came in. A file that is not the pinned build is not run;
+  the next connect downloads it again.
+- On Windows the files are opened so that nothing can write, replace, rename
+  or delete them, hashed through that handle, and kept that way until the
+  engine has stopped. There is no moment between "the digest is right" and
+  "the process is running" in which a swapped file could be the one started.
+- A process is started by path, and a path can be made to lead elsewhere: a
+  folder on the way may be a junction that is re-pointed after the check. So
+  the file's real location is taken from the open handle, every folder on it
+  must be a real folder (and is held in place where the system allows), and
+  the file is started by that real path.
+- The downloaded installer is treated the same way: checked and started
+  through one held handle, not checked in one step and started in another.
+- Files are written under random temporary names created exclusively, never
+  under a predictable `name.tmp` that could be planted in advance as a link.
+- The engine is no longer executed just to ask it for its version. A file that
+  matches the pinned digest *is* that version.
+- The Windows installer downloads `KaproTUN.exe` separately. It installs it
+  only if it matches the digest recorded in the installer when the two were
+  built together (or, for an installer built by hand, the digest GitHub
+  reports for the release) — and installs nothing if it has no digest at all.
+
+The limits of this: on macOS and Linux an open file can still be replaced by
+path, so there the files are checked before the start but not held. And the
+folder KaproTUN itself is installed into is, like the rest of your profile,
+writable without administrator rights — a program already running as you can
+replace `KaproTUN.exe` itself. That is the "malware running as you" case
+below; these checks narrow it, they do not remove it.
 
 A file that fails the check is deleted, never lands at its destination, and the
 rejection is written to `app.log`. Downloads remain **size-capped** as well: a
@@ -340,9 +377,10 @@ What this does **not** give you: our `.exe` is still not reproducibly built or
 SLSA-attested (see below). The check proves you received the bytes we
 published; it does not independently prove what those bytes were built from.
 
-The sing-box engine is **pinned to the 1.12.x line**. The 1.13 line regressed
-the VLESS data path on Windows (tunnel establishes, payload never flows), so an
-installed 1.13.x is detected and replaced.
+The sing-box engine is **pinned to one build, 1.12.9**. The 1.13 line regressed
+the VLESS data path on Windows (tunnel establishes, payload never flows). Since
+v4.1.1 the pin is the file's digest, so any other build found in the engine
+folder — newer, older, or modified — is replaced with the pinned one.
 
 ## What we DON'T defend against
 
@@ -375,8 +413,8 @@ We're honest about the limits:
   mismatch. It never disables Gatekeeper system-wide and never asks for a
   password.
 - **Reproducible builds.** We don't produce signed SLSA attestations. Trust in
-  our `.exe` rests on (a) public GitHub Actions logs, (b) signed commits,
-  (c) open code. A supply-chain attacker who compromised the GitHub account
+  our `.exe` rests on (a) public GitHub Actions logs and (b) open code. Commits
+  are not signed. A supply-chain attacker who compromised the GitHub account
   could ship a backdoored binary. Building from source removes this risk:
   `pyinstaller KaproTUN.spec`.
 

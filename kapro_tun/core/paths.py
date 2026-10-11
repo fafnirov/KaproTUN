@@ -252,14 +252,18 @@ def write_secure_text(path: Path, text: str) -> Path:
     BEFORE the rename, so the credential file is never briefly world-readable.
     Returns the path. NEVER log `text` — it contains secrets.
     """
-    tmp = path.with_name(path.name + ".tmp")
+    # Random name, created exclusively (and user-only on POSIX from the first
+    # byte): a predictable "<name>.tmp" could be planted as a link.
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
-        tmp.write_bytes(text.encode("utf-8"))
-        harden_file_perms(tmp)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(text.encode("utf-8"))
+        harden_file_perms(Path(tmp))
         os.replace(tmp, path)
     except Exception:
         try:
-            tmp.unlink()
+            os.unlink(tmp)
         except OSError:
             pass
         raise
@@ -279,11 +283,14 @@ def remove_runtime_configs() -> list[str]:
     failed: list[str] = []
     for f in (runtime_config_file(), hysteria_config_file(),
               sing_box_runtime_config_file()):
-        try:
-            f.unlink(missing_ok=True)
-        except OSError:
-            if f.exists():
-                failed.append(f.name)
+        # The file, and whatever write_secure_text left half-written next to
+        # it if the process was killed mid-write ("<name>.<random>.tmp").
+        for victim in [f, *f.parent.glob(f.name + ".*.tmp")]:
+            try:
+                victim.unlink(missing_ok=True)
+            except OSError:
+                if victim.exists():
+                    failed.append(victim.name)
     return failed
 
 

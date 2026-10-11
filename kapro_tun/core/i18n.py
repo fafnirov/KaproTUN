@@ -112,7 +112,7 @@ _RU: dict[str, str] = {
     'inst.first_run_title': 'Первый запуск',
     'inst.geoip_label': 'Список российских IP-адресов',
     'inst.geoip_manual_hint': 'Скачай вручную:\n{url}\nи сохрани как:\n{path}',
-    'inst.singbox_manual_hint': 'Скачай вручную:\n- https://github.com/SagerNet/sing-box/releases\n- https://www.wintun.net/\nи положи sing-box.exe в:\n{path}',
+    'inst.singbox_manual_hint': 'Скачай вручную именно sing-box 1.12.9 — другую версию клиент не запустит:\n- https://github.com/SagerNet/sing-box/releases/tag/v1.12.9\n- https://www.wintun.net/ (wintun 0.14.1)\nи положи sing-box.exe в:\n{path}',
     'leak.caption_no_vpn': 'VPN не подключён. Проверяю IPv4/IPv6/DNS/WebRTC через обычный канал — результат покажет «как видно без защиты».\nЭто займёт до 25 секунд.',
     'leak.caption_running': 'Проверяем IPv4, IPv6, DNS, WebRTC через активный VPN…\nЭто займёт до 20 секунд.',
     'leak.close_btn': 'Закрыть',
@@ -681,6 +681,11 @@ _RU: dict[str, str] = {
     'upd.progress_of': 'Скачано {done} / {total} МБ',
     'dlg.logs': 'Журнал',
     'dlg.ok': 'Понятно',
+    'mw.update_check_failed': 'Не удалось проверить обновления. Проверь подключение и попробуй ещё раз.',
+    'upd.no_digest': 'GitHub не сообщил контрольную сумму установщика, поэтому клиент не будет скачивать и запускать его сам. Скачай обновление со страницы релиза.',
+    'mw.storage_unreadable': 'Файл {name} не удалось прочитать. Он не удалён: при следующем сохранении останется рядом как копия.',
+    'mw.storage_set_aside': 'Файл {name} не читался и сохранён рядом как {copy}.',
+    'mw.storage_save_failed': 'Не удалось сохранить {name}: {reason}',
 }
 
 _EN: dict[str, str] = {
@@ -762,7 +767,7 @@ _EN: dict[str, str] = {
     'inst.first_run_title': 'First run',
     'inst.geoip_label': 'Russian IP address list',
     'inst.geoip_manual_hint': 'Download manually:\n{url}\nand save as:\n{path}',
-    'inst.singbox_manual_hint': 'Download manually:\n- https://github.com/SagerNet/sing-box/releases\n- https://www.wintun.net/\nand put sing-box.exe in:\n{path}',
+    'inst.singbox_manual_hint': 'Download exactly sing-box 1.12.9 manually — the client will not run another version:\n- https://github.com/SagerNet/sing-box/releases/tag/v1.12.9\n- https://www.wintun.net/ (wintun 0.14.1)\nand put sing-box.exe in:\n{path}',
     'leak.caption_no_vpn': 'VPN is not connected. Testing IPv4/IPv6/DNS/WebRTC over the plain channel — the result shows "how you look without protection".\nThis takes up to 25 seconds.',
     'leak.caption_running': 'Testing IPv4, IPv6, DNS, WebRTC over the active VPN…\nThis takes up to 20 seconds.',
     'leak.close_btn': 'Close',
@@ -1331,6 +1336,11 @@ _EN: dict[str, str] = {
     'upd.progress_of': 'Downloaded {done} / {total} MB',
     'dlg.logs': 'Log',
     'dlg.ok': 'OK',
+    'mw.update_check_failed': 'Could not check for updates. Check your connection and try again.',
+    'upd.no_digest': 'GitHub did not report a checksum for the installer, so the client will not download and run it by itself. Get the update from the release page.',
+    'mw.storage_unreadable': 'The file {name} could not be read. It was not deleted: the next save keeps it next to the new one as a copy.',
+    'mw.storage_set_aside': 'The file {name} could not be read and was kept as {copy}.',
+    'mw.storage_save_failed': 'Could not save {name}: {reason}',
 }
 
 
