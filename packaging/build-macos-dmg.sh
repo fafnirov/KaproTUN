@@ -48,7 +48,21 @@ ln -s /Applications dist/dmg_root/Applications
 # The app is unsigned, so Gatekeeper will stop most first launches. Put the
 # way through it where the user is already looking: next to the app.
 cp packaging/macos-first-run.txt "dist/dmg_root/Не открывается? Прочти.txt"
-hdiutil create -volname "KaproTUN" -srcfolder dist/dmg_root \
-  -ov -format UDZO "dist/${OUT}"
+# hdiutil fails now and then on CI runners with "create failed - Resource
+# busy" (something on the runner still has the folder open — the v4.1.4
+# release lost its Intel build to it and had to be rerun). It passes a
+# moment later, so try a few times before giving up.
+for attempt in 1 2 3 4 5; do
+  if hdiutil create -volname "KaproTUN" -srcfolder dist/dmg_root \
+       -ov -format UDZO "dist/${OUT}"; then
+    break
+  fi
+  if [ "$attempt" = 5 ]; then
+    echo "hdiutil failed 5 times" >&2
+    exit 1
+  fi
+  echo "hdiutil failed (attempt ${attempt}), retrying in 10 s" >&2
+  sleep 10
+done
 rm -rf dist/dmg_root
 ls -lh "dist/${OUT}"
