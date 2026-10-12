@@ -165,6 +165,21 @@ jobs:
       - name: Build payload
         run: ${{ matrix.build_cmd }}
 
+      # The suite above runs the source, on Linux. This runs the application
+      # that was just packaged, on the platform it was packaged for, and lets
+      # it check itself: TLS, the engine, the window, and on macOS a whole
+      # proxy-mode connection through a server on the loopback.
+      - name: Self-test the built application
+        run: python packaging/run_selftest.py selftest-out
+
+      - name: Upload self-test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: selftest-${{ matrix.artifact_name }}-${{ github.sha }}
+          path: selftest-out
+          if-no-files-found: warn
+
       - name: Show built artifacts
         if: matrix.os == 'windows-latest'
         run: Get-ChildItem dist/ | Format-Table Name, Length

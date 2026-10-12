@@ -7332,16 +7332,25 @@ def _proxy_session_journal_restores() -> None:
          _sp.mac_proxy_points_at, _sp.disable_proxy)
     _pa.proxy_recovery_file = lambda: journal
     _sp.get_state = lambda: before
-    _sp.restore = lambda st: log.append(("restore", st))
-    _sp.disable_proxy = lambda: log.append(("disable",))
+    # v4.1.6: end() reads the setting back after restoring, so the fake has to
+    # behave: pointed at us after a set, not after a restore.
+    live = {"ours": False, "accept": True}
+
+    def restore(st):
+        log.append(("restore", st))
+        live["ours"] = False
+
+    _sp.restore = restore
+    _sp.disable_proxy = lambda: (log.append(("disable",)), live.update(ours=False))
     try:
-        def set_proxy(host, port, override="<local>"):
+        def set_proxy(host, port, override="<local>", services=None):
             if not journal.is_file():
                 raise AssertionError("system proxy changed before the journal was written")
             log.append(("set", host, port))
+            live["ours"] = live["accept"]
         _sp.set_proxy = set_proxy
 
-        _sp.mac_proxy_points_at = lambda h, p: True
+        _sp.mac_proxy_points_at = lambda h, p: live["ours"]
         if not _ps.begin("127.0.0.1", 2080):
             raise AssertionError("begin() reported failure on an applied proxy")
         if _json.loads(journal.read_text(encoding="utf-8")) != before:
@@ -7360,7 +7369,7 @@ def _proxy_session_journal_restores() -> None:
 
         # macOS refuses: report False and leave nothing behind.
         log.clear()
-        _sp.mac_proxy_points_at = lambda h, p: False
+        live["accept"] = False
         if _ps.begin("127.0.0.1", 2080):
             raise AssertionError("begin() claimed success on a refused change")
         if journal.exists():
@@ -11591,6 +11600,308 @@ def _v415_traffic_check_can_verify_tls() -> None:
 
 check("connect: the traffic check can verify TLS on macOS and says why it failed (v4.1.5)",
       _v415_traffic_check_can_verify_tls)
+
+
+# ---------------------------------------------------------------------------
+# v4.1.6 — macOS proxy mode gives the system proxy back exactly as it was
+# ---------------------------------------------------------------------------
+
+section("v4.1.6: macOS proxy mode restores the system proxy")
+
+
+class _V416Networksetup:
+    """networksetup, as far as proxy settings go: per-service slots, bypass
+    domains and the automatic-proxy URL; with switches to make it fail."""
+
+    GET = {"-getwebproxy": "http", "-getsecurewebproxy": "https", "-getsocksfirewallproxy": "socks"}
+    SET = {"-setwebproxy": "http", "-setsecurewebproxy": "https", "-setsocksfirewallproxy": "socks"}
+    STATE = {"-setwebproxystate": "http", "-setsecurewebproxystate": "https",
+             "-setsocksfirewallproxystate": "socks"}
+
+    def __init__(self, services: dict):
+        self.services = services
+        self.refuse_changes = False          # a standard account: every change is refused
+        self.unreadable: set = set()         # services whose settings cannot be read
+        self.calls: list = []
+
+    def snapshot(self):
+        """Everything networksetup would print, including the address a
+        switched-off slot still remembers (as on a real Mac)."""
+        import copy
+        return copy.deepcopy(self.services)
+
+    def as_subprocess(self):
+        """A stand-in for the subprocess module inside system_proxy, so that
+        the real _mac_run (and what it records about refusals) is what runs."""
+        import subprocess as real
+        outer = self
+
+        class _Module:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            @staticmethod
+            def run(args, **_kw):
+                return outer.run(args, check=False)
+
+        return _Module()
+
+    def run(self, args, check=True):
+        import subprocess
+        verb, rest = args[1], args[2:]
+        self.calls.append((verb, *rest))
+        rc, out = 0, ""
+        if verb == "-listallnetworkservices":
+            out = "An asterisk (*) denotes that a network service is disabled.\n" + "\n".join(self.services)
+        elif verb in self.GET or verb in ("-getproxybypassdomains", "-getautoproxyurl"):
+            svc = rest[0]
+            conf = self.services[svc]
+            if svc in self.unreadable:
+                rc, out = 1, ""
+            elif verb in self.GET:
+                slot = conf[self.GET[verb]]
+                out = (f"Enabled: {'Yes' if slot['on'] else 'No'}\nServer: {slot['server']}\n"
+                       f"Port: {slot['port']}\nAuthenticated Proxy Enabled: 0\n")
+            elif verb == "-getproxybypassdomains":
+                out = ("\n".join(conf["bypass"]) + "\n") if conf["bypass"] else \
+                    f"There aren't any bypass domains set on {svc}.\n"
+            else:
+                out = (f"URL: {conf['pac_url'] or '(null)'}\n"
+                       f"Enabled: {'Yes' if conf['pac_on'] else 'No'}\n")
+        elif self.refuse_changes:
+            rc, out = 1, "** Error: Command requires admin privileges.\n"
+        elif verb in self.SET:
+            # (checked on a real Mac: an empty address is accepted and leaves
+            # "Server: " / "Port: 0", switched on)
+            self.services[rest[0]][self.SET[verb]] = {"on": True, "server": rest[1],
+                                                      "port": rest[2] if rest[1] else "0"}
+        elif verb in self.STATE:
+            self.services[rest[0]][self.STATE[verb]]["on"] = rest[1] == "on"
+        elif verb == "-setproxybypassdomains":
+            self.services[rest[0]]["bypass"] = [] if rest[1:] == ["Empty"] else list(rest[1:])
+        elif verb == "-setautoproxyurl":
+            self.services[rest[0]].update(pac_url=rest[1], pac_on=True)
+        elif verb == "-setautoproxystate":
+            self.services[rest[0]]["pac_on"] = rest[1] == "on"
+        else:
+            rc = 1
+        if check and rc:
+            raise subprocess.CalledProcessError(rc, args, out)
+        return subprocess.CompletedProcess(args, rc, stdout=out, stderr="")
+
+
+def _v416_service(http=None, bypass=(), pac=None) -> dict:
+    off = {"on": False, "server": "", "port": "0"}
+    return {"http": dict(http or off), "https": dict(http or off), "socks": dict(off),
+            "bypass": list(bypass), "pac_url": pac or "", "pac_on": bool(pac)}
+
+
+def _v416_mac_proxy_is_given_back() -> None:
+    """Proxy mode borrows the system proxy for the session. It used to give it
+    back incompletely: the bypass list stayed ours, a setting that could not
+    be read at the start was switched off at the end, and when the restore
+    itself failed the record needed to try again was deleted."""
+    import tempfile as _tf
+    from kapro_tun.core import paths as _pa, proxy_session as ps, system_proxy as sp
+    ours = ("127.0.0.1", 2080)
+    corp = {"on": True, "server": "proxy.corp.example", "port": "3128"}
+
+    def machine():
+        return _V416Networksetup({
+            "Wi-Fi": _v416_service(http=corp, bypass=["*.corp.example", "10.0.0.0/8"]),
+            "USB LAN": _v416_service(pac="http://wpad.corp.example/proxy.pac"),
+            "Thunderbolt Bridge": _v416_service(),
+        })
+
+    journal = _Path(_tf.mkdtemp(prefix="kaprotun-v416-")) / "proxy-recovery.json"
+    with _v4_patched(_pa, proxy_recovery_file=lambda: journal), \
+            _v4_patched(sp.sys, platform="darwin"):
+        # 1. A session leaves everything as it found it — the user's own
+        #    proxy, their bypass list, their automatic-proxy URL.
+        ns = machine()
+        before = ns.snapshot()
+        with _v4_patched(sp, subprocess=ns.as_subprocess()):
+            if not ps.begin(*ours) or not sp.mac_proxy_points_at(*ours):
+                raise AssertionError("the system proxy was not pointed at the listener")
+            if ns.services["USB LAN"]["pac_on"]:
+                raise AssertionError("an automatic-proxy URL was left on: it would be used "
+                                     "instead of the VPN")
+            if ps.end() is not True or ns.snapshot() != before or journal.exists():
+                diff = {k: (before[k], v) for k, v in ns.snapshot().items() if v != before[k]}
+                raise AssertionError(f"after the session the proxy settings differ: {diff}")
+
+        # 2. A service whose settings cannot be read is not ours to change:
+        #    it is neither pointed at us nor "restored" to off afterwards.
+        ns = machine()
+        ns.unreadable.add("Wi-Fi")
+        before = ns.snapshot()
+        with _v4_patched(sp, subprocess=ns.as_subprocess()):
+            if not ps.begin(*ours):
+                raise AssertionError("one unreadable service stopped the others from being used")
+            if ns.snapshot()["Wi-Fi"] != before["Wi-Fi"]:
+                raise AssertionError("a service that could not be read was changed anyway")
+            ps.end()
+            if ns.snapshot() != before:
+                raise AssertionError("a service that could not be read lost its proxy at the end")
+
+        # 3. Nothing can be read at all: nothing is changed (there would be no
+        #    way to put it back).
+        ns = machine()
+        ns.unreadable.update(ns.services)
+        before = ns.snapshot()
+        with _v4_patched(sp, subprocess=ns.as_subprocess()):
+            if ps.begin(*ours) or ns.snapshot() != before or journal.exists():
+                raise AssertionError("the proxy was changed with no record of what it was")
+
+        # 4. A standard account: macOS refuses. Reported, and nothing is left behind.
+        ns = machine()
+        ns.refuse_changes = True
+        before = ns.snapshot()
+        with _v4_patched(sp, subprocess=ns.as_subprocess()):
+            if ps.begin(*ours) or ns.snapshot() != before or journal.exists():
+                raise AssertionError("a refused change was reported as applied, or left traces")
+            if "admin privileges" not in sp.last_refusal():
+                raise AssertionError(f"what macOS said when it refused is lost: {sp.last_refusal()!r}")
+
+        # 5. The restore itself fails: say so and KEEP the record, so that the
+        #    next start can finish the job.
+        ns = machine()
+        before = ns.snapshot()
+        with _v4_patched(sp, subprocess=ns.as_subprocess()):
+            ps.begin(*ours)
+            ns.refuse_changes = True
+            if ps.end() is not False or not journal.exists():
+                raise AssertionError("a failed restore was reported as done, or its record deleted")
+            if not ps.is_active():
+                raise AssertionError("a session that could not be undone no longer counts as open")
+            ns.refuse_changes = False
+            if not ps.recover() or ns.snapshot() != before or journal.exists():
+                raise AssertionError("the next start did not finish a restore that had failed")
+
+        # 6. The record is unreadable (a damaged file): the least harm is the
+        #    proxy off — never left pointing at a listener that is gone.
+        ns = machine()
+        with _v4_patched(sp, subprocess=ns.as_subprocess()):
+            ps.begin(*ours)
+            journal.write_text("{ damaged", encoding="utf-8")
+            if ps.end() is not True or sp.mac_proxy_points_at(*ours) or journal.exists():
+                raise AssertionError("with a damaged record the proxy was left on our listener")
+
+    # A standard account is told what is true for it: "set it by hand in
+    # System Settings" needs an administrator there as well.
+    from kapro_tun.gui import main_window as mw
+    from kapro_tun.core import i18n as _i18n
+    for table in (_i18n._RU, _i18n._EN):
+        if "{addr}" not in table["mw.proxy_needs_admin"] or "Firefox" not in table["mw.proxy_needs_admin"]:
+            raise AssertionError("the notice for a standard account names no way that works")
+    said: list = []
+
+    class _Mgr:
+        system_proxy_applied = False
+
+        def is_connected(self):
+            return True
+
+        def inactive_protections(self):
+            return []
+
+    class _Win:
+        manager = _Mgr()
+        logs_page = type("L", (), {"append": staticmethod(lambda _line: None)})()
+
+    for is_admin, key in ((True, "mw.proxy_not_applied"), (False, "mw.proxy_needs_admin")):
+        said.clear()
+        with _v4_patched(sp, mac_account_is_admin=lambda: is_admin), \
+                _v4_patched(mw, show_toast=lambda _w, text, **_k: said.append(text)):
+            mw.MainWindow._warn_inactive_protections(_Win())
+        want = mw.tr(key, addr="127.0.0.1:2080")
+        if said != [want]:
+            raise AssertionError(f"administrator={is_admin}: the notice is not the one for this account")
+    if sp.mac_account_is_admin() is not True and sys.platform != "darwin":
+        raise AssertionError("outside macOS the question must not get in the way")
+
+    # The disconnect path says so when the proxy could not be given back.
+    import inspect
+    from kapro_tun.core import controller as _c
+    src = inspect.getsource(_c.ConnectionManager.disconnect)
+    if "if not proxy_session.end()" not in src:
+        raise AssertionError("disconnect ignores a system proxy that was not restored")
+
+
+check("macOS proxy mode: the system proxy is given back exactly as it was (v4.1.6)",
+      _v416_mac_proxy_is_given_back)
+
+
+def _v416_selftest_is_safe_and_honest() -> None:
+    """`KaproTUN --selftest`: the packaged application checking itself. It
+    must never start a TUN session on its own, never touch the user's data,
+    and report a failed check as failed."""
+    import inspect
+    import json as _json
+    from kapro_tun import main as _main, selftest as st
+    from kapro_tun.core import controller as _c, sing_box_installer as si
+
+    # Routed before the normal start-up (no single-instance guard, no cleanup).
+    src = inspect.getsource(_main.main)
+    if not 0 < src.find("selftest.run(") < src.find("_run_app()"):
+        raise AssertionError("--selftest goes through the normal start-up")
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("the self-test started something on a TUN platform")
+
+    # Where the client would connect through a TUN device, the connection
+    # check is skipped — nothing is downloaded, held or started.
+    with _v4_fresh_data_dir() as tmp, \
+            _v4_patched(_c.ConnectionManager, planned_mode=lambda self: _c.MODE_TUN,
+                        connect=forbidden), \
+            _v4_patched(si, hold_engine=forbidden, download_and_install=forbidden):
+        status, detail, _data = st._check_connect(tmp)
+        if status != st.SKIP or not detail:
+            raise AssertionError(f"the connection check ran on a TUN platform: {status}")
+
+    # The run itself: its own data folder, every check counted, an exception
+    # inside a check is that check's failure.
+    real_data_dir = _sbx_paths.app_data_dir
+    for breaks, want in ((None, 0), ("tls", 1), ("window", 1)):
+        def stage(name):
+            def fn(*_a):
+                if _sbx_paths.app_data_dir() == seen["before"]:
+                    raise AssertionError("the self-test runs in the caller's data folder")
+                if name == breaks:
+                    raise RuntimeError("certificate verify failed")
+                return st.OK, f"{name} fine", {}
+            return fn
+
+        with _v4_fresh_data_dir() as tmp, \
+                _v4_patched(_sbx_paths, app_data_dir=_sbx_paths.app_data_dir), \
+                _v4_patched(st, _check_environment=stage("environment"), _check_tls=stage("tls"),
+                            _check_engine=stage("engine"), _check_connect=stage("connect"),
+                            _check_window=stage("window")):
+            seen = {"before": _sbx_paths.app_data_dir()}
+            code = st.run(["--selftest-e2e", str(tmp / "out")])
+            items = _json.loads((tmp / "out" / "selftest.json").read_text(encoding="utf-8"))
+        if code != want:
+            raise AssertionError(f"with {breaks or 'nothing'} failing the exit code is {code}")
+        if [i["stage"] for i in items] != ["environment", "tls", "engine", "connect", "window"]:
+            raise AssertionError(f"checks run: {[i['stage'] for i in items]}")
+        failed = [i["stage"] for i in items if i["status"] == st.FAIL]
+        if failed != ([breaks] if breaks else []):
+            raise AssertionError(f"failed checks reported: {failed}")
+    if _sbx_paths.app_data_dir is not real_data_dir:
+        raise AssertionError("the test left the data folder redirected")
+
+    # Without -e2e nothing is downloaded and nothing connects.
+    with _v4_fresh_data_dir() as tmp, \
+            _v4_patched(_sbx_paths, app_data_dir=_sbx_paths.app_data_dir), \
+            _v4_patched(st, _check_environment=lambda: (st.OK, "", {}),
+                        _check_tls=lambda: (st.OK, "", {}), _check_engine=forbidden,
+                        _check_connect=forbidden, _check_window=lambda _f: (st.OK, "", {})):
+        if st.run(["--selftest", str(tmp / "out")]) != 0:
+            raise AssertionError("the plain self-test ran the end-to-end checks")
+
+
+check("selftest: the packaged app checks itself without touching the user's setup (v4.1.6)",
+      _v416_selftest_is_safe_and_honest)
 
 
 # ---------------------------------------------------------------------------

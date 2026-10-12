@@ -9,9 +9,10 @@ session dying with the default route still hijacked — and handled the same
 way, with a journal:
 
   begin()    snapshot the current proxy settings to disk, THEN change them
-  end()      restore the snapshot and delete the journal
+  end()      restore the snapshot and delete the journal — once the system
+             proxy really no longer points at us; until then the journal stays
   recover()  on startup: a journal that still exists means the last session
-             never reached end(), so restore it now
+             never reached end() (or its restore failed), so restore it now
 
 The snapshot is what makes this a restore rather than a blind "off": a user
 who already ran a corporate or personal proxy gets it back, not wiped.
@@ -39,11 +40,18 @@ def begin(host: str, port: int) -> bool:
     """
     try:
         state = system_proxy.get_state()
+        services = list((state or {}).get("services") or {})
+        if not services:
+            # Not one network service whose settings could be read: there
+            # would be nothing to put back afterwards, so nothing is changed.
+            return False
         paths.write_secure_text(_journal(), json.dumps(state, ensure_ascii=False))
     except Exception:
         return False
     try:
-        system_proxy.set_proxy(host, port)
+        # Only the services in the snapshot: what could not be read is not
+        # ours to change.
+        system_proxy.set_proxy(host, port, services=services)
     except Exception:
         pass
     applied = _points_at(host, port)
@@ -61,28 +69,46 @@ def _points_at(host: str, port: int) -> bool:
         return False
 
 
-def end() -> None:
+def end() -> bool:
     """Restore the pre-session proxy settings and delete the journal.
-    Idempotent and never raises: it runs on every disconnect and at exit."""
+    Idempotent and never raises: it runs on every disconnect and at exit.
+
+    Returns False if the system proxy STILL points at our listener afterwards
+    — macOS refused the change, or networksetup failed. The journal is then
+    kept (v4.1.6; it used to be deleted regardless, and with it the only
+    record of what to restore): the next start runs recover() and tries
+    again, and the caller tells the user that the proxy is still on."""
     state = _read_journal()
     if state is None:
-        return
+        return True
+    ours = (sing_box_config.PROXY_LISTEN_HOST, sing_box_config.PROXY_LISTEN_PORT)
     try:
         if state:
             system_proxy.restore(state)
-        elif _points_at(sing_box_config.PROXY_LISTEN_HOST,
-                        sing_box_config.PROXY_LISTEN_PORT):
-            # The journal exists but is unreadable, so there is no snapshot to
-            # restore — yet the proxy still points at our listener. Switching
-            # it off loses a pre-existing proxy setting we can no longer know;
-            # leaving it on loses the user's internet. Off is the lesser harm.
-            system_proxy.disable_proxy()
     except Exception:
         pass
+    if _points_at(*ours):
+        # The restore did not take, or there was no readable snapshot to
+        # restore from. Switching the proxy off loses a pre-existing setting
+        # we could not put back; leaving it on a listener that is gone loses
+        # the user's internet. Off is the lesser harm.
+        try:
+            system_proxy.disable_proxy()
+        except Exception:
+            pass
+        if _points_at(*ours):
+            return False
     try:
         _journal().unlink()
     except OSError:
         pass
+    return True
+
+
+def points_at_listener() -> bool:
+    """True if the system proxy points at our listener right now — whoever
+    set it."""
+    return _points_at(sing_box_config.PROXY_LISTEN_HOST, sing_box_config.PROXY_LISTEN_PORT)
 
 
 def recover() -> bool:

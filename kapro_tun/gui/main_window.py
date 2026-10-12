@@ -1200,8 +1200,14 @@ class MainWindow(QMainWindow):
             # Proxy mode came up but macOS refused the system-proxy change:
             # the listener works, yet nothing is using it. Without this the
             # window would say "connected" over a VPN that carries nothing.
+            # On a standard account "set it by hand in System Settings" is not
+            # advice: macOS asks for an administrator there as well. Say what
+            # does work instead — programs that take a proxy of their own.
+            from ..core import system_proxy
+            key = ("mw.proxy_not_applied" if system_proxy.mac_account_is_admin()
+                   else "mw.proxy_needs_admin")
             notices.append(tr(
-                "mw.proxy_not_applied",
+                key,
                 addr=f"{sing_box_config.PROXY_LISTEN_HOST}:"
                      f"{sing_box_config.PROXY_LISTEN_PORT}"))
         if inactive:

@@ -205,6 +205,12 @@ pyinstaller KaproTUN.spec          # → dist/KaproTUN.exe (portable, embedded i
 pyinstaller KaproTUN-Setup.spec    # → dist/KaproTUN-Setup.exe (Windows installer)
 ```
 
+To check a build on your machine, run it with `--selftest`: it verifies that
+its own TLS has certificates, draws the main window off to a screenshot and
+writes a short report — in a temporary data folder, without touching your
+servers or settings. The release workflow runs this (plus a real proxy-mode
+session on macOS) against every packaged application before it is published.
+
 On first connect the app downloads its engine into `%LOCALAPPDATA%\KaproTUN\`
 (Windows) or `~/.local/share/KaproTUN/` (macOS / Linux): **sing-box**
 (`sing-box/`) and, on Windows, the **WinTUN** driver (`tun/`).

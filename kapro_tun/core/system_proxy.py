@@ -52,12 +52,16 @@ def get_state() -> dict:
     return {}
 
 
-def set_proxy(host: str, port: int, override: str = "<local>") -> None:
-    """Turn on system proxy pointing at host:port."""
+def set_proxy(host: str, port: int, override: str = "<local>",
+              services: "list[str] | None" = None) -> None:
+    """Turn on system proxy pointing at host:port.
+
+    `services` (macOS): change only these network services — the ones a
+    snapshot could be taken of, so that every change can be undone."""
     if sys.platform == "win32":
         _win_set_proxy(host, port, override)
     elif sys.platform == "darwin":
-        _mac_set_proxy(host, port, override)
+        _mac_set_proxy(host, port, override, services)
     elif sys.platform == "linux":
         _linux_set_proxy(host, port, override)
 
@@ -162,10 +166,31 @@ _MAC_SLOTS = (
 )
 
 
+# What networksetup said the last time it refused a change ("" if it has not).
+# The words matter: "requires admin privileges" (a standard account) and a
+# timeout are different problems, and until v4.1.6 both were reported as
+# "macOS did not allow it" with the reason thrown away.
+_mac_last_refusal = ""
+
+
+def last_refusal() -> str:
+    return _mac_last_refusal
+
+
 def _mac_run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        args, capture_output=True, text=True, timeout=10, check=check,
-    )
+    global _mac_last_refusal
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        if len(args) > 1 and args[1].startswith("-set"):
+            _mac_last_refusal = f"{args[1]}: {type(e).__name__}"
+        raise
+    if proc.returncode != 0 and len(args) > 1 and args[1].startswith("-set"):
+        said = " ".join(((proc.stdout or "") + " " + (proc.stderr or "")).split())
+        _mac_last_refusal = f"{args[1]}: {said[:200] or 'exit code ' + str(proc.returncode)}"
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, args, proc.stdout, proc.stderr)
+    return proc
 
 
 def _mac_active_services() -> list[str]:
@@ -191,16 +216,47 @@ def _mac_active_services() -> list[str]:
 
 
 def _mac_get_state() -> dict:
-    """Snapshot the HTTP / HTTPS / SOCKS proxy slots of every active service.
+    """Snapshot the proxy settings of every active service: the HTTP / HTTPS /
+    SOCKS slots, the bypass list and the automatic-proxy URL.
 
-    Output is a nested dict {service_name: {http: {...}, https: {...},
-    socks: {...}}}.
-    """
-    snapshot: dict[str, dict[str, dict[str, str]]] = {}
+    Output is {service_name: {http: {...}, https: {...}, socks: {...},
+    bypass: [...], autoproxy: {...}}}.
+
+    A service whose slots cannot be read is LEFT OUT (v4.1.6). It used to be
+    recorded as empty, and an empty record restores as "off" — which switched
+    off a proxy the user had before, only because networksetup hiccuped at
+    the wrong moment. What we cannot read we cannot put back, so we do not
+    touch it: set_proxy() is given the services of this snapshot and no
+    others."""
+    snapshot: dict[str, dict] = {}
     for svc in _mac_active_services():
-        snapshot[svc] = {key: _mac_query_one(svc, get_verb)
-                         for key, get_verb, _set, _state, _port in _MAC_SLOTS}
+        slots = {key: _mac_query_one(svc, get_verb)
+                 for key, get_verb, _set, _state, _port in _MAC_SLOTS}
+        if any("enabled" not in slot for slot in slots.values()):
+            continue
+        entry: dict = dict(slots)
+        bypass = _mac_bypass_get(svc)
+        if bypass is not None:
+            entry["bypass"] = bypass
+        auto = _mac_query_one(svc, "-getautoproxyurl")
+        if "enabled" in auto:
+            entry["autoproxy"] = auto
+        snapshot[svc] = entry
     return {"_os": "mac", "services": snapshot}
+
+
+def _mac_bypass_get(service: str) -> "list[str] | None":
+    """The service's bypass domains; None if they cannot be read."""
+    try:
+        proc = _mac_run([_NETWORKSETUP, "-getproxybypassdomains", service], check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if len(lines) == 1 and lines[0].lower().startswith("there aren't any"):
+        return []
+    return lines
 
 
 def _mac_query_one(service: str, verb: str) -> dict[str, str]:
@@ -225,18 +281,27 @@ def _mac_query_one(service: str, verb: str) -> dict[str, str]:
     return out
 
 
-def _mac_set_proxy(host: str, port: int, override: str) -> None:
-    """Point HTTP, HTTPS and SOCKS at host:port on every active service.
+def _mac_set_proxy(host: str, port: int, override: str,
+                   services: "list[str] | None" = None) -> None:
+    """Point HTTP, HTTPS and SOCKS at host:port on every active service (or
+    only on `services`).
 
     `<local>` (Windows convention) translates to bypass entries for
     *.local, 169.254/16, and the standard localhost set.
+
+    An automatic-proxy URL (a PAC file) is switched off for the session:
+    macOS consults it before the manual settings, so left on it would keep
+    deciding where traffic goes and the VPN would carry nothing.
 
     Failures are swallowed per service (a Bluetooth PAN has no proxy slots),
     which is exactly why callers must not treat a clean return as success —
     use mac_proxy_points_at() to find out what actually took effect.
     """
+    global _mac_last_refusal
+    _mac_last_refusal = ""
     bypass = _mac_bypass_list(override)
-    for svc in _mac_active_services():
+    targets = _mac_active_services() if services is None else list(services)
+    for svc in targets:
         for _key, _get, set_verb, _state, _port in _MAC_SLOTS:
             try:
                 _mac_run([_NETWORKSETUP, set_verb, svc, host, str(port)])
@@ -247,6 +312,30 @@ def _mac_set_proxy(host: str, port: int, override: str) -> None:
                 _mac_run([_NETWORKSETUP, "-setproxybypassdomains", svc, *bypass])
             except (OSError, subprocess.SubprocessError):
                 pass
+        try:
+            if _mac_query_one(svc, "-getautoproxyurl").get("enabled", "").lower() == "yes":
+                _mac_run([_NETWORKSETUP, "-setautoproxystate", svc, "off"])
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def mac_account_is_admin() -> bool:
+    """Is this macOS account an administrator (a member of group `admin`)?
+
+    It decides what can be said when the system proxy could not be switched
+    on. macOS changes network settings only for an administrator: for a
+    standard account neither this program nor the user in System Settings can
+    do it without an administrator's name and password — so "set it by hand"
+    is no advice at all there. True when it cannot be told (and elsewhere)."""
+    if sys.platform != "darwin":
+        return True
+    try:
+        import grp
+        import os
+        admin_gid = grp.getgrnam("admin").gr_gid
+        return admin_gid in os.getgroups() or os.getegid() == admin_gid or os.geteuid() == 0
+    except Exception:
+        return True
 
 
 def mac_proxy_points_at(host: str, port: int) -> bool:
@@ -284,8 +373,9 @@ def _mac_restore(state: dict) -> None:
     """Reapply the per-service proxy settings we snapshotted.
 
     A slot that was enabled goes back to its server:port; everything else is
-    switched off. A slot missing from an older snapshot is left alone rather
-    than guessed at."""
+    switched off. The bypass list and the automatic-proxy URL go back too
+    (v4.1.6: they used to stay as the session left them). Anything missing
+    from the snapshot is left alone rather than guessed at."""
     services = state.get("services", {})
     for svc, conf in services.items():
         for key, _get, set_verb, state_verb, default_port in _MAC_SLOTS:
@@ -297,9 +387,29 @@ def _mac_restore(state: dict) -> None:
                     _mac_run([_NETWORKSETUP, set_verb, svc,
                               slot["server"], slot.get("port", default_port)])
                 else:
+                    # Off — but a slot that is off still remembers an address,
+                    # and ours must not stay in that field of System Settings.
+                    # Put back what it held (an empty address is accepted),
+                    # then switch it off: setting an address switches it on.
+                    _mac_run([_NETWORKSETUP, set_verb, svc,
+                              slot.get("server", ""), slot.get("port") or "0"], check=False)
                     _mac_run([_NETWORKSETUP, state_verb, svc, "off"])
             except (OSError, subprocess.SubprocessError):
                 continue
+        if isinstance(conf.get("bypass"), list):
+            try:
+                # "Empty" is networksetup's own word for "no bypass domains".
+                _mac_run([_NETWORKSETUP, "-setproxybypassdomains", svc,
+                          *(conf["bypass"] or ["Empty"])])
+            except (OSError, subprocess.SubprocessError):
+                pass
+        auto = conf.get("autoproxy") or {}
+        url = auto.get("url", "")
+        if auto.get("enabled", "").lower() == "yes" and url and url != "(null)":
+            try:
+                _mac_run([_NETWORKSETUP, "-setautoproxyurl", svc, url])
+            except (OSError, subprocess.SubprocessError):
+                pass
 
 
 def _mac_bypass_list(override: str) -> list[str]:

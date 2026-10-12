@@ -295,7 +295,19 @@ class ConnectionManager:
         # so no app is left pointing at a port that is about to close. A no-op
         # when there is no proxy session (no journal on disk).
         try:
-            proxy_session.end()
+            if not proxy_session.end():
+                self._log("[!] Системный прокси всё ещё указывает на KaproTUN: macOS не "
+                          "дала вернуть прежние настройки. Выключи прокси вручную "
+                          "(Системные настройки → Сеть → Прокси) — или запусти KaproTUN "
+                          "ещё раз, он попробует снова.")
+                app_log.log("[proxy] system proxy NOT restored — journal kept for the next start")
+            elif self._active_mode == MODE_HTTP_PROXY and proxy_session.points_at_listener():
+                # Not ours to undo: macOS refused us at connect and the user
+                # set the proxy by hand. But the listener is about to go, and
+                # a proxy pointing at nothing means no internet — so say it.
+                self._log("[!] Системный прокси всё ещё указывает на KaproTUN (он был "
+                          "включён вручную). Выключи его: Системные настройки → Сеть → "
+                          "Прокси, иначе после отключения сайты не откроются.")
         except Exception as e:
             self._log(f"[!] Системный прокси: не удалось вернуть настройки: {e}")
         # Unconditionally: stop() on a process that already exited still
@@ -1006,11 +1018,22 @@ class ConnectionManager:
             # Not a failed connect: the listener works and can be used by
             # anything pointed at it by hand. But it is NOT what the user
             # expects from pressing Connect, so it is said plainly.
-            self._log(f"[!] Не удалось включить системный прокси (macOS не "
-                      f"разрешила менять сетевые настройки этой учётной записи). "
-                      f"Прокси работает на {host}:{port} — укажи его вручную в "
-                      f"Системные настройки → Сеть → Прокси или в браузере.")
-            app_log.log("[proxy] system proxy NOT applied; listener is up")
+            from . import system_proxy
+            said = system_proxy.last_refusal()
+            if system_proxy.mac_account_is_admin():
+                how = (f"Прокси работает на {host}:{port} — укажи его вручную в "
+                       f"Системные настройки → Сеть → Прокси или в браузере, а "
+                       f"перед отключением VPN выключи там же.")
+            else:
+                how = (f"У этой учётной записи нет прав администратора, а без них "
+                       f"macOS не меняет сетевые настройки и в Системных настройках. "
+                       f"Прокси работает на {host}:{port}: через VPN пойдут программы, "
+                       f"в которых он указан отдельно (например, Firefox).")
+            self._log(f"[!] Не удалось включить системный прокси: macOS не "
+                      f"разрешила менять сетевые настройки"
+                      + (f" ({said})" if said else "") + ". " + how)
+            app_log.log(f"[proxy] system proxy NOT applied; listener is up; "
+                        f"networksetup said: {said or 'nothing'}")
 
         self._active = config
         self._active_engine = ENGINE_SING_BOX

@@ -1,6 +1,7 @@
 """Application entry point."""
 from __future__ import annotations
 
+import os
 import signal
 import socket
 import subprocess
@@ -338,6 +339,16 @@ def main() -> int:
     KeyboardInterrupt and SystemExit are BaseException, not Exception, so
     they pass through untouched (Ctrl+C and explicit sys.exit still work).
     """
+    if "--selftest" in sys.argv[1:] or "--selftest-e2e" in sys.argv[1:]:
+        # The packaged application checking itself (kapro_tun/selftest.py):
+        # no single-instance guard, no cleanup of a previous session, a data
+        # folder of its own. It leaves through os._exit — the window it
+        # created has worker threads, and tearing those down is the normal
+        # run's business, not a check's.
+        from . import selftest
+        code = selftest.run(sys.argv[1:])
+        sys.stdout.flush()
+        os._exit(code)
     try:
         return _run_app()
     except Exception as exc:
