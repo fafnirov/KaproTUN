@@ -115,6 +115,10 @@ ROW_H_SM, ROW_H, SERVER_H = 44, 56, 60
 CHIP, CHIP_SM, BADGE_H = 36, 32, 20
 ICON_XS, ICON_SM, ICON_MD, ICON_LG, ICON_XL = 12, 16, 20, 24, 40
 RING, RING_COMPACT, RING_BORDER = 184, 152, 3
+# Smaller rings, for a window lower than designed (home_v2.HomePage._fit).
+# Below RING_CAPTION_MIN the caption no longer fits inside the circle and
+# only the power glyph is drawn.
+RING_SMALL, RING_TINY, RING_CAPTION_MIN = 128, 96, 128
 DOT, DOT_SM = 8, 6
 TOAST_BOTTOM = 80
 

@@ -240,9 +240,14 @@ class RingButton(CircleConnectButton):
         self._sync_glow_color()
 
     def set_compact(self, compact: bool) -> None:
-        self._size = tokens.RING_COMPACT if compact else tokens.RING
-        self.setProperty("compact", "true" if compact else "false")
-        self.setFixedSize(self._size, self._size)
+        self.set_diameter(tokens.RING_COMPACT if compact else tokens.RING)
+
+    def set_diameter(self, size: int) -> None:
+        if size == self._size and self.width() == size:
+            return
+        self._size = size
+        self.setProperty("compact", "true" if size < tokens.RING else "false")
+        self.setFixedSize(size, size)
         self.update()
 
     def _sync_glow_color(self) -> None:
@@ -289,6 +294,13 @@ class RingButton(CircleConnectButton):
         font.setLetterSpacing(QFont.AbsoluteSpacing, tokens.LS_CAPS)
         p.setFont(font)
         text_h = p.fontMetrics().height()
+        if self._size < tokens.RING_CAPTION_MIN:
+            # Too small for the caption to stay inside the circle: the glyph
+            # alone (the status line under the ring says the rest).
+            p.drawPixmap(int((self.width() - icon) / 2), int((self.height() - icon) / 2),
+                         icons_v2.pixmap("power", icon, fg))
+            p.end()
+            return
         top = (self.height() - (icon + gap + text_h)) / 2
         p.drawPixmap(int((self.width() - icon) / 2), int(top), icons_v2.pixmap("power", icon, fg))
         p.setPen(QColor(fg))
@@ -601,6 +613,7 @@ class HomePage(QWidget):
         self._state = cs.DISCONNECTED
         self._has_config = False
         self._notice_target = ""
+        self._fitting = False
 
         col = QVBoxLayout(self)
         col.setContentsMargins(tokens.PAGE_PAD_X, tokens.SP_3, tokens.PAGE_PAD_X,
@@ -651,6 +664,57 @@ class HomePage(QWidget):
         self.set_config(None)
         self.set_state(cs.DISCONNECTED)
 
+    # --- fitting the height it is given ------------------------------------
+
+    def _fit(self) -> None:
+        """Pick the largest connect ring that leaves room for everything else.
+
+        The page is designed for a 720 px window (640 in the compact preset),
+        but it does not always get that: a display lower than the window, a
+        subscription banner or a kill-switch notice on top of the usual
+        content. Laid out in less height than it needs, a column of fixed
+        blocks runs into itself — the card over the ring, the ring over the
+        status line. So the one elastic element gives way: the ring steps
+        down through smaller sizes until the column fits. If there is no
+        server yet and even the smallest ring does not fit, the ring goes:
+        with nothing to connect to, the "add your first server" card is the
+        screen."""
+        if self._fitting:
+            return
+        self._fitting = True
+        try:
+            layout = self.layout()
+            largest = tokens.RING_COMPACT if self._compact else tokens.RING
+            self.circle.setVisible(True)
+            self.status_label.setVisible(True)
+            for size in (tokens.RING, tokens.RING_COMPACT, tokens.RING_SMALL, tokens.RING_TINY):
+                if size > largest:
+                    continue
+                self.circle.set_diameter(size)
+                if self._needed_height() <= self.height():
+                    return
+            if not self._has_config:
+                self.circle.setVisible(False)
+                self.status_label.setVisible(False)
+                layout.invalidate()
+        finally:
+            self._fitting = False
+
+    def _needed_height(self) -> int:
+        """The least height the column can be laid out in at the page's
+        current width. Asked for THIS width: a banner's text wraps, and how
+        many lines it takes — hence how tall it is — depends on it; the
+        plain minimum size counts such a block as one line."""
+        layout = self.layout()
+        layout.invalidate()
+        if layout.hasHeightForWidth():
+            return layout.totalMinimumHeightForWidth(self.width())
+        return layout.minimumSize().height()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._fit()
+
     # --- what the main window drives ---------------------------------------
 
     def set_state(self, state: str, detail: str = "") -> None:
@@ -667,6 +731,7 @@ class HomePage(QWidget):
             self.info_card.down.set_value("")
             self.info_card.up.set_value("")
         self._refresh_notice(detail)
+        self._fit()
 
     def set_public_ip(self, ip: str, country_name: str, city: Optional[str] = None,
                       country_code: str = "") -> None:
@@ -718,6 +783,7 @@ class HomePage(QWidget):
         self.sub_banner.setVisible(show)
         self._sub_gap.setVisible(show)
         if not show:
+            self._fit()
             return
         expired = info.is_expired()
         self.sub_banner.set_content(

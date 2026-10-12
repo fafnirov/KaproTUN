@@ -293,6 +293,11 @@ class _DnsWatchdog(QThread):
         self.wait(4000)
 
 
+# The lowest the window goes on a short display, and the room left around it.
+MIN_WINDOW_H = 520
+WINDOW_SCREEN_MARGIN = 16
+
+
 class _NetworkChangeWatchdog(QThread):
     """Detects a change of the physical egress interface (Ethernet ↔ Wi-Fi)
     while connected (v3.4.0).
@@ -395,6 +400,12 @@ class MainWindow(QMainWindow):
             preset = "compact" if self._screen_too_short_for(720) else "standard"
         self._compact_preset = (preset == "compact")
         DEFAULT_W, DEFAULT_H = _PRESETS[preset]
+        # A display lower than even the compact window (a 1024x600 netbook, a
+        # small virtual screen): keep the window inside it. Left at its
+        # designed height, the system either cuts it or lets the bottom
+        # navigation fall off the screen. The pages cope with less height
+        # (lists scroll, the home screen shrinks its ring — HomePage._fit).
+        DEFAULT_H = self._window_height_for(DEFAULT_H, self._available_screen_height())
         MIN_W, MIN_H = DEFAULT_W, DEFAULT_H - 90  # floor for advanced resizable mode
         self._allow_resize = self._window_resize_allowed(saved_settings)
         if self._allow_resize:
@@ -2359,6 +2370,25 @@ class MainWindow(QMainWindow):
         the size-persistence in resizeEvent, so flipping it off guarantees no
         handles are ever created. Pure + unit-testable."""
         return bool(settings.get("allow_window_resize", False))
+
+    @staticmethod
+    def _available_screen_height() -> int:
+        """Height of the primary screen's usable area, 0 if unknown."""
+        try:
+            from PySide6.QtWidgets import QApplication
+            scr = QApplication.primaryScreen()
+            return int(scr.availableGeometry().height()) if scr is not None else 0
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _window_height_for(preset_h: int, screen_h: int) -> int:
+        """The window's height: as designed, unless the screen is lower —
+        then what the screen has (less a small margin), but never below
+        MIN_WINDOW_H, under which the pages stop being usable. Pure."""
+        if screen_h <= 0:
+            return preset_h
+        return max(MIN_WINDOW_H, min(preset_h, screen_h - WINDOW_SCREEN_MARGIN))
 
     @staticmethod
     def _screen_too_short_for(needed_h: int) -> bool:

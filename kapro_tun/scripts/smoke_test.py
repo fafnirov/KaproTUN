@@ -11365,6 +11365,126 @@ check("ui: speed and traffic units follow the interface language (v4.1.3)",
 
 
 # ---------------------------------------------------------------------------
+# v4.1.4 — the home screen fits whatever height it is given
+# ---------------------------------------------------------------------------
+
+section("v4.1.4: the home screen on a short display")
+
+
+def _v414_home_fits_short_screens() -> None:
+    """On a display lower than the window, the window was cut by the system
+    and the home screen's blocks ran into each other (seen on the AppImage
+    catalogue's screenshot: the "add your first server" card over the connect
+    button). The window now stays inside the screen, and the home screen
+    picks the largest ring that leaves room for everything else."""
+    from PySide6.QtCore import QCoreApplication
+    from kapro_tun.gui import connection_state as cs, home_v2, tokens
+    from kapro_tun.gui import main_window as mw
+    from kapro_tun.gui.styles import get_qss
+    _v41_app()
+    cfg = _v401_cfg("Netherlands", "10.0.0.1")
+    chrome = tokens.TITLEBAR_H + tokens.NAV_H
+
+    fit = mw.MainWindow._window_height_for
+    for preset, screen, want in ((720, 1080, 720), (640, 760, 640), (640, 600, 584),
+                                 (640, 586, 570), (640, 400, mw.MIN_WINDOW_H), (640, 0, 640)):
+        if fit(preset, screen) != want:
+            raise AssertionError(f"a {preset}px window on a {screen}px screen: "
+                                 f"{fit(preset, screen)}, expected {want}")
+
+    from PySide6.QtWidgets import QWidget
+    hosts: list = []
+
+    def home(compact: bool):
+        """A home page inside a fixed-size parent, as it sits in the window.
+        (On its own it would be a top-level window, and Qt grows those to
+        whatever their layout asks for — hiding the very thing under test.)"""
+        host = QWidget()
+        # With the real stylesheet: paddings and fonts are what decide how
+        # much height the page needs.
+        host.setStyleSheet(get_qss("dark"))
+        hosts.append(host)
+        return home_v2.HomePage(host, compact=compact)
+
+    def laid_out(page, window_h: int):
+        host = page.parentWidget()
+        host.setFixedSize(460, window_h - chrome)
+        page.setGeometry(0, 0, 460, window_h - chrome)
+        host.show()
+        QCoreApplication.sendPostedEvents(page, 0)
+        page.layout().activate()
+        return page._needed_height()
+
+    def stacked(page, *widgets) -> bool:
+        """Each visible widget ends above where the next one starts."""
+        shown = [w.geometry() for w in widgets if not w.isHidden()]
+        return all(a.bottom() < b.top() for a, b in zip(shown, shown[1:]))
+
+    with _v4_fresh_data_dir():
+        for compact, heights in ((False, (720, 640)), (True, (640, 600, 570, 540, mw.MIN_WINDOW_H))):
+            for has_server in (False, True):
+                page = home(compact)
+                page.set_config(cfg if has_server else None)
+                page.set_state(cs.CONNECTED if has_server else cs.DISCONNECTED)
+                for window_h in heights:
+                    need = laid_out(page, window_h)
+                    what = f"compact={compact} server={has_server} window={window_h}"
+                    if need > page.height():
+                        raise AssertionError(f"{what}: the home screen needs {need}px "
+                                             f"and has {page.height()}px")
+                    last = page.info_card if has_server else page.empty_card
+                    if not stacked(page, page.server_card, page.circle, page.status_label, last):
+                        raise AssertionError(f"{what}: blocks of the home screen overlap")
+                    if has_server and page.circle.isHidden():
+                        raise AssertionError(f"{what}: the connect button is gone")
+                # With room to spare nothing is shrunk.
+                laid_out(page, heights[0])
+                full = tokens.RING_COMPACT if compact else tokens.RING
+                if page.circle.isHidden() or page.circle.width() != full:
+                    raise AssertionError(f"compact={compact} server={has_server}: the ring is "
+                                         f"{page.circle.width()}px in a full-height window")
+                # ... and it grows back when the window does.
+                laid_out(page, heights[-1])
+                laid_out(page, heights[0])
+                if page.circle.isHidden() or page.circle.width() != full:
+                    raise AssertionError("the ring did not grow back with the window")
+
+        # The check above must be able to fail: with fitting switched off, the
+        # reported case (no servers, a 570 px window) needs more height than
+        # there is — which is what makes the blocks run into each other.
+        page = home(True)
+        page._fit = lambda: None
+        page.set_config(None)
+        page.set_state(cs.DISCONNECTED)
+        page.circle.setVisible(True)
+        page.status_label.setVisible(True)
+        page.circle.set_diameter(tokens.RING_COMPACT)      # as it was before v4.1.4
+        need = laid_out(page, 570)
+        if need <= page.height():
+            raise AssertionError("this check cannot tell a home screen that does not fit "
+                                 "from one that does")
+
+        # The kill-switch notice takes room too: the ring gives way, nothing overlaps.
+        page = home(True)
+        page.set_config(cfg)
+        page.set_state(cs.KILLSWITCH_ACTIVE)
+        need = laid_out(page, 640)
+        blocks = (page.server_card, page.circle, page.status_label, page.notice, page.info_card)
+        if need > page.height() or not stacked(page, *blocks):
+            where = [(type(w).__name__, w.isHidden(), w.geometry().top(), w.geometry().bottom())
+                     for w in blocks]
+            raise AssertionError(f"with the kill-switch notice shown the home screen overlaps: "
+                                 f"needs {need}, has {page.height()}, ring {page.circle.width()}, {where}")
+        for host in hosts:
+            host.hide()
+            host.deleteLater()
+
+
+check("ui: the home screen fits a short display without overlapping (v4.1.4)",
+      _v414_home_fits_short_screens)
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 
