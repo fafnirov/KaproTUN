@@ -59,6 +59,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from . import win_tools
+
 # Shared rule-name prefix so cleanup logic can sweep anything we left
 # behind. Matches the ipv6_block convention.
 _RULE_PREFIX = "KaproTUN-webrtc"
@@ -106,17 +108,17 @@ def install() -> bool:
     # Block outbound UDP to the well-known STUN ports. Protocol=UDP is
     # essential — TCP/3478 (some TURN-over-TCP servers) isn't a WebRTC
     # leak vector and we'd rather leave it alone.
-    cmd = [
-        "netsh", "advfirewall", "firewall", "add", "rule",
-        f"name={_RULE_BLOCK_STUN}",
-        "dir=out",
-        "action=block",
-        "enable=yes",
-        "profile=any",
-        "protocol=UDP",
-        f"remoteport={_STUN_PORTS}",
-    ]
     try:
+        cmd = [
+            win_tools.tool("netsh"), "advfirewall", "firewall", "add", "rule",
+            f"name={_RULE_BLOCK_STUN}",
+            "dir=out",
+            "action=block",
+            "enable=yes",
+            "profile=any",
+            "protocol=UDP",
+            f"remoteport={_STUN_PORTS}",
+        ]
         proc = subprocess.run(
             cmd, capture_output=True, timeout=10,
             creationflags=_NO_WINDOW,
@@ -138,7 +140,7 @@ def remove() -> None:
         return
     try:
         subprocess.run(
-            ["netsh", "advfirewall", "firewall", "delete", "rule",
+            [win_tools.tool("netsh"), "advfirewall", "firewall", "delete", "rule",
              f"name={_RULE_BLOCK_STUN}"],
             capture_output=True, timeout=10,
             creationflags=_NO_WINDOW,
@@ -159,7 +161,7 @@ def is_active() -> bool:
         return False
     try:
         proc = subprocess.run(
-            ["netsh", "advfirewall", "firewall", "show", "rule",
+            [win_tools.tool("netsh"), "advfirewall", "firewall", "show", "rule",
              f"name={_RULE_BLOCK_STUN}"],
             capture_output=True, timeout=10,
             creationflags=_NO_WINDOW,

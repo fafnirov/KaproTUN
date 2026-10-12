@@ -16,7 +16,7 @@ import socket
 import time
 from dataclasses import dataclass, field
 
-from . import sing_box_config
+from . import sing_box_config, win_tools
 
 # Why `ping`/`tracert` lie while the VPN is up. The default TUN stack is gVisor
 # — a USERSPACE TCP/IP stack. It answers ICMP echo itself instead of forwarding
@@ -76,9 +76,10 @@ def _ps(cmd: str, timeout: float = 8.0) -> str:
     import subprocess
     try:
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive", "-Command", cmd],
             capture_output=True, text=True, timeout=timeout,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env=win_tools.powershell_env(),
         )
         return r.stdout or ""
     except Exception:

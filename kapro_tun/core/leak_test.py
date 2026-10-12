@@ -56,6 +56,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from . import win_tools
+
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -82,7 +84,7 @@ def _resolve_with_hard_timeout(host: str, timeout: float = 2.0) -> None:
     if sys.platform == "win32":
         try:
             subprocess.run(
-                ["nslookup", host],
+                [win_tools.tool("nslookup"), host],
                 capture_output=True, timeout=timeout,
                 creationflags=_NO_WINDOW,
             )

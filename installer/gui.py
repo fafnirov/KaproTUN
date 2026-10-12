@@ -34,7 +34,7 @@ from kapro_tun.gui import icons as app_icons
 from kapro_tun.gui.styles import DARK_QSS
 from kapro_tun.gui.titlebar import TitleBar
 
-from . import operations, paths
+from . import operations, paths, system_tools
 
 
 # --- worker thread --------------------------------------------------------
@@ -269,11 +269,12 @@ def _detect_installed_version() -> Optional[str]:
         return None
     try:
         proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command",
+            [system_tools.tool("powershell"), "-NoProfile", "-Command",
              f"(Get-Item '{exe}').VersionInfo.ProductVersion"],
             capture_output=True, timeout=5,
             encoding="utf-8", errors="replace",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            env=system_tools.powershell_env(),
         )
         return (proc.stdout or "").strip() or None
     except Exception:

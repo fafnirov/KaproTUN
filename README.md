@@ -261,6 +261,7 @@ kapro_tun/
 │   ├── sing_box_config.py    # generates the sing-box JSON: routing, DNS, TUN, transport gate
 │   ├── sing_box_installer.py # downloads sing-box (mirror → GitHub), pins the build by SHA-256
 │   ├── file_guard.py         # checks a file against its digest and holds it while it runs
+│   ├── win_tools.py          # full paths of the Windows system tools (never a bare name)
 │   ├── sing_box_process.py   # sing-box subprocess + log-noise classifier
 │   ├── controller.py         # connect/disconnect lifecycle, health verdict, roam detection
 │   ├── egress.py             # which physical network the machine is on (for roam detection)

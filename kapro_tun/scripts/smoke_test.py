@@ -7292,6 +7292,9 @@ def _proxy_connect_is_honest_and_reversible() -> None:
             raise AssertionError("live proxy session reports the wrong mode")
         if calls.index("live") > calls.index("proxy_begin"):
             raise AssertionError("system proxy set before readiness was confirmed")
+        # (v4.1.7: connect() itself begins with a stop(), to let go of what a
+        # dead session still held — so only what disconnect does is looked at.)
+        calls.clear()
         mgr.disconnect()
         if "proxy_end" not in calls or calls.index("proxy_end") > calls.index("stop"):
             raise AssertionError("disconnect must restore the system proxy before stopping the listener")
@@ -11902,6 +11905,256 @@ def _v416_selftest_is_safe_and_honest() -> None:
 
 check("selftest: the packaged app checks itself without touching the user's setup (v4.1.6)",
       _v416_selftest_is_safe_and_honest)
+
+
+# ---------------------------------------------------------------------------
+# v4.1.7 — system tools by full path; the engine's config cannot be swapped
+# ---------------------------------------------------------------------------
+
+section("v4.1.7: system tools by full path, the engine config is held")
+
+
+def _v417_system_tools_are_called_by_full_path() -> None:
+    """netsh, powershell and the rest were started by bare name. Windows looks
+    for a bare name in the folder of the running program first — and KaproTUN
+    is installed in a folder that needs no rights to write to. A netsh.exe
+    put there would have been run with administrator rights."""
+    import re
+    from installer import system_tools as inst_tools
+    from kapro_tun.core import ipv6_block, win_tools
+
+    for mod in (win_tools, inst_tools):
+        with _v4_patched(mod.sys, platform="win32"), \
+                _v4_patched(mod, _system_dir=lambda: "C:\\Windows\\System32"):
+            got = {n: mod.tool(n) for n in ("netsh", "route.exe", "powershell", "TASKKILL")}
+        if got != {"netsh": "C:\\Windows\\System32\\netsh.exe",
+                   "route.exe": "C:\\Windows\\System32\\route.exe",
+                   "powershell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                   "TASKKILL": "C:\\Windows\\System32\\TASKKILL.exe"}:
+            raise AssertionError(f"{mod.__name__}: system tools resolve to {got}")
+        with _v4_patched(mod.sys, platform="linux"):
+            if mod.tool("netsh") != "netsh":
+                raise AssertionError("outside Windows a tool name must be left alone")
+        # A name that tries to leave the system folder is not a tool name.
+        with _v4_patched(mod.sys, platform="win32"), \
+                _v4_patched(mod, _system_dir=lambda: "C:\\Windows\\System32"):
+            for bad in ("..\\evil", "sub/tool", "C:\\x\\netsh"):
+                try:
+                    mod.tool(bad)
+                except ValueError:
+                    continue
+                raise AssertionError(f"{bad!r} was accepted as a system tool name")
+    if sys.platform == "win32":
+        import os
+        for name in ("netsh", "powershell", "route", "taskkill", "nslookup"):
+            path = win_tools.tool(name)
+            if not os.path.isabs(path) or not os.path.isfile(path):
+                raise AssertionError(f"{name} resolved to {path}, which is not there")
+
+    # No call site is left that starts one by bare name.
+    bare = re.compile(r'\[\s*"(netsh|powershell|taskkill|nslookup|tasklist|route)(\.exe)?"\s*,')
+    root = _Path(_REPO_ROOT)
+    for rel in ("kapro_tun/main.py", "kapro_tun/core/firewall_sweep.py", "kapro_tun/core/ipv6_block.py",
+                "kapro_tun/core/killswitch.py", "kapro_tun/core/webrtc_block.py",
+                "kapro_tun/core/network_routes.py", "kapro_tun/core/net_diag.py",
+                "kapro_tun/core/leak_test.py", "kapro_tun/scripts/collect_diagnostics.py",
+                "installer/gui.py", "installer/operations.py"):
+        text = (root / rel).read_text(encoding="utf-8")
+        found = bare.search(text)
+        if found:
+            raise AssertionError(f"{rel} still starts {found.group(1)} by bare name")
+        if "tool(" not in text:
+            raise AssertionError(f"{rel} does not resolve its system tools")
+
+    # PowerShell loads the modules of the cmdlets we call on first use, and
+    # looks in the user's own Documents folder first. Ours is told to look in
+    # the system's folder only.
+    for mod in (win_tools, inst_tools):
+        with _v4_patched(mod.sys, platform="win32"), \
+                _v4_patched(mod, _system_dir=lambda: "C:\\Windows\\System32"):
+            env = mod.powershell_env()
+        if env.get("PSModulePath") != "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules":
+            raise AssertionError(f"{mod.__name__}: PowerShell module path is {env.get('PSModulePath')!r}")
+        with _v4_patched(mod.sys, platform="linux"):
+            if mod.powershell_env() is not None:
+                raise AssertionError("outside Windows the environment must be inherited")
+    for rel in ("kapro_tun/main.py", "kapro_tun/core/firewall_sweep.py",
+                "kapro_tun/core/network_routes.py", "kapro_tun/core/net_diag.py",
+                "kapro_tun/scripts/collect_diagnostics.py", "installer/gui.py",
+                "installer/operations.py"):
+        text = (root / rel).read_text(encoding="utf-8")
+        if text.count('tool("powershell")') != text.count("powershell_env()") or \
+                'tool("powershell")' not in text:
+            raise AssertionError(f"{rel} starts PowerShell without limiting its module path")
+    if sys.platform == "win32":
+        import subprocess as _sub
+        out = _sub.run([win_tools.tool("powershell"), "-NoProfile", "-NonInteractive", "-Command",
+                        "$env:PSModulePath; (Get-Command Get-NetRoute).Module.ModuleBase"],
+                       capture_output=True, text=True, timeout=60, env=win_tools.powershell_env(),
+                       creationflags=getattr(_sub, "CREATE_NO_WINDOW", 0))
+        seen = out.stdout.lower()
+        if "\\documents\\" in seen or "\\users\\" in seen:
+            raise AssertionError(f"PowerShell still searches a user folder for modules: {out.stdout!r}")
+        if "\\windowspowershell\\v1.0\\modules\\nettcpip" not in seen:
+            raise AssertionError(f"the system's own modules are no longer found: {out.stdout!r}")
+
+    # And what actually reaches the system is the full path.
+    mark = len(FIREWALL_CALLS)
+    with _v4_patched(win_tools.sys, platform="win32"), \
+            _v4_patched(win_tools, _system_dir=lambda: "C:\\Windows\\System32"), \
+            _v4_patched(ipv6_block, is_supported=lambda: True):
+        ipv6_block.install()
+        ipv6_block.remove()
+    issued = FIREWALL_CALLS[mark:]
+    if not issued or any(c[0] != "C:\\Windows\\System32\\netsh.exe" for c in issued):
+        raise AssertionError(f"firewall commands were issued as {[c[0] for c in issued]}")
+
+
+def _v417_engine_config_cannot_be_swapped() -> None:
+    """The engine runs with administrator rights and does what its config
+    says. The config is written to the profile folder a moment before the
+    start; replaced in that moment, it was read as ours. It is now checked
+    against what was written and held until the engine stops."""
+    import json as _json
+    import os
+    from kapro_tun.core import net_download, sing_box_config as sc
+    from kapro_tun.core import sing_box_installer as si, sing_box_process as sp
+
+    def _dir(path):
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    started: list = []
+
+    class _Sub:
+        PIPE, STDOUT = -1, -2
+
+        @staticmethod
+        def Popen(cmd, *a, **k):
+            started.append(list(cmd))
+
+            class _P:
+                pid, stdout = 4242, None
+
+                def poll(self):
+                    return None
+
+                def terminate(self):
+                    pass
+
+                def wait(self, timeout=None):
+                    return 0
+
+                def kill(self):
+                    pass
+
+            return _P()
+
+    class _EngineGuard:
+        def real_path(self, name):
+            return engine[name]
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            pass
+
+    with _v4_fresh_data_dir() as tmp, \
+            _v4_patched(_sbx_paths, sing_box_dir=lambda: _dir(tmp / "sing-box"),
+                        tun_dir=lambda: _dir(tmp / "tun")), \
+            _v4_patched(si, hold_engine=lambda: _EngineGuard()), \
+            _v4_patched(sp, subprocess=_Sub), \
+            _v4_patched(sp.threading, Thread=lambda *a, **k: type("T", (), {"start": lambda s: None})()):
+        engine = {_sbx_paths.sing_box_exe().name: _sbx_paths.sing_box_exe(),
+                  "wintun.dll": _sbx_paths.wintun_dll()}
+        if any(tmp not in p.parents for p in engine.values()):
+            raise AssertionError("this check must not touch the real engine folder")
+        for p in engine.values():
+            p.write_bytes(b"x")
+        runtime = _sbx_paths.sing_box_runtime_config_file()
+        ours = {"log": {"level": "warn"}, "outbounds": [{"type": "direct"}]}
+        theirs = _json.dumps({"log": {"output": "C:/Windows/evil.txt"}})
+
+        # What we wrote is what is held — and, on Windows, cannot be touched.
+        path = sc._write_runtime(ours)
+        if _json.loads(runtime.read_text(encoding="utf-8")) != ours or path != str(runtime):
+            raise AssertionError("the runtime config is not written where it is read from")
+        proc = sp.SingBoxProcess(on_log=lambda _l: None)
+        proc.start(path)
+        if len(started) != 1 or not os.path.samefile(started[0][-1], runtime):
+            raise AssertionError(f"the engine was not started on the checked config: {started}")
+        if sys.platform == "win32":
+            _v411_must_fail("rewriting the config under a running engine",
+                            lambda: runtime.write_text(theirs, encoding="utf-8"))
+            _v411_must_fail("replacing the config under a running engine",
+                            lambda: os.replace(_spare(tmp, theirs), runtime))
+        proc._proc = None                      # the fake engine "exited"
+        proc.stop()
+        if _sbx_paths.remove_runtime_configs():
+            raise AssertionError("after the engine stopped its config could not be removed")
+
+        # Swapped between the write and the start: not read, not run.
+        for when in ("start", "check"):
+            started.clear()
+            path = sc._write_runtime(ours)
+            runtime.write_text(theirs, encoding="utf-8")
+            try:
+                if when == "start":
+                    sp.SingBoxProcess(on_log=lambda _l: None).start(path)
+                else:
+                    sc.check_config(path)
+            except net_download.IntegrityError:
+                pass
+            else:
+                raise AssertionError(f"a config swapped after it was written was used ({when})")
+            if started:
+                raise AssertionError("the engine was started on a swapped config")
+
+        # A config at the runtime path that this run never wrote is not ours.
+        sc._written.clear()
+        runtime.write_text(_json.dumps(ours), encoding="utf-8")
+        try:
+            sp.SingBoxProcess(on_log=lambda _l: None).start(str(runtime))
+        except net_download.IntegrityError:
+            pass
+        else:
+            raise AssertionError("a config that this run did not write was used")
+
+        # Any other file (a test's, a tool's) is not part of this rule.
+        other = tmp / "other.json"
+        other.write_text("{}", encoding="utf-8")
+        if sc.hold_config(str(other)) is not None:
+            raise AssertionError("a file that is not the runtime config was held")
+
+        # A new connect after the engine died on its own can write its config:
+        # what the dead session held is let go first.
+        path = sc._write_runtime(ours)
+        proc = sp.SingBoxProcess(on_log=lambda _l: None)
+        proc.start(path)
+        proc._proc = None
+        from kapro_tun.core import controller as _c
+        import inspect
+        src = inspect.getsource(_c.ConnectionManager.connect)
+        if "self.sing_box_process.stop()" not in src:
+            raise AssertionError("connect() does not release what a dead session still holds")
+        proc.stop()
+        sc._write_runtime(ours)
+
+
+def _spare(folder, text: str):
+    spare = folder / "spare.json"
+    spare.write_text(text, encoding="utf-8")
+    return spare
+
+
+check("windows: system tools are started by full path, never by bare name (v4.1.7)",
+      _v417_system_tools_are_called_by_full_path)
+check("engine: its config is checked against what was written and held while it runs (v4.1.7)",
+      _v417_engine_config_cannot_be_swapped)
 
 
 # ---------------------------------------------------------------------------

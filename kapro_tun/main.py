@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QSplashScreen
 
 from .core import (app_log, autostart, firewall_sweep, i18n, ipv6_block, killswitch,
                    linux_tun_route, proxy_session, storage, system_proxy,
-                   tun_recovery, webrtc_block)
+                   tun_recovery, webrtc_block, win_tools)
 from .gui import icons
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
@@ -57,10 +57,11 @@ def _kill_orphan_helpers() -> None:
     # the process (the common case), so it's safe belt-and-suspenders.
     try:
         subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+            [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive", "-Command",
              "Get-NetRoute -InterfaceAlias 'KaproTun' -ErrorAction SilentlyContinue"
              " | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue"],
             capture_output=True, timeout=10, creationflags=_NO_WINDOW,
+            env=win_tools.powershell_env(),
         )
     except (OSError, subprocess.SubprocessError):
         pass

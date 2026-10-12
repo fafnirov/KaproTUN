@@ -276,6 +276,10 @@ class ConnectionManager:
     def connect(self, config: ProxyConfig, direct_domains: list[str]) -> None:
         if self.is_connected():
             raise ConnectionError(tr("err.already_connected"))
+        # An engine that died on its own still holds its files and its config
+        # until it is stopped; the new session has to be able to write a new
+        # config over the old one.
+        self.sing_box_process.stop()
         try:
             if self.planned_mode() == MODE_HTTP_PROXY:
                 self._connect_proxy_sing_box(config, direct_domains)

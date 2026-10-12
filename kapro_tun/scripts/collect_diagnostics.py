@@ -25,6 +25,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from kapro_tun.core import win_tools  # noqa: E402
+
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -50,7 +52,7 @@ def _nslookup(host: str, server: str, timeout: float = 6.0) -> tuple[bool, str]:
     import subprocess
     try:
         cf = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
-        out = subprocess.run(["nslookup", host, server], capture_output=True,
+        out = subprocess.run([win_tools.tool("nslookup"), host, server], capture_output=True,
                              text=True, timeout=timeout, creationflags=cf).stdout
     except subprocess.TimeoutExpired:
         return False, f"TIMEOUT after {timeout:.0f}s"
@@ -88,9 +90,10 @@ def _dns_servers() -> list[str]:
         ps = ("Get-DnsClientServerAddress -AddressFamily IPv4 | "
               "Where-Object {$_.InterfaceAlias -like '*KaproTun*'} | "
               "Select-Object -ExpandProperty ServerAddresses")
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+        out = subprocess.run([win_tools.tool("powershell"), "-NoProfile", "-Command", ps],
                             capture_output=True, text=True, timeout=10,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                            env=win_tools.powershell_env()).stdout
         return [l.strip() for l in out.splitlines() if l.strip()]
     except Exception:
         return []
@@ -113,7 +116,7 @@ def _running_helpers() -> dict[str, list[int]]:
     try:
         import subprocess
         if sys.platform == "win32":
-            out = subprocess.run(["tasklist"], capture_output=True, text=True,
+            out = subprocess.run([win_tools.tool("tasklist")], capture_output=True, text=True,
                                   timeout=10).stdout.lower()
         else:
             out = subprocess.run(["ps", "-A", "-o", "comm"], capture_output=True,

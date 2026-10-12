@@ -43,6 +43,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from . import win_tools
+
 # Rule name shared with cleanup logic — anything starting with the
 # KaproTUN-ipv6 prefix is fair game for our `remove()`.
 _RULE_PREFIX = "KaproTUN-ipv6"
@@ -91,17 +93,17 @@ def install() -> bool:
     # Single rule: block outbound to global unicast IPv6. Anything in
     # 2000::/3 (≈ all public IPv6 addresses currently in use) gets
     # dropped. link-local / ULA / multicast stay reachable.
-    cmd = [
-        "netsh", "advfirewall", "firewall", "add", "rule",
-        f"name={_RULE_BLOCK_GLOBAL}",
-        "dir=out",
-        "action=block",
-        "enable=yes",
-        "profile=any",
-        f"remoteip={_IPV6_GLOBAL_UNICAST}",
-    ]
     global _last_install_output
     try:
+        cmd = [
+            win_tools.tool("netsh"), "advfirewall", "firewall", "add", "rule",
+            f"name={_RULE_BLOCK_GLOBAL}",
+            "dir=out",
+            "action=block",
+            "enable=yes",
+            "profile=any",
+            f"remoteip={_IPV6_GLOBAL_UNICAST}",
+        ]
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=10,
             encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,
@@ -148,9 +150,9 @@ def diagnostics() -> str:
 
     if sys.platform != "win32":
         return "IPv6-block диагностика только для Windows."
-    _show("Windows Firewall state", ["netsh", "advfirewall", "show", "allprofiles", "state"])
+    _show("Windows Firewall state", [win_tools.tool("netsh"), "advfirewall", "show", "allprofiles", "state"])
     _show(f"rule {_RULE_BLOCK_GLOBAL}",
-          ["netsh", "advfirewall", "firewall", "show", "rule", f"name={_RULE_BLOCK_GLOBAL}"])
+          [win_tools.tool("netsh"), "advfirewall", "firewall", "show", "rule", f"name={_RULE_BLOCK_GLOBAL}"])
     parts.append(f"=== is_active() ===\n{is_active()}")
     parts.append(f"=== last install output ===\n{_last_install_output or '(нет)'}")
     parts.append(f"=== IPv6 reachable now (True = утечка/блок не сработал) ===\n{probe_ipv6_reachable()}")
@@ -168,7 +170,7 @@ def remove() -> None:
         return
     try:
         subprocess.run(
-            ["netsh", "advfirewall", "firewall", "delete", "rule",
+            [win_tools.tool("netsh"), "advfirewall", "firewall", "delete", "rule",
              f"name={_RULE_BLOCK_GLOBAL}"],
             capture_output=True, timeout=10,
             creationflags=_NO_WINDOW,
@@ -189,7 +191,7 @@ def is_active() -> bool:
         return False
     try:
         proc = subprocess.run(
-            ["netsh", "advfirewall", "firewall", "show", "rule",
+            [win_tools.tool("netsh"), "advfirewall", "firewall", "show", "rule",
              f"name={_RULE_BLOCK_GLOBAL}"],
             capture_output=True, timeout=10,
             creationflags=_NO_WINDOW,

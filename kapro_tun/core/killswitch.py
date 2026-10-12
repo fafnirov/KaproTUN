@@ -52,6 +52,7 @@ import subprocess
 import sys
 from typing import Iterable, Optional
 
+from . import win_tools
 from .sing_box_config import PRIVATE_CIDRS, TUN_DEVICE_NAME, TUN_INET4, TUN_INET6
 
 # All KaproTUN-managed firewall rules share this prefix so cleanup
@@ -258,7 +259,7 @@ def _netsh(*args: str) -> Optional[bool]:
     did not answer — "unknown", which callers must not read as either."""
     try:
         proc = subprocess.run(
-            ["netsh", "advfirewall", "firewall", *args],
+            [win_tools.tool("netsh"), "advfirewall", "firewall", *args],
             capture_output=True, timeout=10,
             creationflags=_NO_WINDOW,
         )

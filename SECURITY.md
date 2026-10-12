@@ -361,6 +361,18 @@ So:
   only if it matches the digest recorded in the installer when the two were
   built together (or, for an installer built by hand, the digest GitHub
   reports for the release) — and installs nothing if it has no digest at all.
+- The engine's config gets the same treatment as the engine (v4.1.7). The
+  engine does what its config says, with administrator rights, and the config
+  is written to your profile folder a moment before it is read. The client
+  remembers the digest of what it wrote, checks the file against it and holds
+  it (on Windows) until the engine stops; a config that was changed in
+  between, or that this run did not write, is not used.
+- System tools are started by full path (v4.1.7). `netsh`, `powershell`,
+  `route` and the others are named as `C:\Windows\System32\…`, with the
+  folder asked from the system. Windows looks for a bare name in the running
+  program's own folder first, and that folder is yours to write to. PowerShell
+  is also told to load modules from the system's folder only: by default it
+  looks in your Documents folder first.
 
 The limits of this: on macOS and Linux an open file can still be replaced by
 path, so there the files are checked before the start but not held. And the

@@ -807,11 +807,7 @@ def write_config(
         games_direct=games_direct, bypass_apps=bypass_apps, on_log=on_log,
         upstream_dns=upstream, lockdown=lockdown,
     )
-    target = paths.write_secure_text(
-        paths.sing_box_runtime_config_file(),
-        json.dumps(config, indent=2, ensure_ascii=False),
-    )
-    return str(target)
+    return _write_runtime(config)
 
 
 # --- proxy mode (v3.8.0) ----------------------------------------------------
@@ -922,11 +918,60 @@ def write_proxy_config(
         proxy, direct_domains, server_ip=server_ip,
         route_ru_direct=route_ru_direct, api_secret=api_secret,
     )
-    target = paths.write_secure_text(
-        paths.sing_box_runtime_config_file(),
-        json.dumps(config, indent=2, ensure_ascii=False),
-    )
+    return _write_runtime(config)
+
+
+# --- the runtime config is what we wrote, or it is not used (v4.1.7) ---------
+# The engine runs with administrator rights and does what its config says: it
+# opens the files the config names, loads the rules it lists, talks to the
+# servers it gives. The config is written to the profile folder — writable
+# without those rights — a moment before the engine reads it, and anything
+# that replaced it in that moment had its own config obeyed. So the digest of
+# what was written is remembered here, and the file is checked against it and
+# held (on Windows: nothing can write, replace or delete it) from the check
+# until the engine stops — the same treatment the engine's own files get.
+_written: dict[str, str] = {}
+
+
+def _config_key(path) -> str:
+    import os
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _write_runtime(config: dict) -> str:
+    """Write the runtime config and remember what exactly was written."""
+    import hashlib
+    text = json.dumps(config, indent=2, ensure_ascii=False)
+    target = paths.write_secure_text(paths.sing_box_runtime_config_file(), text)
+    _written[_config_key(target)] = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return str(target)
+
+
+def hold_config(config_path):
+    """The runtime config, checked against what this run wrote and held until
+    the returned object is closed; start the engine on its `real_path`.
+
+    Raises net_download.IntegrityError if the file is not what was written —
+    changed since, or put there by someone else. Returns None for any other
+    file: only the runtime config falls under this rule."""
+    from . import file_guard, net_download
+    want = _written.get(_config_key(config_path))
+    if want is None:
+        if _config_key(config_path) != _config_key(paths.sing_box_runtime_config_file()):
+            return None
+        raise net_download.IntegrityError(
+            "Файл конфигурации движка записан не этим запуском KaproTUN и не будет "
+            "использован. Подключись ещё раз.")
+    try:
+        return file_guard.hold_verified(config_path, want)
+    except file_guard.HoldError:
+        raise
+    except net_download.IntegrityError as e:
+        from . import app_log
+        app_log.log("[integrity] runtime config changed between write and use — refused")
+        raise net_download.IntegrityError(
+            "Файл конфигурации движка изменён после записи и не будет использован: "
+            "его подменила другая программа. Подключись ещё раз.") from e
 
 
 def check_config(config_path: str) -> tuple[bool, str]:
@@ -944,9 +989,17 @@ def check_config(config_path: str) -> tuple[bool, str]:
     from . import sing_box_installer
     guard = sing_box_installer.hold_engine()
     try:
+        # The config as well: what is checked here must be what we wrote.
+        # (Propagates like the engine's refusal, for the same reason.)
+        held_config = hold_config(config_path)
+    except BaseException:
+        guard.close()
+        raise
+    try:
         with guard:
             result = subprocess.run(
-                [str(guard.real_path(exe.name)), "check", "-c", config_path],
+                [str(guard.real_path(exe.name)), "check", "-c",
+                 str(held_config.real_path) if held_config is not None else config_path],
                 capture_output=True, text=True, timeout=10,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 cwd=str(paths.tun_dir()),
@@ -956,3 +1009,6 @@ def check_config(config_path: str) -> tuple[bool, str]:
         return False, (result.stderr or result.stdout or "Unknown error").strip()
     except Exception as e:
         return False, str(e)
+    finally:
+        if held_config is not None:
+            held_config.close()

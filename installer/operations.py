@@ -16,7 +16,7 @@ from typing import Callable, Optional
 
 import requests
 
-from . import paths, payload_digest
+from . import paths, payload_digest, system_tools
 
 
 ProgressCb = Optional[Callable[[str, int], None]]  # (status_text, percent 0-100)
@@ -93,7 +93,7 @@ def _taskkill_force(image: str) -> None:
         return
     try:
         subprocess.run(
-            ["taskkill", "/F", "/T", "/IM", image],
+            [system_tools.tool("taskkill"), "/F", "/T", "/IM", image],
             capture_output=True, timeout=10, creationflags=_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
@@ -414,10 +414,10 @@ def _create_shortcut(target: Path, lnk_path: Path,
     )
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive",
+        [system_tools.tool("powershell"), "-NoProfile", "-NonInteractive",
          "-ExecutionPolicy", "Bypass", "-Command", ps],
         capture_output=True, text=True, timeout=15,
-        creationflags=creationflags,
+        creationflags=creationflags, env=system_tools.powershell_env(),
     )
 
 

@@ -24,6 +24,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from . import win_tools
+
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # Every firewall rule this app has ever created starts with one of these brand+
@@ -47,9 +49,10 @@ def _list_managed_rule_names() -> list[str]:
           "| ForEach-Object { $_.DisplayName }")
     try:
         proc = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive", "-Command", ps],
             capture_output=True, text=True, timeout=20,
             encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,
+            env=win_tools.powershell_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return []
@@ -75,7 +78,7 @@ def sweep() -> list[str]:
     for name in _list_managed_rule_names():
         try:
             proc = subprocess.run(
-                ["netsh", "advfirewall", "firewall", "delete", "rule",
+                [win_tools.tool("netsh"), "advfirewall", "firewall", "delete", "rule",
                  "name={}".format(name)],
                 capture_output=True, timeout=10, creationflags=_NO_WINDOW,
             )

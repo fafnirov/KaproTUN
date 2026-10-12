@@ -157,6 +157,9 @@ class SingBoxProcess:
         guard, self._guard = getattr(self, "_guard", None), None
         if guard is not None:
             guard.close()
+        held, self._config_guard = getattr(self, "_config_guard", None), None
+        if held is not None:
+            held.close()
 
     def _build_args(self, exe, config_path: str) -> list[str]:
         """The sing-box command line. Split out so it's unit-testable without
@@ -182,7 +185,15 @@ class SingBoxProcess:
         # (Disconnect pressed while connecting) lets go of self._guard, and
         # must not be able to do that between the check and the start.
         guard = sing_box_installer.hold_engine()
+        held_config = None
         try:
+            # The config gets the same treatment as the engine: it is what we
+            # wrote, or the engine is not started on it; and it stays that
+            # way until the engine stops.
+            from . import sing_box_config
+            held_config = sing_box_config.hold_config(config_path)
+            if held_config is not None:
+                config_path = str(held_config.real_path)
             exe = guard.real_path(exe.name)      # start the checked file, by its real path
             # cwd = tun_dir() so the WinTUN DLL (shared with the classic
             # engine) is on the loader search path on Windows — the folder the
@@ -203,8 +214,11 @@ class SingBoxProcess:
             )
         except BaseException:
             guard.close()
+            if held_config is not None:
+                held_config.close()
             raise
         self._guard = guard
+        self._config_guard = held_config
         self._started_at = time.time()
         self._last_pid = self._proc.pid
         # Kernel backstop (v3.0.9): bind sing-box to the GUI's kill-on-close Job

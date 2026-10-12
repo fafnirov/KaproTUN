@@ -26,6 +26,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from . import win_tools
+
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -116,11 +118,11 @@ def _delete_route_native(dest: str, mask: str, gateway: str, if_index: int,
 
 # --- low-level shell wrappers ---------------------------------------------
 
-def _run(args: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
+def _run(args: list[str], timeout: float = 10.0, env=None) -> tuple[int, str, str]:
     proc = subprocess.run(
         args, capture_output=True, text=True, timeout=timeout,
         encoding="utf-8", errors="replace",
-        creationflags=CREATE_NO_WINDOW,
+        creationflags=CREATE_NO_WINDOW, env=env,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -137,9 +139,9 @@ def _ps(script: str, timeout: float = 10.0) -> tuple[int, str, str]:
     """
     script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;\n" + script
     return _run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive",
+        [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive",
          "-ExecutionPolicy", "Bypass", "-Command", script],
-        timeout=timeout,
+        timeout=timeout, env=win_tools.powershell_env(),
     )
 
 
@@ -323,7 +325,7 @@ def configure_tun_interface(iface: InterfaceInfo, address: str = "10.255.0.2",
                             mask: str = "255.255.255.0") -> None:
     """Give the TUN interface an IPv4 address and bring it up."""
     _run([
-        "netsh", "interface", "ipv4", "set", "address",
+        win_tools.tool("netsh"), "interface", "ipv4", "set", "address",
         f"name={iface.name}", "source=static",
         f"addr={address}", f"mask={mask}",
     ])
@@ -344,25 +346,25 @@ def set_dns(iface_name: str, servers: list[str]) -> None:
         # was wrong: it meant 'don't touch' but the caller expected
         # 'wipe'. Explicit netsh now.
         _run([
-            "netsh", "interface", "ipv4", "set", "dns",
+            win_tools.tool("netsh"), "interface", "ipv4", "set", "dns",
             f"name={iface_name}", "source=static", "address=none",
         ])
         return
     _run([
-        "netsh", "interface", "ipv4", "set", "dns",
+        win_tools.tool("netsh"), "interface", "ipv4", "set", "dns",
         f"name={iface_name}", "source=static", f"addr={servers[0]}",
         "register=primary", "validate=no",
     ])
     for s in servers[1:]:
         _run([
-            "netsh", "interface", "ipv4", "add", "dns",
+            win_tools.tool("netsh"), "interface", "ipv4", "add", "dns",
             f"name={iface_name}", f"addr={s}", "validate=no",
         ])
 
 
 def reset_dns(iface_name: str) -> None:
     _run([
-        "netsh", "interface", "ipv4", "set", "dns",
+        win_tools.tool("netsh"), "interface", "ipv4", "set", "dns",
         f"name={iface_name}", "source=dhcp",
     ])
 
@@ -372,14 +374,14 @@ def reset_dns(iface_name: str) -> None:
 def add_route(dest: str, mask: str, gateway: str, if_index: int,
               metric: int = 1) -> bool:
     rc, out, err = _run([
-        "route", "add", dest, "mask", mask, gateway,
+        win_tools.tool("route"), "add", dest, "mask", mask, gateway,
         "if", str(if_index), "metric", str(metric),
     ])
     return rc == 0
 
 
 def delete_route(dest: str, mask: str, gateway: str = "") -> bool:
-    args = ["route", "delete", dest, "mask", mask]
+    args = [win_tools.tool("route"), "delete", dest, "mask", mask]
     if gateway:
         args.append(gateway)
     rc, out, err = _run(args)
