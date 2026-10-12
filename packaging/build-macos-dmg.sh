@@ -31,6 +31,11 @@ ls -lh kapro_tun/data/icon.icns
 
 python -m PyInstaller KaproTUN.spec --noconfirm --log-level WARN
 ls -la dist/
+# For the record: where the TLS of the Python we just bundled looks for
+# certificate authorities. It is a path on THIS machine; a user's Mac does
+# not have it, which is why the app sets SSL_CERT_FILE itself
+# (kapro_tun/core/tls_trust.py).
+python -c "import ssl; print('build Python TLS paths:', ssl.get_default_verify_paths())"
 
 # Refuse to package the wrong architecture.
 BIN="dist/KaproTUN.app/Contents/MacOS/KaproTUN"

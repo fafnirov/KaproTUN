@@ -6,6 +6,11 @@ import socket
 import subprocess
 import sys
 
+# Before anything that can open a connection: on macOS the packaged app's own
+# TLS has no certificate authorities unless it is pointed at the bundled list.
+from .core.tls_trust import ensure_ca_bundle
+ensure_ca_bundle()
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QSplashScreen
 

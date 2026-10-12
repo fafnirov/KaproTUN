@@ -11485,6 +11485,115 @@ check("ui: the home screen fits a short display without overlapping (v4.1.4)",
 
 
 # ---------------------------------------------------------------------------
+# v4.1.5 — Python's own TLS has certificates to check against on macOS, and a
+# failed traffic check says why it failed
+# ---------------------------------------------------------------------------
+
+section("v4.1.5: TLS trust for the traffic check, and its reason when it fails")
+
+
+def _v415_traffic_check_can_verify_tls() -> None:
+    """The "does the tunnel carry traffic" check is an HTTPS request made by
+    Python itself. A packaged macOS app carries Python's TLS with a trust
+    store path that exists only on the build machine, so on a user's Mac the
+    request failed certificate verification — for every server — and the
+    client said "the VPN server isn't passing traffic". And nothing recorded
+    why the check had failed."""
+    import inspect
+    import os
+    import ssl
+    from kapro_tun import main as _main
+    from kapro_tun.core import controller as _c, dns_health, tls_trust
+    import certifi
+
+    class _Paths:
+        def __init__(self, cafile, capath):
+            self.cafile, self.capath = cafile, capath
+
+    saved = {k: os.environ.get(k) for k in ("SSL_CERT_FILE", "SSL_CERT_DIR")}
+    bundle = certifi.where()
+
+    def run(platform: str, cafile=None, capath=None, env=None):
+        for k in saved:
+            os.environ.pop(k, None)
+        os.environ.update(env or {})
+        with _v4_patched(tls_trust.sys, platform=platform), \
+                _v4_patched(tls_trust.ssl, get_default_verify_paths=lambda: _Paths(cafile, capath)):
+            how = tls_trust.ensure_ca_bundle()
+        return how, os.environ.get("SSL_CERT_FILE")
+
+    try:
+        # macOS: Python never reads the system keychain, so the bundled list it is.
+        if run("darwin") != ("certifi", bundle) or run("darwin", cafile="/x/cert.pem")[1] != bundle:
+            raise AssertionError("on macOS Python's TLS is left without a CA bundle")
+        # Whoever set the variables knows better.
+        if run("darwin", env={"SSL_CERT_FILE": "/my/ca.pem"}) != ("env", "/my/ca.pem"):
+            raise AssertionError("an explicit SSL_CERT_FILE was overridden")
+        # Linux: the distribution's store (it may hold a company's own CA) when there is one.
+        if run("linux", capath="/etc/ssl/certs") != ("system", None):
+            raise AssertionError("a Linux system trust store was replaced")
+        if run("linux") != ("certifi", bundle):
+            raise AssertionError("Linux without a system trust store is left with none")
+        # Windows: ssl reads the Windows store by itself.
+        if run("win32") != ("system", None):
+            raise AssertionError("Windows does not need a bundle")
+        # And the bundle really is one.
+        run("darwin")
+        if ssl.create_default_context().cert_store_stats()["x509_ca"] < 50:
+            raise AssertionError("with the bundle in place a new TLS context still has no CAs")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # It is in place before anything can open a connection.
+    src = inspect.getsource(_main)
+    if not 0 < src.find("ensure_ca_bundle()") < src.find("from PySide6"):
+        raise AssertionError("the CA bundle is not set up at the very start of the app")
+
+    # A failed check keeps its reason, and the connect error passes it on.
+    class _Opener:
+        def open(self, *_a, **_k):
+            raise ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer")
+
+    with _v4_patched(dns_health.urllib.request, build_opener=lambda *_a: _Opener()):
+        if dns_health.http_probe("http://127.0.0.1:1") or \
+                "CERTIFICATE_VERIFY_FAILED" not in dns_health.last_http_error():
+            raise AssertionError(f"the check's failure reason is lost: {dns_health.last_http_error()!r}")
+        logged: list = []
+        with _v4_patched(_c.app_log, log=lambda m: logged.append(str(m))):
+            text = _c.ConnectionManager._no_traffic_error(None, "")
+        if "CERTIFICATE_VERIFY_FAILED" not in text or not any("CERTIFICATE_VERIFY_FAILED" in l for l in logged):
+            raise AssertionError("a failed traffic check does not tell the user or the log why")
+
+    class _Ok:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    class _Good:
+        def open(self, *_a, **_k):
+            return _Ok()
+
+    with _v4_patched(dns_health.urllib.request, build_opener=lambda *_a: _Good()):
+        if not dns_health.http_probe("http://127.0.0.1:1") or dns_health.last_http_error():
+            raise AssertionError("a passing check must leave no failure reason behind")
+    for fn in ("_bring_up_tun_engine", "_connect_proxy_sing_box"):
+        if "_no_traffic_error(" not in inspect.getsource(getattr(_c.ConnectionManager, fn)):
+            raise AssertionError(f"{fn} reports a failed traffic check without its reason")
+
+
+check("connect: the traffic check can verify TLS on macOS and says why it failed (v4.1.5)",
+      _v415_traffic_check_can_verify_tls)
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 

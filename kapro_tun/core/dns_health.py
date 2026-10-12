@@ -161,6 +161,17 @@ def singbox_system_tun_healthy(proxy_url: str, timeout: float = 2.5) -> bool:
     return bool(system_ip and system_ip == proxy_ip)
 
 
+# Why the last http_probe() failed, "" after one that passed. Without it a
+# failed check was indistinguishable from a dead server: a certificate that
+# could not be verified, a refused connection and a timeout all ended in the
+# same "the VPN server isn't passing traffic".
+_last_http_error = ""
+
+
+def last_http_error() -> str:
+    return _last_http_error
+
+
 def http_probe(proxy_url: str, timeout: float = 3.0,
                urls: tuple[str, ...] | None = None) -> bool:
     """True if an HTTP request succeeds THROUGH `proxy_url`.
@@ -179,12 +190,15 @@ def http_probe(proxy_url: str, timeout: float = 3.0,
     dead. The proxy is reached over IPv4 loopback, so no resolution is needed
     to talk to it.
     """
+    global _last_http_error
     targets = urls if urls else _TUNNEL_PROBE_URLS
     try:
         handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
         opener = urllib.request.build_opener(handler)
-    except Exception:
+    except Exception as e:
+        _last_http_error = _describe(e)
         return False
+    reason = ""
     for u in targets:
         try:
             req = urllib.request.Request(
@@ -195,7 +209,21 @@ def http_probe(proxy_url: str, timeout: float = 3.0,
                 if code is None:
                     code = resp.getcode()
                 if code is not None and 200 <= int(code) < 400:
+                    _last_http_error = ""
                     return True
-        except Exception:
+                reason = f"HTTP {code}"
+        except Exception as e:
+            reason = _describe(e)
             continue
+    _last_http_error = reason
     return False
+
+
+def _describe(error: Exception) -> str:
+    """One short line for the log and the error dialog. The probe's targets
+    are fixed public hosts, so nothing of the user's can be in it."""
+    inner = getattr(error, "reason", None)
+    if isinstance(inner, Exception):
+        error = inner
+    text = " ".join(str(error).split())
+    return f"{type(error).__name__}: {text}"[:200]

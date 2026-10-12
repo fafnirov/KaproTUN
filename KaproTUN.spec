@@ -56,6 +56,10 @@ a = Analysis(
         # the probe wraps everything in try/except. Result: empty IP label.
         # Forcing the import here makes PyInstaller bundle PySocks.
         'socks',
+        # The CA bundle Python's own TLS is pointed at on macOS
+        # (core/tls_trust.py). It arrives with requests anyway; named here so
+        # that it cannot silently drop out of the bundle.
+        'certifi',
         # psutil (v1.15.4) — used by xray_stats.query_tun_iface_stats to
         # read live byte counters off the KaproTun interface. PyInstaller
         # finds the top-level psutil import in xray_stats.py, but psutil's

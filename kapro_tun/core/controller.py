@@ -839,6 +839,20 @@ class ConnectionManager:
         self._server_ip = server_ip
         self._egress_fp = self._egress_fingerprint()
 
+    def _no_traffic_error(self, tail: str) -> str:
+        """The text for "the engine is up, the traffic check did not pass" —
+        with what the check itself ran into. A dead server, a certificate our
+        own TLS could not verify and a refused loopback connection are three
+        different problems, and until v4.1.5 they read the same."""
+        text = tr("err.singbox_no_real_traffic")
+        reason = dns_health.last_http_error()
+        if reason:
+            app_log.log(f"[connect] traffic check failed: {reason}")
+            text += tr("err.probe_reason", reason=reason)
+        if tail:
+            text += tr("err.singbox_diag_tail", tail=tail)
+        return text
+
     def _tun_ipv6_was_refused(self) -> bool:
         """Did the engine just die because the system would not let it set
         the tunnel's IPv6 address? (False once we have stopped asking for
@@ -905,9 +919,7 @@ class ConnectionManager:
             diag = [l for l in self.sing_box_process.recent_logs()
                     if not is_benign_noise(l, live=False)]
             tail = "\n".join(diag[-6:])
-            raise ConnectionError(
-                tr("err.singbox_no_real_traffic")
-                + (tr("err.singbox_diag_tail", tail=tail) if tail else ""))
+            raise ConnectionError(self._no_traffic_error(tail))
         # Confirmed live → switch the log filter to steady-state, so
         # ambiguous network errors become transient noise instead of alarms.
         self.sing_box_process.mark_live()
@@ -972,9 +984,7 @@ class ConnectionManager:
                 diag = [l for l in self.sing_box_process.recent_logs()
                         if not is_benign_noise(l, live=False)]
                 tail = "\n".join(diag[-6:])
-                raise ConnectionError(
-                    tr("err.singbox_no_real_traffic")
-                    + (tr("err.singbox_diag_tail", tail=tail) if tail else ""))
+                raise ConnectionError(self._no_traffic_error(tail))
             self.sing_box_process.mark_live()
         except Exception:
             self.sing_box_process.stop()
