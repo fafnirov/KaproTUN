@@ -597,6 +597,17 @@ QLabel#ktServerMeta {{ background: transparent; color: {c.text_secondary}; font-
 
 /* ===== v2: status line ===== */
 QLabel#ktStatusLabel {{ color: {c.text}; font-size: {t.FS_LG}px; font-weight: 600; }}
+/* ===== v2: splash, installer, silent update ===== */
+QWidget#ktSplashWindow, QWidget#ktBootContent {{ background: transparent; border: none; }}
+QLabel#ktSplashName {{ background: transparent; color: {c.text}; font-size: {t.FS_XL}px; font-weight: 600; }}
+QLabel#ktSplashVer {{ background: transparent; color: {c.text_tertiary}; font-size: {t.FS_XS}px; }}
+QLabel#ktStepText {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; }}
+QLabel#ktStepText[tone="strong"] {{ color: {c.text}; }}
+QLabel#ktStepText[tone="error"] {{ color: {c.danger_text}; font-family: {t.FONT_MONO}; }}
+QLabel#ktStepMeta {{ background: transparent; color: {c.text_tertiary}; font-size: {t.FS_SM}px; }}
+QLabel#ktStepNote {{ background: transparent; color: {c.text_tertiary}; font-size: {t.FS_XS}px; }}
+QLabel#ktBootErrTitle {{ background: transparent; color: {c.text}; font-size: {t.FS_LG}px; font-weight: 600; }}
+QLabel#ktBootErrText {{ background: transparent; color: {c.text_secondary}; font-family: {t.FONT_MONO}; font-size: {t.FS_SM}px; }}
 QLabel#ktStatusLabel[tone="idle"] {{ color: {c.text_secondary}; }}
 QLabel#ktStatusLabel[tone="connected"] {{ color: {c.accent_text}; }}
 QLabel#ktStatusLabel[tone="error"] {{ color: {c.danger_text}; }}

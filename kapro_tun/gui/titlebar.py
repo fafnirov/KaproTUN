@@ -36,9 +36,9 @@ class TitleBar(QFrame):
         layout.setSpacing(8)
 
         # App icon mini
+        # The mark of the splash: its hand-over ends with the mark exactly here.
         self.icon_label = QLabel()
-        self.icon_label.setPixmap(icons.app_icon().pixmap(18, 18))
-        self.icon_label.setFixedWidth(20)
+        self.icon_label.setFixedSize(tokens.MARK_SM, tokens.MARK_SM)
         layout.addWidget(self.icon_label)
 
         # Title text
@@ -70,6 +70,7 @@ class TitleBar(QFrame):
     def _render_icons(self) -> None:
         from PySide6.QtCore import QSize
         color = tokens.colors().text_secondary
+        self.icon_label.setPixmap(icons_v2.mark_pixmap(tokens.MARK_SM, tokens.colors().accent))
         for btn, name in ((self.btn_min, "minus"), (self.btn_close, "x")):
             btn.setIcon(icons_v2.icon(name, tokens.ICON_SM, color))
             btn.setIconSize(QSize(tokens.ICON_SM, tokens.ICON_SM))

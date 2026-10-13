@@ -58,6 +58,12 @@ PATHS: dict[str, str] = {
     "external": "M14 5h5v5M19 5l-8 8M17 14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h4",
     "sort": "M7 5v14M4 16l3 3 3-3M17 19V5M14 8l3-3 3 3",
     "zap": "M13 3 5 13.5h6L10 21l8-10.5h-6z",
+    "folder": "M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4l2 2h8a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z",
+    "user": "M8 8a4 4 0 1 0 8 0a4 4 0 1 0-8 0M4.5 20c.8-3.6 3.8-6 7.5-6s6.7 2.4 7.5 6",
+    "monitor": "M4 5h16a1 1 0 0 1 1 1v9.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM9 20h6M12 16.5V20",
+    "app-window": "M4 4.5h16a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1zM3 9h18M6 6.8h.01M8.5 6.8h.01",
+    "circle": _C,
+    "spinner": "M12 3.5a8.5 8.5 0 0 1 8.5 8.5",
     "gamepad": "M7.5 8h9a4 4 0 0 1 4 4.5l-.6 3.6a2 2 0 0 1-3.4 1.1L14 15h-4l-2.5 2.2a2 2 0 0 1-3.4-1.1l-.6-3.6A4 4 0 0 1 7.5 8zM8 11v3M6.5 12.5h3M15.5 12h.01M17.5 13.5h.01",
     "bug": "M8 9.5h8V15a4 4 0 0 1-8 0zM9.5 9.5V8a2.5 2.5 0 0 1 5 0v1.5M4 13h4M16 13h4M5 8.5l3 1.5M19 8.5l-3 1.5M5 18l3-1.5M19 18l-3-1.5",
     "eye": "M3.5 12S6.5 6 12 6s8.5 6 8.5 6-3 6-8.5 6S3.5 12 3.5 12zM9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0",
@@ -79,6 +85,38 @@ PATHS: dict[str, str] = {
 }
 
 _cache: dict[tuple, QPixmap] = {}
+
+
+def mark_svg(color: str) -> bytes:
+    """The KaproTUN mark — a ring and a "K" of three strokes — on a 48 x 48
+    grid. One drawing for every size (20 / 40 / 64 px)."""
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" '
+        f'stroke="{color}"><circle cx="24" cy="24" r="20.5" stroke-width="3"/>'
+        '<path d="M18.5 14.5v19M30 14.5 18.5 25.5M22.6 21.6 30.5 33.5" stroke-width="3.5" '
+        'stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    ).encode("ascii")
+
+
+def mark_pixmap(size: int, color: str, dpr: Optional[float] = None) -> QPixmap:
+    """The mark as a pixmap of `size` logical pixels."""
+    if dpr is None:
+        app = QGuiApplication.instance()
+        dpr = float(app.devicePixelRatio()) if app is not None else 1.0
+    key = ("__mark__", size, color, dpr)
+    pm = _cache.get(key)
+    if pm is not None:
+        return pm
+    px = max(1, round(size * dpr))
+    pm = QPixmap(px, px)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    QSvgRenderer(QByteArray(mark_svg(color))).render(painter, QRectF(0, 0, px, px))
+    painter.end()
+    pm.setDevicePixelRatio(dpr)
+    _cache[key] = pm
+    return pm
 
 
 def _svg(name: str, color: str, size: int) -> bytes:

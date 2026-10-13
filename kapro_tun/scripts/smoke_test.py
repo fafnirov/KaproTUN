@@ -3881,11 +3881,14 @@ def _runtime_guard_keeps_app_alive() -> None:
     # main() must install the guard before entering the event loop.
     import inspect as _ins
     from kapro_tun import main as _main
-    src = _ins.getsource(_main._run_app)
+    # (v4.2.0: start-up is steps inside the event loop; the guard goes in as
+    # soon as the main window exists — before that a failure is the boot
+    # sequence's own to report.)
+    src = _ins.getsource(_main._Boot._build_window)
     if "runtime_guard" not in src or "install()" not in src:
-        raise AssertionError("main()._run_app must call runtime_guard.install() before app.exec()")
-    if src.index("runtime_guard") > src.rindex("app.exec"):
-        raise AssertionError("runtime_guard.install() must come BEFORE app.exec()")
+        raise AssertionError("start-up must install runtime_guard once the window is built")
+    if src.index("MainWindow()") > src.index("runtime_guard.install()"):
+        raise AssertionError("runtime_guard.install() must come after the window is built")
 
 
 check("atomic write: round-trip + no .tmp leftover", _atomic_round_trip)
@@ -12155,6 +12158,240 @@ check("windows: system tools are started by full path, never by bare name (v4.1.
       _v417_system_tools_are_called_by_full_path)
 check("engine: its config is checked against what was written and held while it runs (v4.1.7)",
       _v417_engine_config_cannot_be_swapped)
+
+
+# ---------------------------------------------------------------------------
+# v4.2.0 — the start-up splash shows the real steps and hands over to the window
+# ---------------------------------------------------------------------------
+
+section("v4.2.0: start-up splash, its steps, the hand-over")
+
+
+def _v420_splash_shows_the_steps() -> None:
+    """The splash is the four real steps of starting up on one bar; a step
+    that drags is said to drag; a failure is said in place."""
+    from kapro_tun.core.i18n import tr
+    from kapro_tun.gui import boot, tokens
+    _v41_app()
+
+    bar = boot.BootProgress(segments=4)
+    bar.set_value(1.7)
+    if bar.value() != 1.0:
+        raise AssertionError("the bar accepts more than 100 %")
+    bar.set_stalled(9)
+    if bar.stalled() != 3:
+        raise AssertionError("a stalled step outside the bar")
+    bar.set_error(True)
+    if bar.stalled() is not None or bar.is_indeterminate():
+        raise AssertionError("a failed bar must stop moving")
+
+    s = boot.SplashWindow("9.9.9")
+    try:
+        if s.version.text() != "v9.9.9" or s.name.text() != "KaproTUN":
+            raise AssertionError("the splash does not say what is starting")
+        card = s._card_rect()
+        if (card.width(), card.height()) != (tokens.SPLASH_W, tokens.SPLASH_H) or \
+                card.center() != s.rect().center():
+            raise AssertionError(f"the card is not 380 x 300 in the middle: {card}")
+        for k in (1, 2, 3, 4):
+            s.set_step(k)
+            if s.progress.value() != (k - 1) / 4:
+                raise AssertionError(f"step {k}: the bar is at {s.progress.value()}")
+            if s.stepline.text.full_text() != tr(f"boot.step{k}") or \
+                    s.stepline.meta.text() != f"{k} / 4":
+                raise AssertionError(f"step {k} is not what the splash says")
+        if s.note.isVisibleTo(s) or s.progress.stalled() is not None:
+            raise AssertionError("a step that has just begun is shown as stuck")
+
+        # Five seconds into a step: say so, keep something moving, count.
+        s.set_step(2)
+        for _ in range(4):
+            s._on_stall_tick()
+        if s.progress.stalled() is not None:
+            raise AssertionError("four seconds is not unusually long")
+        s._on_stall_tick()
+        s._on_stall_tick()
+        if s.progress.stalled() != 1 or not s.note.isVisibleTo(s) or \
+                s.note.text() != tr("boot.long_cleanup") or s.stepline.meta.text() != tr("boot.seconds", n=6):
+            raise AssertionError("a step that drags is not said to drag")
+        s.set_step(3)
+        if s.progress.stalled() is not None or s.note.isVisibleTo(s) or s.stepline.meta.text() != "3 / 4":
+            raise AssertionError("the next step inherited the previous one's delay")
+        for _ in range(5):
+            s._on_stall_tick()
+        if s.note.text() != tr("boot.long"):
+            raise AssertionError("the note about a slow step names the wrong reason")
+
+        # A failure: the bar gives way to what happened and two ways on.
+        heard: list = []
+        s.log_requested.connect(lambda: heard.append("log"))
+        s.close_requested.connect(lambda: heard.append("close"))
+        s.show_error("PermissionError: [WinError 5]\nОтказано в доступе")
+        if s.foot.isVisibleTo(s) or not s.error.isVisibleTo(s) or "\n" in s.error_text.text() \
+                or "PermissionError" not in s.error_text.text():
+            raise AssertionError("a failed start is not shown on the splash")
+        s.log_btn.click()
+        s.close_btn.click()
+        if heard != ["log", "close"]:
+            raise AssertionError(f"the buttons of a failed start do nothing: {heard}")
+        s.set_step(4)
+        if not s.failed() or s.foot.isVisibleTo(s):
+            raise AssertionError("a later step painted over the failure")
+    finally:
+        s.deleteLater()
+
+    # Where the window lands: its centre is the splash's.
+    s = boot.SplashWindow("9.9.9")
+    try:
+        from PySide6.QtCore import QSize
+        for size in (QSize(460, 720), QSize(460, 640), QSize(460, 520)):
+            r = s.window_rect_for(size)
+            if abs(r.center().x() - s.geometry().center().x()) > 1 or \
+                    abs(r.center().y() - s.geometry().center().y()) > 1 or r.size() != size:
+                raise AssertionError(f"a {size} window would not open where the splash is: {r}")
+    finally:
+        s.deleteLater()
+
+
+def _v420_boot_runs_the_four_steps() -> None:
+    """Start-up runs as the four steps, the slow one off the GUI thread, and a
+    failure in any of them is reported instead of vanishing."""
+    import threading
+    from PySide6.QtCore import QCoreApplication, QObject, Signal
+    from kapro_tun import main as _main
+    _v41_app()
+    app = QCoreApplication.instance()
+    log: list = []
+
+    class _Splash(QObject):
+        log_requested, close_requested, finished = Signal(), Signal(), Signal()
+
+        def __init__(self, version):
+            super().__init__()
+            log.append(("splash", version))
+            self.error = None
+
+        def show(self):
+            pass
+
+        def isVisible(self):
+            return True
+
+        def set_step(self, k):
+            log.append(("step", k))
+
+        def run_transition(self, window):
+            log.append(("handover", window))
+            self.finished.emit()
+
+        def show_error(self, text):
+            self.error = text
+            log.append(("error", text))
+
+    class _Window(QObject):
+        def __init__(self):
+            super().__init__()
+            log.append("window")
+            self.lines, self.warned, self.autoconnected = [], False, False
+            self.logs_page = type("L", (), {"append": lambda _s, line: self.lines.append(line)})()
+            self.manager = type("M", (), {"settings": {"autoconnect_on_launch": False}})()
+
+        def _on_quit_for_real(self, *_a):
+            pass
+
+        def _on_show_window(self, *_a):
+            pass
+
+        def warn_killswitch_stuck(self):
+            self.warned = True
+
+        def trigger_autoconnect(self):
+            self.autoconnected = True
+
+    class _Guard(QObject):
+        show_requested, quit_requested = Signal(), Signal()
+
+    def cleanup():
+        log.append(("cleanup", threading.current_thread() is threading.main_thread()))
+        return {"killswitch_stuck": True, "log_lines": ["[firewall] удалено правило-сирота: X"]}
+
+    class _App:
+        aboutToQuit = type("S", (), {"connect": staticmethod(lambda _slot: None)})()
+        code = None
+
+        def exit(self, code):
+            _App.code = code
+
+    from kapro_tun.core import crash_handler, runtime_guard
+    with _v4_fresh_data_dir(), \
+            _v4_patched(_main, SplashWindow=_Splash, MainWindow=_Window, _startup_cleanup=cleanup), \
+            _v4_patched(runtime_guard, install=lambda: log.append("guard")), \
+            _v4_patched(crash_handler, write_crash_log=lambda exc: log.append(("crashlog", str(exc))),
+                        handle_startup_crash=lambda exc: (log.append(("dialog", str(exc))) or 1)):
+        def drive(boot) -> None:
+            boot.start()
+            boot._begin_cleanup()
+            boot._job.wait(5000)
+            QCoreApplication.sendPostedEvents(boot, 0)
+            if boot.window is None and not any(e == "window" for e in log):
+                boot._build_window()
+            if boot.window is not None:
+                boot._reveal()
+
+        # The normal start.
+        guard = _Guard()
+        boot = _main._Boot(_App(), guard, start_minimized=False)
+        drive(boot)
+        kinds = [e if isinstance(e, str) else e[0] for e in log]
+        if kinds != ["splash", "step", "step", "cleanup", "step", "window", "guard", "step", "handover"]:
+            raise AssertionError(f"start-up ran as {kinds}")
+        if [e[1] for e in log if isinstance(e, tuple) and e[0] == "step"] != [1, 2, 3, 4]:
+            raise AssertionError("the steps are not 1, 2, 3, 4 in order")
+        if ("cleanup", True) in log:
+            raise AssertionError("the slow clean-up ran on the GUI thread — the splash would freeze")
+        if boot.window.lines != ["[firewall] удалено правило-сирота: X"] or not boot.window.warned:
+            raise AssertionError("what the clean-up found did not reach the window")
+        if boot.splash is not None:
+            raise AssertionError("the splash is kept after the hand-over")
+
+        # Started minimised: the same steps, no splash, no hand-over.
+        log.clear()
+        boot = _main._Boot(_App(), _Guard(), start_minimized=True)
+        drive(boot)
+        kinds = [e if isinstance(e, str) else e[0] for e in log]
+        if kinds != ["cleanup", "window", "guard"]:
+            raise AssertionError(f"a minimised start ran as {kinds}")
+
+        # The window cannot be built: said on the splash, logged, not swallowed.
+        log.clear()
+
+        def broken():
+            raise PermissionError("settings.json")
+
+        with _v4_patched(_main, MainWindow=broken):
+            boot = _main._Boot(_App(), _Guard(), start_minimized=False)
+            drive(boot)
+        if boot.window is not None or ("crashlog", "settings.json") not in log or \
+                not any(isinstance(e, tuple) and e[0] == "error" and "PermissionError" in e[1] for e in log):
+            raise AssertionError(f"a failed start-up was not reported: {log}")
+        boot._on_close_failed()
+        if _App.code != 1:
+            raise AssertionError("closing a failed start-up must end the program with an error code")
+
+        # ... and without a splash to say it on, through the crash dialog.
+        log.clear()
+        _App.code = None
+        with _v4_patched(_main, MainWindow=broken):
+            boot = _main._Boot(_App(), _Guard(), start_minimized=True)
+            drive(boot)
+        if ("dialog", "settings.json") not in log or _App.code != 1:
+            raise AssertionError("a failed minimised start-up vanished")
+
+
+check("splash: the four real steps on one bar; slow and failed steps are said so (v4.2.0)",
+      _v420_splash_shows_the_steps)
+check("start-up: four steps, the slow one off the GUI thread, failures reported (v4.2.0)",
+      _v420_boot_runs_the_four_steps)
 
 
 # ---------------------------------------------------------------------------

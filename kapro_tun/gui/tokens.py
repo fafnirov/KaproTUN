@@ -107,6 +107,14 @@ R_SM, R_MD, R_LG, R_WINDOW = 6, 10, 14, 10
 
 # --- geometry --------------------------------------------------------------
 WIN_W, WIN_H = 460, 720
+# The windows before the main one: splash, installer, silent update.
+MARK_SM, MARK_MD, MARK_LG = 20, 40, 64          # title bar / update window / splash, installer
+SPLASH_W, SPLASH_H = 380, 300
+INST_W, INST_H, INST_PAD_X = 480, 620, 32
+UPD_W, UPD_H = 360, 130
+PROGRESS_H = 4
+HERO_H, RESULT_ICON, REASON_H = 112, 48, 120
+DUR_OUT, DUR_GROW, DUR_IN = 120, 180, 100       # splash → window: fade, grow, reveal (ms)
 TITLEBAR_H, TITLEBAR_BTN_W = 36, 44
 NAV_H, NAV_IND_W, NAV_IND_H = 64, 28, 2
 PAGE_PAD_X, PAGE_PAD_Y = 24, 16

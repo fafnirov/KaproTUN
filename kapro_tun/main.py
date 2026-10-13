@@ -12,13 +12,16 @@ import sys
 from .core.tls_trust import ensure_ca_bundle
 ensure_ca_bundle()
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QApplication, QSplashScreen
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtWidgets import QApplication
 
 from .core import (app_log, autostart, firewall_sweep, i18n, ipv6_block, killswitch,
                    linux_tun_route, proxy_session, storage, system_proxy,
                    tun_recovery, webrtc_block, win_tools)
+from . import __version__
 from .gui import icons
+from .gui.background import Background
+from .gui.boot import SplashWindow
 from .gui.main_window import MainWindow
 from .gui.singleton import SingleInstanceGuard
 from .gui.styles import DARK_QSS, get_qss  # noqa: F401  (DARK_QSS kept for back-compat)
@@ -176,9 +179,28 @@ def _run_app() -> int:
         # Already running — we've asked the primary to show itself.
         return 0
 
-    # Defensive: a crashed previous run may have left the system proxy
-    # pointing at our dead local port. Clear it before any downloads
-    # (xray installer, geoip, updater) try to route through nothing.
+    # From here start-up is four steps the splash shows (see _Boot). It runs
+    # inside the event loop, so that the splash can keep moving while a step
+    # works — which is the whole point of having one.
+    boot = _Boot(app, guard, start_minimized)
+    QTimer.singleShot(0, boot.start)
+    return app.exec()
+
+
+def _startup_cleanup() -> dict:
+    """Step 2 of start-up: undo whatever a session that did not end cleanly
+    left on the machine. Every item is independent and best-effort.
+
+    Runs on a worker thread (_CleanupJob): these are calls to netsh,
+    PowerShell and the registry, the slow part of starting up, and on the GUI
+    thread they would freeze the splash exactly when it has to show that the
+    program is alive. Nothing here touches Qt. Returns what the window needs
+    to know afterwards."""
+    log_lines: list[str] = []
+
+    # A crashed previous run may have left the system proxy pointing at our
+    # dead local port. Clear it before any downloads (engine, geoip, updater)
+    # try to route through nothing.
     _clear_stale_system_proxy()
     # Proxy mode (macOS): a session that died without restoring the system
     # proxy left it pointing at a closed port — every browser on the machine
@@ -190,11 +212,9 @@ def _run_app() -> int:
     except Exception:
         pass
 
-    # Also defensive: a crashed previous run may have left orphan
-    # xray.exe / tun2socks.exe processes holding file handles, which
-    # blocks the very next download with PermissionError. Single-
-    # instance guard already proved we're the only KaproTUN, so any
-    # leftover helper process is by definition orphaned. Kill them.
+    # Leftover engine processes of ours hold file handles and the TUN
+    # adapter. The single-instance guard already proved we are the only
+    # KaproTUN, so a helper of ours that is still alive is an orphan.
     _kill_orphan_helpers()
     _remove_stale_runtime_configs()
 
@@ -207,14 +227,13 @@ def _run_app() -> int:
     except Exception:
         pass
 
-    # Third defensive sweep: if the previous run crashed while
-    # kill-switch was active, the firewall rules are still in place
-    # — every app on the machine has no internet. Clear them so the
-    # user isn't trapped (we'll re-install on their next connect if
-    # they still have the setting enabled).
+    # If the previous run crashed while kill-switch was active, the firewall
+    # rules are still in place — every app on the machine has no internet.
+    # Clear them so the user isn't trapped (we'll re-install on their next
+    # connect if they still have the setting enabled).
     # Whether that worked matters: the rules can only be deleted by an elevated
     # process, and after a crash or a reboot this launch is often not one. Then
-    # the machine stays blocked — and the window says why (see reveal()).
+    # the machine stays blocked — and the window says why.
     killswitch_stuck = False
     try:
         if killswitch.is_active():
@@ -222,110 +241,199 @@ def _run_app() -> int:
     except Exception:
         pass
 
-    # Same defensive sweep for the v1.11.0 IPv6 leak protection rule.
-    # If a previous run crashed mid-session, our 2000::/3 outbound block
-    # is still active, the user has no IPv6 internet at all. Wipe it on
-    # next launch — we'll re-arm at the next TUN-mode connect if the
-    # setting's still on.
+    # Same for the IPv6 block (a crash mid-session leaves 2000::/3 blocked)
+    # and the WebRTC STUN block (leaves browser calls broken).
     try:
         if ipv6_block.is_active():
             ipv6_block.remove()
     except Exception:
         pass
-
-    # v1.16.0: same orphan-rule sweep for the WebRTC STUN-block.
-    # Without this, a crash mid-session leaves the user's browser
-    # WebRTC permanently broken (Discord-web, Google Meet, etc.)
-    # until they manually run `netsh advfirewall firewall delete rule
-    # name="KaproTUN-webrtc-block-stun"`. Nobody does that.
     try:
         if webrtc_block.is_active():
             webrtc_block.remove()
     except Exception:
         pass
 
-    splash = None
-    if not start_minimized:
-        splash = QSplashScreen(icons.splash_pixmap(320), Qt.WindowStaysOnTopHint)
-        splash.show()
-        splash.showMessage("Запуск…", Qt.AlignBottom | Qt.AlignHCenter, Qt.white)
-        app.processEvents()
-
-    window = MainWindow()
-
-    # Fourth defensive sweep (v2.1.4): TUN mode clears the physical NIC's DNS
-    # for leak protection and only restores it on a clean disconnect. If the
-    # previous run was force-killed / crashed / lost power while connected, that
-    # interface is still "DNS = none" with no tunnel to carry queries — the
-    # machine resolves nothing until the user restarts the adapter by hand.
-    # recover() reads the crash journal and restores DHCP DNS on that exact
-    # interface. Idempotent and silent when there's nothing to recover. Runs
-    # before the optional auto-connect below so we never reconnect on top of a
-    # half-broken DNS state.
+    # TUN mode clears the physical NIC's DNS for leak protection and only
+    # restores it on a clean disconnect. If the previous run was force-killed /
+    # crashed / lost power while connected, that interface is still "DNS =
+    # none" — the machine resolves nothing until the adapter is restarted by
+    # hand. recover() reads the crash journal and restores it. Before any
+    # auto-connect, so we never reconnect on top of a half-broken DNS state.
     try:
-        for _action in tun_recovery.recover():
-            window.logs_page.append(f"[восстановление] {_action}")
+        for action in tun_recovery.recover():
+            log_lines.append(f"[восстановление] {action}")
     except Exception:
         pass
 
-    # v3.0.9: brand-prefix firewall sweep. The per-feature removes above only
-    # delete their EXACT current rule names — they miss orphans from pre-rename
-    # "KaproVPN-*" builds and ad-hoc suffixes (e.g. "KaproVPN-ipv6-block-TEST"),
-    # which block 2000::/3 outbound PERMANENTLY and surface in the browser as
-    # ERR_NETWORK_ACCESS_DENIED even with the VPN off. Sweep them by prefix.
+    # Brand-prefix firewall sweep: the removes above only delete their EXACT
+    # current rule names — they miss orphans from pre-rename "KaproVPN-*"
+    # builds and ad-hoc suffixes, which block 2000::/3 outbound PERMANENTLY
+    # and surface in the browser as ERR_NETWORK_ACCESS_DENIED with the VPN off.
     try:
-        for _name in firewall_sweep.sweep():
-            window.logs_page.append(f"[firewall] удалено правило-сирота: {_name}")
+        for name in firewall_sweep.sweep():
+            log_lines.append(f"[firewall] удалено правило-сирота: {name}")
     except Exception:
         pass
 
-    # v3.0.9: ANY QApplication.quit() (tray button, OS session-end, installer
-    # ping) must tear the tunnel down via the existing disconnect() — not just
-    # the tray path — so a quit can't orphan sing-box with the TUN up. Guarded
-    # against double-run inside _on_quit_for_real.
-    app.aboutToQuit.connect(window._on_quit_for_real)
+    return {"killswitch_stuck": killswitch_stuck, "log_lines": log_lines}
 
-    # Re-route "show" pings from any future second-launch attempts to
-    # the same code path the tray icon uses.
-    guard.setParent(window)  # keep the guard alive for the window's lifetime
-    guard.show_requested.connect(window._on_show_window)
-    # The installer pings this before a reinstall/uninstall so we shut down
-    # cleanly (disconnect → restore system proxy + firewall) and release our
-    # exe lock, instead of being force-killed mid-session.
-    guard.quit_requested.connect(window._on_quit_for_real)
 
-    def reveal() -> None:
-        if not start_minimized:
-            window.show()
-            if splash is not None:
-                splash.finish(window)
-        if killswitch_stuck:
+class _CleanupJob(Background):
+    done = Signal(object)
+
+    def _work(self):
+        result = _startup_cleanup()
+        return lambda: self.done.emit(result)
+
+
+class _Boot(QObject):
+    """Start-up, as the four steps the splash shows:
+
+      1  starting           the splash is up
+      2  the last session   _startup_cleanup, on a worker thread
+      3  servers, settings  the main window is built
+      4  opening            the splash turns into the window
+
+    Started minimised (auto-start with the system) there is no splash and no
+    hand-over; the steps are the same.
+
+    A failure in any step ends up in one place (_fail): the crash log is
+    written and the splash says what happened, instead of the process
+    disappearing. Until v4.2.0 start-up ran before the event loop and an
+    exception simply unwound to main(); now the steps are callbacks, and an
+    exception that escaped one would be swallowed by the loop."""
+
+    def __init__(self, app, guard, start_minimized: bool):
+        super().__init__(app if isinstance(app, QObject) else None)
+        self._app, self._guard, self._minimized = app, guard, start_minimized
+        self.splash = None
+        self.window = None
+        self._cleanup: dict = {}
+        self._crash_log = None
+
+    # --- the steps ---------------------------------------------------------------
+
+    def start(self) -> None:
+        try:
+            if not self._minimized:
+                self.splash = SplashWindow(__version__)
+                self.splash.log_requested.connect(self._on_show_log)
+                self.splash.close_requested.connect(self._on_close_failed)
+                self.splash.show()
+                self.splash.set_step(1)
+            QTimer.singleShot(0, self._begin_cleanup)
+        except Exception as exc:
+            self._fail(exc)
+
+    def _set_step(self, k: int) -> None:
+        if self.splash is not None:
+            self.splash.set_step(k)
+
+    def _begin_cleanup(self) -> None:
+        try:
+            self._set_step(2)
+            self._job = _CleanupJob()
+            self._job.done.connect(self._on_cleanup_done)
+            self._job.crashed.connect(self._on_job_crashed)
+            self._job.start()
+        except Exception as exc:
+            self._fail(exc)
+
+    def _on_job_crashed(self, text: str) -> None:
+        self._fail(RuntimeError(text))
+
+    def _on_cleanup_done(self, result) -> None:
+        self._cleanup = result or {}
+        self._set_step(3)
+        # One turn of the loop first, so that the step is on screen before
+        # building the window keeps this thread busy.
+        QTimer.singleShot(0, self._build_window)
+
+    def _build_window(self) -> None:
+        try:
+            window = MainWindow()
+            for line in self._cleanup.get("log_lines", ()):
+                window.logs_page.append(line)
+
+            # ANY QApplication.quit() (tray button, OS session-end, installer
+            # ping) must tear the tunnel down via the existing disconnect() —
+            # not just the tray path — so a quit can't orphan sing-box with
+            # the TUN up. Guarded against double-run inside _on_quit_for_real.
+            self._app.aboutToQuit.connect(window._on_quit_for_real)
+            # Re-route "show" pings from any future second-launch attempts to
+            # the same code path the tray icon uses.
+            self._guard.setParent(window)   # keep the guard alive for the window's lifetime
+            self._guard.show_requested.connect(window._on_show_window)
+            # The installer pings this before a reinstall/uninstall so we shut
+            # down cleanly (disconnect → restore system proxy + firewall) and
+            # release our exe lock, instead of being force-killed mid-session.
+            self._guard.quit_requested.connect(window._on_quit_for_real)
+
+            # Runtime crash guard: from here on an unhandled exception in a
+            # slot/timer/thread callback would otherwise make PySide6 ABORT
+            # the whole process. Installed once the window exists, so that a
+            # failure to start still reaches _fail() below.
+            from .core import runtime_guard
+            # Restore Network Debug Mode from settings before anything can log,
+            # so a problem reproduced right after launch is already traced.
+            try:
+                app_log.set_net_debug(bool(storage.load_settings().get("network_debug", False)))
+            except Exception:
+                pass
+            runtime_guard.install()
+        except Exception as exc:
+            self._fail(exc)
+            return
+        self.window = window
+        self._set_step(4)
+        QTimer.singleShot(0, self._reveal)
+
+    def _reveal(self) -> None:
+        try:
+            if self.splash is not None:
+                self.splash.finished.connect(self._after_reveal)
+                self.splash.run_transition(self.window)
+            else:
+                self._after_reveal()
+        except Exception as exc:
+            self._fail(exc)
+
+    def _after_reveal(self) -> None:
+        self.splash = None
+        window = self.window
+        if self._cleanup.get("killswitch_stuck"):
             window.warn_killswitch_stuck()
-        # Optional auto-connect on launch — wait a beat after window
-        # construction so any first-run installer dialogs finish first.
+        # Optional auto-connect on launch — wait a beat after the window is
+        # up so any first-run installer dialogs finish first.
         if window.manager.settings.get("autoconnect_on_launch", False):
             QTimer.singleShot(800, window.trigger_autoconnect)
 
-    # Tiny delay before swapping splash → window, so the splash is
-    # actually visible. Without this, fast machines flash it for 1 frame.
-    QTimer.singleShot(600 if not start_minimized else 0, reveal)
+    # --- when it does not work ---------------------------------------------------------
 
-    # Runtime crash guard: from here on we're in the Qt event loop, where an
-    # unhandled exception in a slot/timer/QThread callback would otherwise make
-    # PySide6 ABORT the whole process (the "app vanishes after a few minutes"
-    # class). Install it AFTER startup so genuine startup failures still reach
-    # main()'s crash dialog by normal stack unwinding — sys.excepthook only
-    # governs the event-loop phase.
-    from .core import runtime_guard
-    # Restore Network Debug Mode from settings before anything can log,
-    # so a problem reproduced right after launch is already traced.
-    try:
-        app_log.set_net_debug(bool(storage.load_settings().get("network_debug", False)))
-    except Exception:
-        pass
-    runtime_guard.install()
+    def _fail(self, exc: BaseException) -> None:
+        from .core import crash_handler
+        try:
+            self._crash_log = crash_handler.write_crash_log(exc)
+        except Exception:
+            self._crash_log = None
+        if self.splash is not None and self.splash.isVisible():
+            self.splash.show_error(f"{type(exc).__name__}: {exc}")
+            return
+        # No splash to say it on (started minimised, or it failed before the
+        # splash existed): the dialog of the crash handler.
+        self._app.exit(crash_handler.handle_startup_crash(exc))
 
-    return app.exec()
+    def _on_show_log(self) -> None:
+        from .core import crash_handler
+        try:
+            if self._crash_log is not None:
+                crash_handler._open_path(self._crash_log.parent)
+        except Exception:
+            pass
+
+    def _on_close_failed(self) -> None:
+        self._app.exit(1)
 
 
 def main() -> int:
