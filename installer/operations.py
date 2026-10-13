@@ -250,6 +250,15 @@ def _sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
+_download_host = ""
+
+
+def download_source() -> str:
+    """The host KaproTUN.exe is being fetched from right now ("kaprovpn.pro",
+    "github.com"), for the installer to show next to the megabytes."""
+    return _download_host
+
+
 def _main_exe_sources(version: str) -> list:
     """Where KaproTUN.exe is fetched from, in order: (host, url).
 
@@ -324,7 +333,9 @@ def _download_main_exe(version: str, target: Path,
     # clear message instead of corrupting the installed binary.
     tmp = target.with_name(target.name + ".download")
     problems: list = []
+    global _download_host
     for host, url in _main_exe_sources(version):
+        _download_host = host
         try:
             _fetch_main_exe(url, tmp, progress)
         except (requests.RequestException, RuntimeError, OSError) as e:
@@ -513,11 +524,11 @@ def uninstall_everything(progress: ProgressCb = None) -> None:
         pass
 
     if progress:
-        progress("Удаляю запись из Programs & Features…", 30)
+        progress("Удаляю запись из «Установка и удаление программ»…", 30)
     unregister_uninstaller()
 
     if progress:
-        progress("Снимаю auto-start если был…", 50)
+        progress("Снимаю автозапуск…", 50)
     try:
         import winreg
         with winreg.OpenKey(
@@ -584,7 +595,7 @@ def install_everything(version: str, progress: ProgressCb = None,
     acquire_main_exe(version, progress=progress)
 
     if progress:
-        progress("Копирую uninstaller…", 55)
+        progress("Копирую файл удаления…", 55)
     copy_uninstaller()
 
     if progress:
@@ -597,7 +608,7 @@ def install_everything(version: str, progress: ProgressCb = None,
         create_desktop_shortcut()
 
     if progress:
-        progress("Регистрирую uninstaller в Windows…", 95)
+        progress("Регистрирую удаление в Windows…", 95)
     register_uninstaller(version=version)
 
     if progress:

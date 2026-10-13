@@ -181,6 +181,54 @@ for _fw_mod in (_fw_ks_mod, _fw_webrtc_mod, _fw_ipv6_mod, _fw_sweep_mod):
 
 
 # ---------------------------------------------------------------------------
+# Start-up sandbox (v4.2.0). kapro_tun.main clears what a crashed session left
+# behind — and one of those steps deletes every route of the "KaproTun"
+# adapter (Remove-NetRoute). On a machine with a live session that IS the
+# session: on 13.10.2026 a check let the real start-up steps run inside this
+# suite and the developer's tunnel lost its routes, twice. So here main's
+# `subprocess.run` never reaches the operating system either.
+# ---------------------------------------------------------------------------
+from kapro_tun import main as _main_sbx
+
+MAIN_SUBPROCESS_CALLS: list[list[str]] = []
+
+
+class _MainSubprocess:
+    """`subprocess` for kapro_tun.main, except run() is only written down."""
+
+    @staticmethod
+    def run(cmd, *_a, **_kw):
+        MAIN_SUBPROCESS_CALLS.append([str(c) for c in cmd])
+        return _fw_real_subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"")
+
+    def __getattr__(self, attr):
+        return getattr(_fw_real_subprocess, attr)
+
+
+_main_sbx.subprocess = _MainSubprocess()
+
+
+# How it got that far: start-up is a chain of zero-delay timers. A check that
+# drives the chain by hand leaves the timers armed; they do nothing while no
+# one runs the event loop — and fire, with every patch long restored, the
+# moment a later check does. So nothing in this suite may run the whole event
+# loop. Deliver what one object is waiting for with
+# QCoreApplication.sendPostedEvents(obj, 0) instead.
+def _no_event_loop(*_a, **_k):
+    raise AssertionError(
+        "the suite must not run the whole event loop: timers armed by earlier checks would "
+        "fire with the real functions — use QCoreApplication.sendPostedEvents(obj, 0)")
+
+
+try:
+    from PySide6.QtCore import QCoreApplication as _SbxCoreApp
+    _SbxCoreApp.processEvents = staticmethod(_no_event_loop)
+    _LOOP_TRIPWIRE = True
+except Exception:       # a binding that does not let its methods be replaced
+    _LOOP_TRIPWIRE = False
+
+
+# ---------------------------------------------------------------------------
 # Synthetic share URLs — placeholder grammar, no real keys/passwords.
 # When you bump these, keep them obviously-fake (UUIDs of all-a's, etc).
 # ---------------------------------------------------------------------------
@@ -11882,13 +11930,13 @@ def _v416_selftest_is_safe_and_honest() -> None:
                 _v4_patched(_sbx_paths, app_data_dir=_sbx_paths.app_data_dir), \
                 _v4_patched(st, _check_environment=stage("environment"), _check_tls=stage("tls"),
                             _check_engine=stage("engine"), _check_connect=stage("connect"),
-                            _check_window=stage("window")):
+                            _check_splash=stage("splash"), _check_window=stage("window")):
             seen = {"before": _sbx_paths.app_data_dir()}
             code = st.run(["--selftest-e2e", str(tmp / "out")])
             items = _json.loads((tmp / "out" / "selftest.json").read_text(encoding="utf-8"))
         if code != want:
             raise AssertionError(f"with {breaks or 'nothing'} failing the exit code is {code}")
-        if [i["stage"] for i in items] != ["environment", "tls", "engine", "connect", "window"]:
+        if [i["stage"] for i in items] != ["environment", "tls", "engine", "connect", "splash", "window"]:
             raise AssertionError(f"checks run: {[i['stage'] for i in items]}")
         failed = [i["stage"] for i in items if i["status"] == st.FAIL]
         if failed != ([breaks] if breaks else []):
@@ -11901,9 +11949,17 @@ def _v416_selftest_is_safe_and_honest() -> None:
             _v4_patched(_sbx_paths, app_data_dir=_sbx_paths.app_data_dir), \
             _v4_patched(st, _check_environment=lambda: (st.OK, "", {}),
                         _check_tls=lambda: (st.OK, "", {}), _check_engine=forbidden,
-                        _check_connect=forbidden, _check_window=lambda _f: (st.OK, "", {})):
+                        _check_connect=forbidden, _check_splash=lambda _f: (st.OK, "", {}),
+                        _check_window=lambda _f: (st.OK, "", {})):
         if st.run(["--selftest", str(tmp / "out")]) != 0:
             raise AssertionError("the plain self-test ran the end-to-end checks")
+
+    # (v4.2.0) The splash is one of the things a build draws to prove itself.
+    _v41_app()
+    with _v4_fresh_data_dir() as tmp, _v4_patched(st, _pump=lambda *_a: None):
+        status, detail, data = st._check_splash(tmp / "out")
+        if status != st.OK or not (tmp / "out" / "splash.png").is_file():
+            raise AssertionError(f"the splash self-check: {status} {detail}")
 
 
 check("selftest: the packaged app checks itself without touching the user's setup (v4.1.6)",
@@ -12322,9 +12378,20 @@ def _v420_boot_runs_the_four_steps() -> None:
         def exit(self, code):
             _App.code = code
 
+    # The steps hand over to each other through zero-delay timers. They are
+    # written down here, not armed: an armed one would outlive this check and
+    # run the REAL start-up (clean-up included) whenever the loop next ran.
+    armed: list = []
+
+    class _Timer:
+        @staticmethod
+        def singleShot(ms, fn):
+            armed.append((ms, getattr(fn, "__name__", "?")))
+
     from kapro_tun.core import crash_handler, runtime_guard
     with _v4_fresh_data_dir(), \
-            _v4_patched(_main, SplashWindow=_Splash, MainWindow=_Window, _startup_cleanup=cleanup), \
+            _v4_patched(_main, SplashWindow=_Splash, MainWindow=_Window, _startup_cleanup=cleanup,
+                        QTimer=_Timer), \
             _v4_patched(runtime_guard, install=lambda: log.append("guard")), \
             _v4_patched(crash_handler, write_crash_log=lambda exc: log.append(("crashlog", str(exc))),
                         handle_startup_crash=lambda exc: (log.append(("dialog", str(exc))) or 1)):
@@ -12353,6 +12420,9 @@ def _v420_boot_runs_the_four_steps() -> None:
             raise AssertionError("what the clean-up found did not reach the window")
         if boot.splash is not None:
             raise AssertionError("the splash is kept after the hand-over")
+        if [name for _ms, name in armed] != ["_begin_cleanup", "_build_window", "_reveal"] or \
+                any(ms != 0 for ms, _name in armed):
+            raise AssertionError(f"the steps hand over as {armed}")
 
         # Started minimised: the same steps, no splash, no hand-over.
         log.clear()
@@ -12392,6 +12462,351 @@ check("splash: the four real steps on one bar; slow and failed steps are said so
       _v420_splash_shows_the_steps)
 check("start-up: four steps, the slow one off the GUI thread, failures reported (v4.2.0)",
       _v420_boot_runs_the_four_steps)
+
+
+def _v420_installer_fakes():
+    """Stand-ins for the installer's two workers: the screens are driven by
+    hand, nothing is installed, removed or downloaded."""
+    from PySide6.QtCore import QObject, Signal
+    started: list = []
+
+    class _Install(QObject):
+        progress, finished_ok, failed = Signal(str, int), Signal(), Signal(str)
+
+        def __init__(self, version="", create_desktop=None, parent=None):
+            super().__init__()
+            started.append(("install", create_desktop))
+
+        def start(self):
+            pass
+
+        def wait(self, *_a):
+            return True
+
+    class _Remove(QObject):
+        progress, finished_ok, failed = Signal(str, int), Signal(), Signal(str)
+
+        def __init__(self, parent=None):
+            super().__init__()
+            started.append(("remove", None))
+
+        def start(self):
+            pass
+
+        def wait(self, *_a):
+            return True
+
+    return started, _Install, _Remove
+
+
+def _v420_installer_shows_what_it_does() -> None:
+    """Installing is a list of steps with one bar; the megabytes and where
+    they come from are under it; a failure can be read, copied and retried."""
+    from PySide6.QtWidgets import QPushButton
+    from kapro_tun import __version__ as ver
+    from kapro_tun.gui import tokens
+    import installer.gui as ig
+    from installer import operations, paths as ipaths
+    _v41_app()
+
+    if [ig.install_stage(p) for p in (0, 2, 3, 5, 22, 50, 55, 70, 85, 95, 100)] != \
+            [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 4]:
+        raise AssertionError("install percent → step mapping is off")
+    if [ig.remove_stage(p) for p in (2, 3, 10, 30, 50, 80, 100)] != [0, 0, 1, 2, 3, 4, 5]:
+        raise AssertionError("removal percent → step mapping is off")
+    if ig.split_volume("Скачиваю KaproTUN.exe… 24 / 62 МБ") != ("Скачиваю KaproTUN.exe…", "24 / 62 МБ") \
+            or ig.split_volume("Создаю ярлык в меню Пуск…") != ("Создаю ярлык в меню Пуск…", ""):
+        raise AssertionError("the megabytes are not split from the step text")
+
+    started, fake_install, fake_remove = _v420_installer_fakes()
+    with _v4_patched(ig, _InstallWorker=fake_install, _UninstallWorker=fake_remove), \
+            _v4_patched(operations, download_source=lambda: "kaprovpn.pro"):
+        w = ig.InstallerWindow("install")
+        if (w.width(), w.height()) != (tokens.INST_W, tokens.INST_H):
+            raise AssertionError(f"the installer window is {w.width()} x {w.height()}")
+        if w.titlebar.title_label.text() != "KaproTUN — Установка":
+            raise AssertionError("the title bar does not say what this window is")
+        w.welcome.desktop_check.setChecked(False)
+        w.welcome.install_btn.click()
+        page = w.stack.currentWidget()
+        if started != [("install", False)] or not isinstance(page, ig.InstallingPage):
+            raise AssertionError(f"«Установить» did not start the install: {started}")
+        from PySide6.QtGui import QCloseEvent
+        attempt = QCloseEvent()
+        w.closeEvent(attempt)
+        if w.titlebar.btn_close.isEnabled() or attempt.isAccepted():
+            raise AssertionError("the window can be closed in the middle of an install")
+        if page.steps.texts() != list(ig.INSTALL_STEPS):
+            raise AssertionError("the steps of an install are not listed")
+
+        # Closing a running KaproTUN: no percent to show, and why it matters.
+        w._worker.progress.emit("Закрываю запущенный KaproTUN…", 2)
+        if not page.progress.is_indeterminate() or page.stepline.meta.text() != "" or \
+                not page.note.isVisibleTo(page) or page.steps.states() != ["active", "pending", "pending", "pending"]:
+            raise AssertionError("closing the running program is shown as a percentage")
+
+        # Downloading: the megabytes and the source are under the bar.
+        w._worker.progress.emit("Скачиваю KaproTUN.exe… 24 / 62 МБ", 22)
+        if page.progress.is_indeterminate() or page.stepline.meta.text() != "22 %" or \
+                page.stepline.text.full_text() != "Скачиваю KaproTUN.exe…":
+            raise AssertionError("the download is not shown on the bar")
+        if not page.detail.isVisibleTo(page) or page.detail.text.full_text() != "24 / 62 МБ" or \
+                page.detail.meta.text() != "зеркало kaprovpn.pro" or page.note.isVisibleTo(page):
+            raise AssertionError("the megabytes and their source are not under the bar")
+        if page.steps.states() != ["done", "active", "pending", "pending"]:
+            raise AssertionError(f"the step list is {page.steps.states()} while downloading")
+        with _v4_patched(operations, download_source=lambda: "github.com"):
+            w._worker.progress.emit("Скачиваю KaproTUN.exe… 3 / 62 МБ", 7)
+            if page.detail.meta.text() != "github.com":
+                raise AssertionError("falling back to GitHub is not shown")
+        w._worker.progress.emit("Создаю ярлык в меню Пуск…", 70)
+        if page.detail.isVisibleTo(page) or page.steps.states() != ["done", "done", "active", "pending"]:
+            raise AssertionError("the megabytes stayed on screen after the download")
+
+        # It fails: the reason as it is, a way to try again, a way around.
+        reason = ("RuntimeError: Не удалось скачать KaproTUN.exe:\nkaprovpn.pro: Read timed out\n"
+                  "github.com: Read timed out")
+        w._worker.failed.emit(reason)
+        failed = w.stack.currentWidget()
+        if not isinstance(failed, ig.DonePage) or failed.reason is None or \
+                failed.reason.toPlainText() != reason or not failed.reason.isReadOnly():
+            raise AssertionError("the reason of a failed install is not shown as it is")
+        attempt = QCloseEvent()
+        w.closeEvent(attempt)
+        if not w.titlebar.btn_close.isEnabled() or not attempt.isAccepted() or failed.launch_check is not None:
+            raise AssertionError("a failed install leaves the window stuck, or offers to start the program")
+        if failed.manual_link.url() != ipaths.release_page_url(ver) or \
+                not failed.manual_link.url().startswith("https://github.com/fafnirov/KaproTUN/releases/"):
+            raise AssertionError(f"«Скачать вручную» leads to {failed.manual_link.url()!r}")
+        from PySide6.QtGui import QGuiApplication
+        failed.copy_btn.click()
+        if QGuiApplication.clipboard().text() != reason:
+            raise AssertionError("the reason cannot be copied")
+        failed.retry_btn.click()
+        if started != [("install", False), ("install", False)] or \
+                not isinstance(w.stack.currentWidget(), ig.InstallingPage):
+            raise AssertionError(f"«Повторить» did not start again with the same choice: {started}")
+
+        # ... and then it works.
+        w._worker.finished_ok.emit()
+        done = w.stack.currentWidget()
+        facts = done.findChild(ig.Facts)
+        if done.launch_check is None or not done.launch_check.isChecked() or \
+                "Ярлык в меню Пуск" not in facts.texts() or hasattr(done, "retry_btn"):
+            raise AssertionError("the screen after an install without a desktop shortcut is wrong")
+
+        # Removing: the safe button first, five steps, what stays is said.
+        del started[:]
+        w = ig.InstallerWindow("uninstall")
+        confirm = w.stack.currentWidget()
+        kept = [f for f in confirm.findChildren(ig.Facts) if ig.DATA_DIR_TEXT in
+                [row["meta"].text() for row in f._rows]]
+        if not kept:
+            raise AssertionError("the confirmation does not say what stays on the machine")
+        [b for b in confirm.findChildren(QPushButton) if b.text() == "Удалить"][0].click()
+        page = w.stack.currentWidget()
+        if started != [("remove", None)] or page.steps.texts() != list(ig.REMOVE_STEPS):
+            raise AssertionError("«Удалить» did not start the removal")
+        if page.note.isVisibleTo(page) or not page.progress.is_indeterminate():
+            raise AssertionError("closing the program before removal is shown wrongly")
+        w._worker.progress.emit("Снимаю автозапуск…", 50)
+        if page.steps.states() != ["done", "done", "done", "active", "pending"] or \
+                page.stepline.meta.text() != "50 %":
+            raise AssertionError(f"removal steps are {page.steps.states()}")
+        w._worker.failed.emit("PermissionError: [WinError 5]")
+        failed = w.stack.currentWidget()
+        if hasattr(failed, "manual_link") or failed.reason.toPlainText() != "PermissionError: [WinError 5]":
+            raise AssertionError("a failed removal offers to download the program")
+        failed.retry_btn.click()
+        if started != [("remove", None), ("remove", None)]:
+            raise AssertionError("a failed removal cannot be retried")
+        w._worker.finished_ok.emit()
+        removed = w.stack.currentWidget()
+        if removed.launch_check is not None or \
+                ig.DATA_DIR_TEXT not in [row["meta"].text() for row in removed.findChild(ig.Facts)._rows]:
+            raise AssertionError("after removal the window offers to start the program, or hides what is left")
+
+        # Already installed: both versions when they differ, one when not.
+        with _v4_patched(ig, _detect_installed_version=lambda: "4.1.5"):
+            page = ig.MaintenancePage()
+            values = [l.text() for l in page.findChildren(ig.QLabel) if l.objectName() == "ktVersValue"]
+            if values != ["v4.1.5", f"v{ver}"]:
+                raise AssertionError(f"the versions shown are {values}")
+        with _v4_patched(ig, _detect_installed_version=lambda: ver):
+            page = ig.MaintenancePage()
+            values = [l.text() for l in page.findChildren(ig.QLabel) if l.objectName() == "ktVersValue"]
+            if values != [f"v{ver}"]:
+                raise AssertionError(f"the same version is shown twice: {values}")
+
+
+def _v420_installer_names_its_source() -> None:
+    """The installer knows which host the file is coming from — and says the
+    steps in the user's language, not in the registry's."""
+    import inspect
+    import tempfile
+    from pathlib import Path as _P
+    from installer import operations, payload_digest
+    import requests
+
+    seen: list = []
+
+    def fetch(url, tmp, progress):
+        seen.append(operations.download_source())
+        if "kaprovpn.pro" in url:
+            raise requests.ConnectionError("mirror is down")
+        _P(tmp).write_bytes(b"exe")
+
+    with tempfile.TemporaryDirectory() as d, \
+            _v4_patched(payload_digest, MAIN_EXE_SHA256="a" * 64), \
+            _v4_patched(operations, _fetch_main_exe=fetch, _sha256_of=lambda _p: "a" * 64):
+        target = _P(d) / "KaproTUN.exe"
+        operations._download_main_exe("9.9.9", target)
+        if seen != ["kaprovpn.pro", "github.com"] or operations.download_source() != "github.com" \
+                or target.read_bytes() != b"exe":
+            raise AssertionError(f"the source shown while downloading was {seen}")
+
+    import re as _re
+    said = _re.findall(r'progress\(f?"([^"]*)"', inspect.getsource(operations))
+    if len(said) < 12:
+        raise AssertionError(f"the installer's step texts were not found: {said}")
+    for text in said:
+        if _re.search(r"uninstaller|Programs & Features|auto-start", text):
+            raise AssertionError(f"the installer says {text!r} to the user")
+
+
+def _v420_update_card_says_what_happens() -> None:
+    """The card of a silent update: waiting, progress, done — and a failure
+    that is said and counted down instead of a window that just vanishes."""
+    import inspect
+    from kapro_tun import __version__ as ver
+    from kapro_tun.gui import tokens
+    import installer.gui as ig
+    _v41_app()
+
+    quits: list = []
+
+    class _App:
+        @staticmethod
+        def quit():
+            quits.append(1)
+
+    with _v4_patched(ig, QApplication=_App):
+        u = ig._SilentUpdateWindow()
+        try:
+            if (u.width(), u.height()) != (tokens.UPD_W, tokens.UPD_H):
+                raise AssertionError(f"the update card is {u.width()} x {u.height()}")
+            if not u.progress.is_indeterminate() or u.title.text() != "Обновляю KaproTUN…" or \
+                    "закроется старая версия" not in u.stepline.text.full_text():
+                raise AssertionError("the card does not say it is waiting for the old version")
+            u.set_progress("Скачиваю KaproTUN.exe… 24 / 62 МБ", 22)
+            if u.progress.is_indeterminate() or u.stepline.meta.text() != "22 %":
+                raise AssertionError("the download is not shown on the card")
+            u.set_done()
+            if u.title.text() != "KaproTUN обновлён" or not u.done_icon.isVisibleTo(u) or \
+                    u.stepline.text.full_text() != f"v{ver} · запускаю…" or u.progress.value() != 1.0:
+                raise AssertionError("a finished update is not said")
+        finally:
+            u._countdown.stop()
+            u.deleteLater()
+
+        u = ig._SilentUpdateWindow()
+        try:
+            u.set_error("RuntimeError: Не удалось скачать KaproTUN.exe:\nkaprovpn.pro: Read timed out")
+            if u.title.text() != "Не удалось обновить" or \
+                    u.stepline.text.full_text() != "Не удалось скачать KaproTUN.exe" or \
+                    u.stepline.meta.text() != "5 с" or u.progress.is_indeterminate():
+                raise AssertionError("a failed update is not said on the card")
+            for left in (4, 3, 2, 1):
+                u._on_countdown()
+                if u.stepline.meta.text() != f"{left} с" or quits:
+                    raise AssertionError("the countdown of a failed update is off")
+            u._on_countdown()
+            if quits != [1] or u._countdown.isActive():
+                raise AssertionError("the card does not close itself after the countdown")
+        finally:
+            u._countdown.stop()
+            u.deleteLater()
+
+    # The wait for the old version is on the card, not before it: the card is
+    # up first, the worker starts after it.
+    src = inspect.getsource(ig.run_silent)
+    if "time.sleep" in src or "PREP_MS" not in src or src.index("window.show()") > src.index("PREP_MS"):
+        raise AssertionError("the silent update waits before it shows anything")
+
+
+check("installer: steps, megabytes and their source, a failure that can be retried (v4.2.0)",
+      _v420_installer_shows_what_it_does)
+check("installer: knows where the file comes from; plain words for its steps (v4.2.0)",
+      _v420_installer_names_its_source)
+def _v420_installer_checks_itself() -> None:
+    """The packaged installer can draw all its screens on request — and that
+    request installs nothing: no worker thread is ever created."""
+    import json as _json
+    import tempfile
+    from pathlib import Path as _P
+    import installer.gui as ig
+    import installer.main as im
+    _v41_app()
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("the installer's self-test started a worker")
+
+    with tempfile.TemporaryDirectory() as d, \
+            _v4_patched(ig, _InstallWorker=forbidden, _UninstallWorker=forbidden,
+                        _detect_installed_version=lambda: "4.1.5", _settle=lambda _app: None), \
+            _v4_patched(im.sys, argv=["KaproTUN-Setup.exe", "--selftest", d]):
+        code = im.main()
+        items = _json.loads((_P(d) / "installer-selftest.json").read_text(encoding="utf-8"))
+        names = [i["stage"] for i in items]
+        if code != 0 or names != ["welcome", "installing", "done", "error", "installed", "confirm",
+                                  "removed", "update"]:
+            raise AssertionError(f"installer self-test: exit {code}, {items}")
+        if not all((_P(d) / f"{n}.png").is_file() for n in names):
+            raise AssertionError("a screen was not saved")
+
+    # A screen that cannot be built fails the run and says why.
+    def broken(*_a, **_k):
+        raise ImportError("No module named 'PySide6.QtSvg'")
+
+    with tempfile.TemporaryDirectory() as d, \
+            _v4_patched(ig, DonePage=broken, _settle=lambda _app: None):
+        code = ig.run_selftest(d)
+        items = _json.loads((_P(d) / "installer-selftest.json").read_text(encoding="utf-8"))
+        if code != 1 or "QtSvg" not in items[-1]["detail"]:
+            raise AssertionError(f"a broken screen passed the self-test: {code} {items[-1]}")
+
+
+def _v420_suite_cannot_reach_the_live_session() -> None:
+    """Start-up clean-up inside this suite cannot delete a live tunnel's
+    routes, and nothing here can run the event loop that would let a
+    left-over start-up step fire."""
+    from PySide6.QtCore import QCoreApplication
+    from kapro_tun import main as _main
+    _v41_app()
+
+    if not isinstance(_main.subprocess, _MainSubprocess):
+        raise AssertionError("kapro_tun.main can start real commands from inside the suite")
+    if sys.platform == "win32":
+        before = len(MAIN_SUBPROCESS_CALLS)
+        _main._kill_orphan_helpers()
+        made = MAIN_SUBPROCESS_CALLS[before:]
+        if len(made) != 1 or "Remove-NetRoute" not in " ".join(made[0]):
+            raise AssertionError(f"the route clean-up was not caught by the sandbox: {made}")
+    if _LOOP_TRIPWIRE:
+        for spin in (QCoreApplication.processEvents, QCoreApplication.instance().processEvents):
+            try:
+                spin()
+            except AssertionError:
+                continue
+            raise AssertionError("the event loop can be run from inside the suite")
+
+
+check("silent update: waiting, progress, done, a failure with a countdown (v4.2.0)",
+      _v420_update_card_says_what_happens)
+check("suite: start-up clean-up and the event loop cannot reach a live session (v4.2.0)",
+      _v420_suite_cannot_reach_the_live_session)
+check("build: the installer draws every screen on request and installs nothing (v4.2.0)",
+      _v420_installer_checks_itself)
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,6 @@ custom amber-on-dark installer flow (Welcome → Progress → Done) that
 copies KaproTUN.exe to %LOCALAPPDATA%\\Programs\\KaproTUN, creates Start
 Menu + Desktop shortcuts, registers an uninstaller. No admin required.
 """
-import glob
 import os
 
 # A release installer must know the digest of the KaproTUN.exe it will
@@ -33,21 +32,14 @@ if os.environ.get("GITHUB_ACTIONS") == "true":
 # (Acceptable — VPN client; if you can't reach github.com you wouldn't
 # get far anyway.)
 
-# Optional designer assets — bundled if present, fall back to app icons.
-installer_pngs = [
-    (p, 'installer') for p in glob.glob('installer/*.png')
-]
-
 a = Analysis(
     ['installer_run.py'],
     pathex=[],
     binaries=[],
     datas=[
-        # Reuse main-app brand assets (icon, splash) inside the installer
-        # so the welcome page can display them without us duplicating files.
+        # Reuse main-app brand assets (the window icon) inside the installer.
+        # Its screens themselves are drawn in code: no pictures to bundle.
         ('kapro_tun/data', 'kapro_tun/data'),
-
-        *installer_pngs,
     ],
     hiddenimports=[
         # Reached only via lazy imports in installer/operations.py, so

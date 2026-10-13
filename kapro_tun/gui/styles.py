@@ -608,6 +608,45 @@ QLabel#ktStepMeta {{ background: transparent; color: {c.text_tertiary}; font-siz
 QLabel#ktStepNote {{ background: transparent; color: {c.text_tertiary}; font-size: {t.FS_XS}px; }}
 QLabel#ktBootErrTitle {{ background: transparent; color: {c.text}; font-size: {t.FS_LG}px; font-weight: 600; }}
 QLabel#ktBootErrText {{ background: transparent; color: {c.text_secondary}; font-family: {t.FONT_MONO}; font-size: {t.FS_SM}px; }}
+QLabel#ktStepMono {{ background: transparent; color: {c.text_secondary}; font-family: {t.FONT_MONO}; font-size: {t.FS_SM}px; }}
+QFrame#titleBar[inst="true"] {{ border-bottom: 1px solid {c.line}; }}
+QLabel#ktInstTitle {{ background: transparent; color: {c.text}; font-size: {t.FS_METRIC}px; font-weight: 600; }}
+QLabel#ktInstH {{ background: transparent; color: {c.text}; font-size: {t.FS_XL}px; font-weight: 600; }}
+QLabel#ktInstSub, QLabel#ktInstText {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_MD}px; }}
+QLabel#ktInstCaption, QLabel#ktInstLegal {{ background: transparent; color: {c.text_tertiary}; font-size: {t.FS_XS}px; }}
+QLabel#ktInstLabel {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; font-weight: 600; }}
+QFrame#ktHeadChip {{ background-color: {c.surface_2}; border: none; border-radius: 18px; }}
+QFrame#ktHeadChip[tone="accent"] {{ background-color: {c.accent_soft}; }}
+QFrame#ktHeadChip[tone="danger"] {{ background-color: {c.danger_soft}; }}
+QFrame#ktFacts, QFrame#ktVers {{
+    background-color: {c.surface}; border: 1px solid {c.line}; border-radius: {t.R_LG}px;
+}}
+QFrame#ktFactsRow {{ background: transparent; border: none; border-bottom: 1px solid {c.line}; }}
+QFrame#ktFactsRow[last="true"] {{ border-bottom: none; }}
+QLabel#ktFactText {{ background: transparent; color: {c.text}; font-size: {t.FS_MD}px; }}
+QLabel#ktFactText[state="active"] {{ font-weight: 600; }}
+QLabel#ktFactText[state="pending"] {{ color: {c.text_tertiary}; }}
+QLabel#ktFactMeta {{ background: transparent; color: {c.text_tertiary}; font-family: {t.FONT_MONO}; font-size: {t.FS_XS}px; }}
+QFrame#ktVersCell {{ background: transparent; border: none; }}
+QFrame#ktVersCell[second="true"] {{ border-left: 1px solid {c.line}; }}
+QLabel#ktVersLabel {{ background: transparent; color: {c.text_tertiary}; font-size: {t.FS_XS}px; }}
+QLabel#ktVersValue {{ background: transparent; color: {c.text}; font-size: {t.FS_LG}px; font-weight: 600; }}
+QPlainTextEdit#ktReason {{
+    background-color: {c.danger_soft}; color: {c.text};
+    border: 1px solid {c.danger_line}; border-radius: {t.R_MD}px;
+    padding: {t.SP_2}px {t.SP_10}px {t.SP_2}px {t.SP_2H}px;
+    font-family: {t.FONT_MONO}; font-size: {t.FS_SM}px;
+    selection-background-color: {c.accent}; selection-color: {c.on_accent};
+}}
+QPushButton#ktBtnDangerQuiet {{
+    background-color: transparent; color: {c.danger_text}; border: 1px solid transparent;
+    border-radius: {t.R_MD}px; padding: 0 {t.SP_3}px;
+    min-height: {t.CONTROL_H_SM - 2}px; max-height: {t.CONTROL_H_SM - 2}px;
+    font-size: {t.FS_SM}px; font-weight: 600;
+}}
+QPushButton#ktBtnDangerQuiet:hover, QPushButton#ktBtnDangerQuiet:pressed {{ background-color: {c.danger_soft}; }}
+QPushButton#ktBtnDangerQuiet:focus {{ border: 2px solid {c.focus}; padding: 0 {t.SP_3 - 1}px;
+    min-height: {t.CONTROL_H_SM - 4}px; max-height: {t.CONTROL_H_SM - 4}px; }}
 QLabel#ktStatusLabel[tone="idle"] {{ color: {c.text_secondary}; }}
 QLabel#ktStatusLabel[tone="connected"] {{ color: {c.accent_text}; }}
 QLabel#ktStatusLabel[tone="error"] {{ color: {c.danger_text}; }}

@@ -11,6 +11,9 @@ released.
 
 On macOS it also starts the app the way a user does (from the .app bundle,
 no arguments) and checks that it is still running a little later.
+
+On Windows the installer that was just built checks itself too: it draws
+every one of its screens (and installs nothing).
 """
 from __future__ import annotations
 
@@ -70,6 +73,28 @@ def _launch_like_a_user(dist: Path, out: Path) -> bool:
     return running
 
 
+def _installer_draws_its_screens(dist: Path, out: Path) -> bool:
+    """Windows: KaproTUN-Setup.exe --selftest. Nothing is installed."""
+    setup = dist / "KaproTUN-Setup.exe"
+    folder = out / "installer"
+    try:
+        done = subprocess.run([str(setup), "--selftest", str(folder)],
+                              capture_output=True, text=True, timeout=120)
+        code = done.returncode
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"[FAIL] installer: {type(e).__name__}: {e}", flush=True)
+        return False
+    report = folder / "installer-selftest.json"
+    if not report.is_file():
+        print(f"[FAIL] installer: no report was written (exit code {code})", flush=True)
+        return False
+    for item in json.loads(report.read_text(encoding="utf-8")):
+        print(f"  {item['status']:>4}  installer/{item['stage']}: {item['detail']}", flush=True)
+        if item.get("trace"):
+            print("        " + item["trace"], flush=True)
+    return code == 0
+
+
 def main() -> int:
     out = Path(sys.argv[1] if len(sys.argv) > 1 else "selftest-out").resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -103,6 +128,8 @@ def main() -> int:
         code = code or 1
 
     if sys.platform == "darwin" and not _launch_like_a_user(dist, out):
+        code = code or 1
+    if sys.platform == "win32" and not _installer_draws_its_screens(dist, out):
         code = code or 1
     return code
 

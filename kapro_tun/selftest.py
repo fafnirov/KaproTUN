@@ -141,6 +141,36 @@ def _check_window(folder: Path):
             {"size": size, "qpa": app.platformName(), "screenshot": str(target) if saved else ""})
 
 
+def _check_splash(folder: Path):
+    """Draw the start-up splash: every step, and what a failed start looks like."""
+    from PySide6.QtWidgets import QApplication
+    from . import __version__
+    from .core import i18n, storage
+    from .gui import boot
+    from .gui.styles import get_qss
+
+    i18n.init_from_settings(storage.load_settings().get("language"))
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    app.setStyleSheet(get_qss("dark"))
+    splash = boot.SplashWindow(__version__)
+    splash.show()
+    for k in range(1, boot.STEP_COUNT + 1):
+        splash.set_step(k)
+        _pump(app, 0.15)
+    shot = splash.grab()
+    folder.mkdir(parents=True, exist_ok=True)
+    saved = shot.save(str(folder / "splash.png"))
+    splash.show_error("RuntimeError: self-test")
+    _pump(app, 0.15)
+    said = splash.failed() and splash.error.isVisible()
+    splash.hide()
+    splash.deleteLater()
+    size = f"{splash.width()}x{splash.height()}"
+    return (OK if saved and said and not shot.isNull() else FAIL,
+            f"splash {size}, {boot.STEP_COUNT} steps, a failed start is shown: {'yes' if said else 'NO'}",
+            {"size": size, "screenshot": str(folder / 'splash.png') if saved else ""})
+
+
 def _check_engine():
     import subprocess
     from .core import paths, sing_box_installer
@@ -280,6 +310,7 @@ def run(argv: list[str]) -> int:
     if e2e:
         _stage(report, "engine", _check_engine)
         _stage(report, "connect", lambda: _check_connect(folder))
+    _stage(report, "splash", lambda: _check_splash(folder))
     _stage(report, "window", lambda: _check_window(folder))
     report.save()
     print(f"selftest: {'FAILED' if report.failed() else 'passed'}; report in {folder}", flush=True)

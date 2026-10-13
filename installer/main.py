@@ -12,16 +12,21 @@ Modes (CLI flags):
   --silent            → headless update install: tiny progress indicator,
                         run install_everything(), launch installed app,
                         exit. Used by the in-app auto-updater.
+  --selftest <folder> → draw every screen once, save the pictures and a
+                        report, install nothing. Used by the release build.
 """
 from __future__ import annotations
 
 import sys
 
 from . import paths
-from .gui import run, run_silent
+from .gui import run, run_selftest, run_silent
 
 
 def main() -> int:
+    if "--selftest" in sys.argv:
+        rest = [a for a in sys.argv[1:] if not a.startswith("--")]
+        return run_selftest(rest[0] if rest else "installer-selftest")
     if "--silent" in sys.argv:
         return run_silent()
     if "--uninstall" in sys.argv:
