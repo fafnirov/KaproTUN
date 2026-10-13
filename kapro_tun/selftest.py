@@ -160,14 +160,19 @@ def _check_splash(folder: Path):
     shot = splash.grab()
     folder.mkdir(parents=True, exist_ok=True)
     saved = shot.save(str(folder / "splash.png"))
+    # A splash that drew has the mark, text and the bar on it; a blank one is
+    # a single colour.
+    small = shot.toImage().scaled(48, 48)
+    drawn = len({small.pixel(x, y) for x in range(48) for y in range(48)}) >= 8
     splash.show_error("RuntimeError: self-test")
     _pump(app, 0.15)
     said = splash.failed() and splash.error.isVisible()
     splash.hide()
     splash.deleteLater()
     size = f"{splash.width()}x{splash.height()}"
-    return (OK if saved and said and not shot.isNull() else FAIL,
-            f"splash {size}, {boot.STEP_COUNT} steps, a failed start is shown: {'yes' if said else 'NO'}",
+    return (OK if saved and said and drawn else FAIL,
+            f"splash {size}, {boot.STEP_COUNT} steps{'' if drawn else ', BLANK'}, "
+            f"a failed start is shown: {'yes' if said else 'NO'}",
             {"size": size, "screenshot": str(folder / 'splash.png') if saved else ""})
 
 

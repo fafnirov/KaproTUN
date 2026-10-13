@@ -80,13 +80,15 @@ def _installer_draws_its_screens(dist: Path, out: Path) -> bool:
     try:
         done = subprocess.run([str(setup), "--selftest", str(folder)],
                               capture_output=True, text=True, timeout=120)
-        code = done.returncode
+        code, said = done.returncode, ((done.stdout or "") + (done.stderr or "")).strip()
     except (OSError, subprocess.TimeoutExpired) as e:
         print(f"[FAIL] installer: {type(e).__name__}: {e}", flush=True)
         return False
     report = folder / "installer-selftest.json"
     if not report.is_file():
         print(f"[FAIL] installer: no report was written (exit code {code})", flush=True)
+        if said:
+            print(said[-3000:], flush=True)
         return False
     for item in json.loads(report.read_text(encoding="utf-8")):
         print(f"  {item['status']:>4}  installer/{item['stage']}: {item['detail']}", flush=True)

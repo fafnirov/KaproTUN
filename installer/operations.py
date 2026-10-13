@@ -561,22 +561,34 @@ def uninstall_everything(progress: ProgressCb = None) -> None:
                     pass
         # Schedule the uninstaller (and the now-empty install dir) for
         # deletion on next boot.
-        _schedule_delete_on_reboot(paths.installed_uninstaller_path())
+        global _uninstaller_left
+        _uninstaller_left = not _schedule_delete_on_reboot(paths.installed_uninstaller_path())
         _schedule_delete_on_reboot(install)
 
     if progress:
         progress("Готово", 100)
 
 
-def _schedule_delete_on_reboot(path: Path) -> None:
-    """Ask Windows to delete `path` at next boot (used for locked files)."""
+def _schedule_delete_on_reboot(path: Path) -> bool:
+    """Ask Windows to delete `path` at next boot (used for locked files).
+    True when Windows agreed — it does so only for an administrator: the
+    request is kept in a machine-wide registry key."""
     if sys.platform != "win32":
-        return
+        return False
     MOVEFILE_DELAY_UNTIL_REBOOT = 0x4
     try:
-        ctypes.windll.kernel32.MoveFileExW(str(path), None, MOVEFILE_DELAY_UNTIL_REBOOT)
+        return bool(ctypes.windll.kernel32.MoveFileExW(str(path), None, MOVEFILE_DELAY_UNTIL_REBOOT))
     except OSError:
-        pass
+        return False
+
+
+_uninstaller_left = False
+
+
+def uninstaller_left_behind() -> bool:
+    """After uninstall_everything(): True when the uninstaller's own file
+    could not be scheduled for deletion and stays on disk."""
+    return _uninstaller_left
 
 
 # --- top-level install orchestration -------------------------------------

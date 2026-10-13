@@ -14,9 +14,11 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import time
 from typing import Optional
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QThread, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import (QEventLoop, QPointF, QRectF, QSize, Qt, QThread, QTimer,
+                            QVariantAnimation, Signal)
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QFrame, QHBoxLayout, QLabel,
                                QMainWindow, QPlainTextEdit, QPushButton, QStackedWidget,
@@ -27,7 +29,7 @@ from kapro_tun.gui import boot, icons as app_icons, icons_v2, kit, tokens
 from kapro_tun.gui.styles import get_qss
 from kapro_tun.gui.titlebar import TitleBar
 
-from . import operations, paths, system_tools
+from . import operations, paths
 
 INSTALL_DIR_TEXT = "%LOCALAPPDATA%\\Programs\\KaproTUN"
 DATA_DIR_TEXT = "%LOCALAPPDATA%\\KaproTUN"
@@ -35,6 +37,18 @@ GITHUB_URL = "https://github.com/fafnirov/KaproTUN"
 
 INSTALL_STEPS = ("Закрываю запущенный KaproTUN", "Скачиваю KaproTUN.exe",
                  "Создаю ярлыки в меню Пуск и на Рабочем столе", "Регистрирую удаление в Windows")
+# Set while run_selftest() draws the screens: nothing may start from them.
+_selftest = False
+
+
+def install_steps(desktop: bool = True) -> tuple:
+    """The steps of an install as the list shows them; without the desktop
+    shortcut the third one does not promise it."""
+    if desktop:
+        return INSTALL_STEPS
+    return INSTALL_STEPS[:2] + ("Создаю ярлык в меню Пуск",) + INSTALL_STEPS[3:]
+
+
 REMOVE_STEPS = ("Закрываю KaproTUN", "Удаляю ярлыки",
                 "Удаляю запись из «Установка и удаление программ»", "Снимаю автозапуск",
                 "Удаляю файлы программы")
@@ -517,26 +531,23 @@ class MaintenancePage(QWidget):
 
 
 def _detect_installed_version() -> Optional[str]:
-    """Read the version embedded in the installed KaproTUN.exe.
+    """The version of the KaproTUN that is installed: what the installer
+    wrote down when it registered it in Windows (DisplayVersion). None when
+    it is not known — the screen then shows a dash.
 
-    Cheap PowerShell shell-out via Get-Item.VersionInfo. Returns None
-    if probe fails — caller falls back to "unknown version".
-    """
-    exe = paths.installed_exe_path()
-    if not exe.is_file():
+    Until v4.2.0 this asked PowerShell for the version stamped into
+    KaproTUN.exe. The file carries no such stamp, so the answer was always
+    empty — after a PowerShell start on the GUI thread, with the path pasted
+    into the command."""
+    if not paths.installed_exe_path().is_file():
         return None
     try:
-        proc = subprocess.run(
-            [system_tools.tool("powershell"), "-NoProfile", "-Command",
-             f"(Get-Item '{exe}').VersionInfo.ProductVersion"],
-            capture_output=True, timeout=5,
-            encoding="utf-8", errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            env=system_tools.powershell_env(),
-        )
-        return (proc.stdout or "").strip() or None
-    except Exception:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, operations.UNINSTALL_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, "DisplayVersion")
+    except (ImportError, OSError):
         return None
+    return str(value).strip().lstrip("vV") or None
 
 
 class InstallingPage(QWidget):
@@ -610,7 +621,8 @@ class DonePage(QWidget):
     retry_clicked = Signal()
 
     def __init__(self, success: bool = True, error: str = "", *, removed: bool = False,
-                 desktop: bool = True, removing: bool = False, parent: Optional[QWidget] = None):
+                 desktop: bool = True, removing: bool = False, leftover: bool = False,
+                 parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setObjectName("page")
         col = QVBoxLayout(self)
@@ -624,7 +636,13 @@ class DonePage(QWidget):
             facts = Facts()
             facts.add("folder", "Серверы и настройки остались — пригодятся, если поставишь снова",
                       DATA_DIR_TEXT)
-            facts.add("clock", "Файл удаления сотрётся после перезагрузки")
+            if leftover:
+                # Windows lets only an administrator schedule a delete for
+                # the next boot; without that the running uninstaller stays.
+                facts.add("file", "Остался файл удаления — папку можно стереть вручную",
+                          INSTALL_DIR_TEXT)
+            else:
+                facts.add("clock", "Файл удаления сотрётся после перезагрузки")
             col.addWidget(facts)
             foot = _foot(col)
         elif success:
@@ -771,6 +789,10 @@ class InstallerWindow(QMainWindow):
         if self._busy:
             event.ignore()
             return
+        # The worker reports its result a moment before its thread ends.
+        worker = self._worker
+        if worker is not None:
+            worker.wait(3000)
         super().closeEvent(event)
 
     def _set_title(self, title: str) -> None:
@@ -820,8 +842,10 @@ class InstallerWindow(QMainWindow):
         self._build_uninstall_flow()
 
     def _start_install(self, create_desktop: bool) -> None:
+        if _selftest:
+            return
         self._desktop = bool(create_desktop)
-        self.installing = InstallingPage()
+        self.installing = InstallingPage(steps=install_steps(self._desktop))
         self._show(self.installing)
         self._set_busy(True)  # can't bail mid-install
         self._worker = _InstallWorker(
@@ -851,13 +875,16 @@ class InstallerWindow(QMainWindow):
         self._start_install(self._desktop)
 
     def _on_finish(self, launch: bool) -> None:
-        if launch and not self._uninstall and paths.installed_exe_path().is_file():
-            subprocess.Popen(
-                [str(paths.installed_exe_path())],
-                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-                close_fds=True,
-            )
+        if launch and not self._uninstall and not _selftest and paths.installed_exe_path().is_file():
+            try:
+                subprocess.Popen(
+                    [str(paths.installed_exe_path())],
+                    creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                    close_fds=True,
+                )
+            except OSError:
+                pass        # it is installed; "Закрыть" must still close the window
         self.close()
 
     # --- uninstall flow ----------------------------------------------------
@@ -896,6 +923,8 @@ class InstallerWindow(QMainWindow):
         cancel_btn.setFocus()
 
     def _start_uninstall(self) -> None:
+        if _selftest:
+            return
         self.installing = InstallingPage("Удаляю KaproTUN", INSTALL_DIR_TEXT, "trash", "neutral",
                                          REMOVE_STEPS, remove_stage)
         self._show(self.installing)
@@ -909,7 +938,7 @@ class InstallerWindow(QMainWindow):
 
     def _on_uninstall_done(self) -> None:
         self._set_busy(False)
-        done = DonePage(success=True, removed=True)
+        done = DonePage(success=True, removed=True, leftover=operations.uninstaller_left_behind())
         done.close_clicked.connect(self._on_removed_close)
         self._show(done)
         done.close_btn.setFocus()
@@ -960,8 +989,11 @@ class _SilentUpdateWindow(QWidget):
     itself: between "the old version has quit" and "the new one is up" the
     user has nothing else to look at. No title bar, no buttons."""
 
-    PREP_MS = 1500          # the old version is given this long to let go of its files
+    PREP_MS = 1500          # the old version is given at least this long to let go of its files
+    WAIT_OLD_S = 30         # ... and at most this long, before it is closed for it
     ERROR_SECONDS = 5
+
+    gave_up = Signal()      # the countdown after a failure has run out
 
     def __init__(self):
         super().__init__()
@@ -1013,6 +1045,13 @@ class _SilentUpdateWindow(QWidget):
         self._countdown.timeout.connect(self._on_countdown)
         self.set_prep()
 
+    def closeEvent(self, event) -> None:  # noqa: N802
+        # Nothing here is for the user to close (the taskbar and Alt+F4 can
+        # still ask): the card goes away by itself, when the update is over.
+        # Closing it would end the process under the worker thread — a
+        # half-written program and no version started.
+        event.ignore()
+
     def set_prep(self) -> None:
         self.progress.set_indeterminate(True)
         self.stepline.set("Жду, пока закроется старая версия…")
@@ -1056,9 +1095,38 @@ class _SilentUpdateWindow(QWidget):
         self._left -= 1
         if self._left <= 0:
             self._countdown.stop()
-            QApplication.quit()
+            self.gave_up.emit()
             return
         self.stepline.set(self._reason, f"{self._left} с")
+
+
+def _start_when_released(start, *, locked, now, deadline, later) -> None:
+    """Call start() once the old version has let go of its file — or at
+    `deadline`, whichever comes first.
+
+    The old version disconnects, restores the network settings and joins its
+    threads before it exits; that can take well over a few seconds. Starting
+    earlier makes the install force-close it in the middle of that — and the
+    force-close takes the process tree, which this updater is part of."""
+    if locked() and now() < deadline:
+        later(lambda: _start_when_released(start, locked=locked, now=now, deadline=deadline,
+                                           later=later))
+        return
+    start()
+
+
+def _log_update_failure(reason: str) -> None:
+    """Keep the whole reason of a failed update: the card shows one line of
+    it for five seconds."""
+    try:
+        from kapro_tun.core import paths as app_paths
+        folder = app_paths.app_data_dir() / "logs"
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(folder / "update-error.log", "a", encoding="utf-8") as f:
+            f.write(f"{stamp}  update to v{__version__} failed\n{reason}\n\n")
+    except Exception:
+        pass
 
 
 def run_silent() -> int:
@@ -1066,6 +1134,8 @@ def run_silent() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("KaproTUN Updater")
     app.setOrganizationName("KaproTUN")
+    # The card refuses to be closed; the process ends when the update does.
+    app.setQuitOnLastWindowClosed(False)
     _apply_theme(app)
     app.setWindowIcon(app_icons.app_icon())
 
@@ -1096,21 +1166,36 @@ def run_silent() -> int:
         # Long enough to read "обновлён", then the new version takes over.
         QTimer.singleShot(700, launch_and_quit)
 
+    def on_failed(reason: str) -> None:
+        _log_update_failure(reason)
+        window.set_error(reason)
+
     worker.finished_ok.connect(on_done)
-    worker.failed.connect(window.set_error)
+    worker.failed.connect(on_failed)
+    # A failed update must not leave the user without a client: whatever is
+    # installed (the old version, untouched — or the new one, if only a later
+    # step failed) is started again.
+    window.gave_up.connect(launch_and_quit)
     # The application that started us is still shutting down, and Windows has
     # not yet released its file: overwriting it now would fail with a sharing
     # violation. The card is already up and says what it is waiting for.
-    QTimer.singleShot(_SilentUpdateWindow.PREP_MS, worker.start)
-    return app.exec()
+    exe = paths.installed_exe_path()
+    deadline = time.monotonic() + _SilentUpdateWindow.WAIT_OLD_S
+    QTimer.singleShot(_SilentUpdateWindow.PREP_MS, lambda: _start_when_released(
+        worker.start, locked=lambda: operations._exe_is_locked(exe), now=time.monotonic,
+        deadline=deadline, later=lambda again: QTimer.singleShot(300, again)))
+    code = app.exec()
+    worker.wait(5000)
+    return code
 
 
 # --- self-test (for the build) ------------------------------------------------
 
 def _settle(app) -> None:
-    """Let a window that was just shown lay itself out and paint."""
+    """Let a window that was just shown lay itself out and paint — without
+    taking a key press or a click that happens to land on it."""
     for _ in range(20):
-        app.processEvents()
+        app.processEvents(QEventLoop.ExcludeUserInputEvents)
 
 
 def run_selftest(folder: str) -> int:
@@ -1122,10 +1207,14 @@ def run_selftest(folder: str) -> int:
     screen that cannot be built or comes out blank in the packaged form (a
     module or a Qt plugin missing from the bundle) fails the build instead of
     reaching a user. Nothing is installed, removed, downloaded or started —
-    the screens are built and filled by hand, no worker is created.
+    the screens are built and filled by hand, and while this runs the
+    buttons that would start an install or a removal do nothing.
     The result goes to <folder>/installer-selftest.json; exit code 0 or 1."""
     import json
     from pathlib import Path
+
+    global _selftest
+    _selftest = True
 
     out = Path(folder).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -1134,6 +1223,7 @@ def run_selftest(folder: str) -> int:
     results: list[dict] = []
 
     def shoot(name: str, widget: QWidget) -> None:
+        widget.setAttribute(Qt.WA_ShowWithoutActivating, True)
         widget.show()
         _settle(app)
         image = widget.grab().toImage()
@@ -1177,6 +1267,8 @@ def run_selftest(folder: str) -> int:
         import traceback
         results.append({"stage": "screens", "status": "FAIL", "detail": f"{type(e).__name__}: {e}",
                         "trace": traceback.format_exc()[-1500:]})
+    finally:
+        _selftest = False
     failed = any(item["status"] != "ok" for item in results) or len(results) < 8
     try:
         (out / "installer-selftest.json").write_text(

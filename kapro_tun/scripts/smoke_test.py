@@ -12017,7 +12017,7 @@ def _v417_system_tools_are_called_by_full_path() -> None:
                 "kapro_tun/core/killswitch.py", "kapro_tun/core/webrtc_block.py",
                 "kapro_tun/core/network_routes.py", "kapro_tun/core/net_diag.py",
                 "kapro_tun/core/leak_test.py", "kapro_tun/scripts/collect_diagnostics.py",
-                "installer/gui.py", "installer/operations.py"):
+                "installer/operations.py"):
         text = (root / rel).read_text(encoding="utf-8")
         found = bare.search(text)
         if found:
@@ -12039,8 +12039,7 @@ def _v417_system_tools_are_called_by_full_path() -> None:
                 raise AssertionError("outside Windows the environment must be inherited")
     for rel in ("kapro_tun/main.py", "kapro_tun/core/firewall_sweep.py",
                 "kapro_tun/core/network_routes.py", "kapro_tun/core/net_diag.py",
-                "kapro_tun/scripts/collect_diagnostics.py", "installer/gui.py",
-                "installer/operations.py"):
+                "kapro_tun/scripts/collect_diagnostics.py", "installer/operations.py"):
         text = (root / rel).read_text(encoding="utf-8")
         if text.count('tool("powershell")') != text.count("powershell_env()") or \
                 'tool("powershell")' not in text:
@@ -12536,7 +12535,10 @@ def _v420_installer_shows_what_it_does() -> None:
         w.closeEvent(attempt)
         if w.titlebar.btn_close.isEnabled() or attempt.isAccepted():
             raise AssertionError("the window can be closed in the middle of an install")
-        if page.steps.texts() != list(ig.INSTALL_STEPS):
+        if ig.install_steps(True) != ig.INSTALL_STEPS or len(ig.install_steps(False)) != 4 or \
+                "Рабочем" in ig.install_steps(False)[2]:
+            raise AssertionError("the step list promises a desktop shortcut that was declined")
+        if page.steps.texts() != list(ig.install_steps(False)):
             raise AssertionError("the steps of an install are not listed")
 
         # Closing a running KaproTUN: no percent to show, and why it matters.
@@ -12625,6 +12627,25 @@ def _v420_installer_shows_what_it_does() -> None:
         if removed.launch_check is not None or \
                 ig.DATA_DIR_TEXT not in [row["meta"].text() for row in removed.findChild(ig.Facts)._rows]:
             raise AssertionError("after removal the window offers to start the program, or hides what is left")
+        # Windows schedules "delete at next boot" only for an administrator:
+        # when it did not, the screen must not promise it.
+        told = ig.DonePage(success=True, removed=True, leftover=True).findChild(ig.Facts).texts()
+        kept = ig.DonePage(success=True, removed=True, leftover=False).findChild(ig.Facts).texts()
+        if not any("Остался файл удаления" in t for t in told) or any("после перезагрузки" in t for t in told) \
+                or not any("после перезагрузки" in t for t in kept):
+            raise AssertionError(f"the removed screen says the wrong thing about the uninstaller: {told}")
+
+        # While the build draws the screens, their buttons start nothing.
+        del started[:]
+        with _v4_patched(ig, _selftest=True):
+            w = ig.InstallerWindow("install")
+            w.welcome.install_btn.click()
+            if started or not isinstance(w.stack.currentWidget(), ig.WelcomePage):
+                raise AssertionError("a click during the self-test started an install")
+            w = ig.InstallerWindow("uninstall")
+            [b for b in w.stack.currentWidget().findChildren(QPushButton) if b.text() == "Удалить"][0].click()
+            if started:
+                raise AssertionError("a click during the self-test started a removal")
 
         # Already installed: both versions when they differ, one when not.
         with _v4_patched(ig, _detect_installed_version=lambda: "4.1.5"):
@@ -12711,6 +12732,12 @@ def _v420_update_card_says_what_happens() -> None:
 
         u = ig._SilentUpdateWindow()
         try:
+            from PySide6.QtGui import QCloseEvent
+            attempt = QCloseEvent()
+            u.closeEvent(attempt)
+            if attempt.isAccepted():
+                raise AssertionError("the update card can be closed in the middle of an update")
+            u.gave_up.connect(lambda: quits.append(1))
             u.set_error("RuntimeError: Не удалось скачать KaproTUN.exe:\nkaprovpn.pro: Read timed out")
             if u.title.text() != "Не удалось обновить" or \
                     u.stepline.text.full_text() != "Не удалось скачать KaproTUN.exe" or \
@@ -12732,12 +12759,100 @@ def _v420_update_card_says_what_happens() -> None:
     src = inspect.getsource(ig.run_silent)
     if "time.sleep" in src or "PREP_MS" not in src or src.index("window.show()") > src.index("PREP_MS"):
         raise AssertionError("the silent update waits before it shows anything")
+    if "setQuitOnLastWindowClosed(False)" not in src or "worker.wait(" not in src:
+        raise AssertionError("the updater can end under its own worker thread")
+    if "gave_up.connect(launch_and_quit)" not in src or "_log_update_failure(reason)" not in src:
+        raise AssertionError("a failed update leaves no client running, or keeps no record of why")
+
+    # The install starts when the old version has let go of its file — not
+    # after a fixed second and a half — and in any case at the deadline.
+    calls, queue, clock, state = [], [], [0.0], {"locked": True}
+
+    def begin():
+        ig._start_when_released(lambda: calls.append("start"), locked=lambda: state["locked"],
+                                now=lambda: clock[0], deadline=30.0, later=queue.append)
+
+    begin()
+    if calls or len(queue) != 1:
+        raise AssertionError("the install started while the old version still held its file")
+    queue.pop()()
+    if calls or len(queue) != 1:
+        raise AssertionError("the wait for the old version gave up after one look")
+    state["locked"] = False
+    queue.pop()()
+    if calls != ["start"] or queue:
+        raise AssertionError("the install did not start once the file was released")
+    del calls[:]
+    state["locked"], clock[0] = True, 31.0
+    begin()
+    if calls != ["start"] or queue:
+        raise AssertionError("an old version that never exits would hold the update for ever")
 
 
 check("installer: steps, megabytes and their source, a failure that can be retried (v4.2.0)",
       _v420_installer_shows_what_it_does)
 check("installer: knows where the file comes from; plain words for its steps (v4.2.0)",
       _v420_installer_names_its_source)
+def _v420_installed_version_from_registry() -> None:
+    """"Already installed" shows the version Windows has on record — read
+    from the registry, with no PowerShell and no path pasted into a command."""
+    import inspect
+    import tempfile
+    import types
+    from pathlib import Path as _P
+    import installer.gui as ig
+    from installer import operations
+
+    src = inspect.getsource(ig)
+    if 'tool("powershell")' in src or "subprocess.run" in src:
+        raise AssertionError("the installer window starts a command to learn a version")
+
+    asked: list = []
+
+    class _Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    def fake_winreg(value):
+        def query(_key, name):
+            asked.append(name)
+            if isinstance(value, Exception):
+                raise value
+            return value, 1
+        return types.SimpleNamespace(HKEY_CURRENT_USER=1, QueryValueEx=query,
+                                     OpenKey=lambda _root, path: (asked.append(path) or _Key()))
+
+    real = sys.modules.get("winreg")
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            exe = _P(d) / "KaproTUN.exe"
+            exe.write_bytes(b"")
+            with _v4_patched(ig.paths, installed_exe_path=lambda: exe):
+                sys.modules["winreg"] = fake_winreg("4.1.5")
+                if ig._detect_installed_version() != "4.1.5" or \
+                        asked != [operations.UNINSTALL_KEY, "DisplayVersion"]:
+                    raise AssertionError(f"the installed version was not read from the registry: {asked}")
+                sys.modules["winreg"] = fake_winreg("v4.1.6 ")
+                if ig._detect_installed_version() != "4.1.6":
+                    raise AssertionError("a version written with a 'v' is shown as 'vv…'")
+                sys.modules["winreg"] = fake_winreg(FileNotFoundError("no such key"))
+                if ig._detect_installed_version() is not None:
+                    raise AssertionError("a missing registry entry is not 'unknown'")
+            del asked[:]
+            with _v4_patched(ig.paths, installed_exe_path=lambda: _P(d) / "absent.exe"):
+                sys.modules["winreg"] = fake_winreg("4.1.5")
+                if ig._detect_installed_version() is not None or asked:
+                    raise AssertionError("a version is reported for a program that is not installed")
+    finally:
+        if real is None:
+            sys.modules.pop("winreg", None)
+        else:
+            sys.modules["winreg"] = real
+
+
 def _v420_installer_checks_itself() -> None:
     """The packaged installer can draw all its screens on request — and that
     request installs nothing: no worker thread is ever created."""
@@ -12807,6 +12922,8 @@ check("suite: start-up clean-up and the event loop cannot reach a live session (
       _v420_suite_cannot_reach_the_live_session)
 check("build: the installer draws every screen on request and installs nothing (v4.2.0)",
       _v420_installer_checks_itself)
+check("installer: the installed version comes from the registry, not from PowerShell (v4.2.0)",
+      _v420_installed_version_from_registry)
 
 
 # ---------------------------------------------------------------------------
