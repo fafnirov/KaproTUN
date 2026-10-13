@@ -162,8 +162,9 @@ def _check_splash(folder: Path):
     saved = shot.save(str(folder / "splash.png"))
     # A splash that drew has the mark, text and the bar on it; a blank one is
     # a single colour.
-    small = shot.toImage().scaled(48, 48)
-    drawn = len({small.pixel(x, y) for x in range(48) for y in range(48)}) >= 8
+    from PySide6.QtCore import Qt
+    small = shot.toImage().scaled(96, 96, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    drawn = len({small.pixel(x, y) for x in range(96) for y in range(96)}) >= 8
     splash.show_error("RuntimeError: self-test")
     _pump(app, 0.15)
     said = splash.failed() and splash.error.isVisible()

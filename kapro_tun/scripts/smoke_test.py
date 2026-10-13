@@ -12629,8 +12629,10 @@ def _v420_installer_shows_what_it_does() -> None:
             raise AssertionError("after removal the window offers to start the program, or hides what is left")
         # Windows schedules "delete at next boot" only for an administrator:
         # when it did not, the screen must not promise it.
-        told = ig.DonePage(success=True, removed=True, leftover=True).findChild(ig.Facts).texts()
-        kept = ig.DonePage(success=True, removed=True, leftover=False).findChild(ig.Facts).texts()
+        left_page = ig.DonePage(success=True, removed=True, leftover=True)      # held: a page
+        gone_page = ig.DonePage(success=True, removed=True, leftover=False)     # dies with its last name
+        told = left_page.findChild(ig.Facts).texts()
+        kept = gone_page.findChild(ig.Facts).texts()
         if not any("Остался файл удаления" in t for t in told) or any("после перезагрузки" in t for t in told) \
                 or not any("после перезагрузки" in t for t in kept):
             raise AssertionError(f"the removed screen says the wrong thing about the uninstaller: {told}")

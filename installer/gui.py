@@ -1227,8 +1227,8 @@ def run_selftest(folder: str) -> int:
         widget.show()
         _settle(app)
         image = widget.grab().toImage()
-        small = image.scaled(48, 48)
-        colours = {small.pixel(x, y) for x in range(48) for y in range(48)}
+        small = image.scaled(96, 96, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        colours = {small.pixel(x, y) for x in range(96) for y in range(96)}
         saved = image.save(str(out / f"{name}.png"))
         # A screen that drew has text, lines and an accent on it; a blank
         # one is a single colour.
