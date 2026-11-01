@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMenu, QSystemTrayIcon
+from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QWidget
 
 from ..core.i18n import tr
 from ..core.parser import ProxyConfig
@@ -41,7 +41,7 @@ class TrayManager(QObject):
         self.tray.setToolTip(tr("tray.tooltip_idle"))
         self.tray.activated.connect(self._on_tray_activated)
 
-        self.menu = QMenu()
+        self.menu = QMenu(parent if isinstance(parent, QWidget) else None)
         self._build_menu_skeleton()
         self.tray.setContextMenu(self.menu)
 
@@ -52,6 +52,9 @@ class TrayManager(QObject):
             self.tray.show()
 
     def hide(self) -> None:
+        # Hiding the tray icon does not dismiss its independent popup windows.
+        self.configs_menu.hide()
+        self.menu.hide()
         self.tray.hide()
 
     def is_available(self) -> bool:

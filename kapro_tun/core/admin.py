@@ -57,16 +57,45 @@ def relaunch_as_admin(argv: Sequence[str] = None) -> int:
 # ==========================================================================
 
 def _win_relaunch(argv: list[str]) -> int:
-    params = " ".join(f'"{a}"' for a in argv)
-    rc = ctypes.windll.shell32.ShellExecuteW(
-        None,           # parent hwnd
-        "runas",        # verb: trigger UAC
-        sys.executable, # exe to run (python.exe in dev, our exe in frozen)
-        params,         # args (the script + its args, quoted)
-        None,           # working dir
-        1,              # SW_SHOWNORMAL
+    import subprocess
+
+    # A frozen executable already IS argv[0]; passing it again makes it an
+    # application argument. In development Python still needs the script.
+    args = argv[1:] if getattr(sys, "frozen", False) else argv
+    executable = sys.executable
+    if not getattr(sys, "frozen", False):
+        # Elevating python.exe creates a console before our GUI can open.
+        windowless = os.path.join(os.path.dirname(executable), "pythonw.exe")
+        if os.path.isfile(windowless):
+            executable = windowless
+    shell_execute = ctypes.windll.shell32.ShellExecuteW
+    shell_execute.restype = ctypes.c_ssize_t
+    rc = shell_execute(
+        None, "runas", executable, subprocess.list2cmdline(args), None, 1,
     )
     return int(rc)
+
+
+def require_windows_admin() -> int | None:
+    """Before normal startup: None = continue, otherwise exit with this code.
+
+    A declined UAC prompt must never leave an unprivileged client running.
+    Keep this before the singleton guard and all startup network cleanup.
+    """
+    if sys.platform != "win32" or is_admin():
+        return None
+    try:
+        if relaunch_as_admin() > 32:
+            return 0
+    except OSError:
+        pass
+    from .i18n import tr
+    ctypes.windll.user32.MessageBoxW(
+        None,
+        tr("err.admin_required_win"),
+        "KaproTUN", 0x10,
+    )
+    return 1
 
 
 # ==========================================================================

@@ -49,9 +49,11 @@ def _list_managed_rule_names() -> list[str]:
           "| ForEach-Object { $_.DisplayName }")
     try:
         proc = subprocess.run(
-            [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive", "-Command", ps],
+            [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive",
+             "-WindowStyle", "Hidden", "-Command", ps],
             capture_output=True, text=True, timeout=20,
             encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,
+            startupinfo=win_tools.hidden_startupinfo(),
             env=win_tools.powershell_env(),
         )
     except (OSError, subprocess.SubprocessError):
@@ -81,6 +83,7 @@ def sweep() -> list[str]:
                 [win_tools.tool("netsh"), "advfirewall", "firewall", "delete", "rule",
                  "name={}".format(name)],
                 capture_output=True, timeout=10, creationflags=_NO_WINDOW,
+                startupinfo=win_tools.hidden_startupinfo(),
             )
             if proc.returncode == 0:
                 removed.append(name)

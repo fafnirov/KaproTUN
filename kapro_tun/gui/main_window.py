@@ -2295,6 +2295,9 @@ class MainWindow(QMainWindow):
         if getattr(self, "_really_quitting", False):
             return
         self._really_quitting = True
+        # Dismiss the popup before synchronous worker/network shutdown can
+        # block the event loop and leave the last menu frame on screen.
+        self.tray.hide()
         try:
             self._dns_watchdog.stop()
         except Exception:
@@ -2310,7 +2313,6 @@ class MainWindow(QMainWindow):
             # Not connected, but still blocking: never leave the machine
             # without internet after the app is gone.
             self.manager.release_killswitch()
-        self.tray.hide()
         from PySide6.QtWidgets import QApplication
         QApplication.quit()
 

@@ -86,7 +86,7 @@ def _resolve_with_hard_timeout(host: str, timeout: float = 2.0) -> None:
             subprocess.run(
                 [win_tools.tool("nslookup"), host],
                 capture_output=True, timeout=timeout,
-                creationflags=_NO_WINDOW,
+                creationflags=_NO_WINDOW, startupinfo=win_tools.hidden_startupinfo(),
             )
         except (subprocess.TimeoutExpired, OSError):
             pass

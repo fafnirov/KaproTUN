@@ -261,7 +261,7 @@ def _netsh(*args: str) -> Optional[bool]:
         proc = subprocess.run(
             [win_tools.tool("netsh"), "advfirewall", "firewall", *args],
             capture_output=True, timeout=10,
-            creationflags=_NO_WINDOW,
+            creationflags=_NO_WINDOW, startupinfo=win_tools.hidden_startupinfo(),
         )
     except (OSError, subprocess.SubprocessError):
         return None

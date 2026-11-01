@@ -823,7 +823,9 @@ class SettingRow(QFrame):
         text.setSpacing(tokens.SP_HALF)
         self.title = ElidedLabel(title)
         self.title.setObjectName("ktSettingTitle")
-        self.hint = ElidedLabel(hint)
+        # setVisible(True) on a parentless label shows a separate native
+        # window before the layout adopts it (one flash per settings row).
+        self.hint = ElidedLabel(hint, self)
         self.hint.setObjectName("ktSettingHint")
         self.hint.setVisible(bool(hint))
         text.addStretch(1)

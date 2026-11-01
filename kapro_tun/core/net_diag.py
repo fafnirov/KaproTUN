@@ -76,9 +76,11 @@ def _ps(cmd: str, timeout: float = 8.0) -> str:
     import subprocess
     try:
         r = subprocess.run(
-            [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive", "-Command", cmd],
+            [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive",
+             "-WindowStyle", "Hidden", "-Command", cmd],
             capture_output=True, text=True, timeout=timeout,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            startupinfo=win_tools.hidden_startupinfo(),
             env=win_tools.powershell_env(),
         )
         return r.stdout or ""

@@ -21,6 +21,34 @@ import sys
 _is_windows = sys.platform == "win32"
 _is_macos   = sys.platform == "darwin"
 
+# Read the version without importing the application during packaging.
+import ast
+with open('kapro_tun/__init__.py', encoding='utf-8') as _source:
+    _version_tree = ast.parse(_source.read())
+_version = next(ast.literal_eval(node.value) for node in _version_tree.body
+                if isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == '__version__'
+                        for t in node.targets))
+_version_resource = None
+if _is_windows:
+    from PyInstaller.utils.win32.versioninfo import (
+        FixedFileInfo, StringFileInfo, StringStruct, StringTable,
+        VarFileInfo, VarStruct, VSVersionInfo,
+    )
+    _version_tuple = tuple(map(int, _version.split('.'))) + (0,)
+    _version_resource = VSVersionInfo(
+        ffi=FixedFileInfo(filevers=_version_tuple, prodvers=_version_tuple,
+                          mask=0x3f, flags=0, OS=0x40004, fileType=1,
+                          subtype=0, date=(0, 0)),
+        kids=[StringFileInfo([StringTable('040904B0', [
+            StringStruct('FileDescription', 'KaproTUN'),
+            StringStruct('FileVersion', _version),
+            StringStruct('ProductName', 'KaproTUN'),
+            StringStruct('ProductVersion', _version),
+            StringStruct('OriginalFilename', 'KaproTUN.exe'),
+        ])]), VarFileInfo([VarStruct('Translation', [1033, 1200])])],
+    )
+
 # Pick the right brand icon for each OS. PyInstaller is strict on macOS
 # BUNDLE() — it rejects .png and demands .icns. CI generates icon.icns
 # from icon.png via sips+iconutil before invoking PyInstaller; if it's
@@ -115,6 +143,13 @@ a = Analysis(
     noarchive=False,
 )
 
+# Qt on Windows imports the ICU API provided by Windows itself. A foreign
+# icuuc.dll on the build machine's PATH (e.g. Poppler/Conda) can be collected
+# instead, then shadow System32 at runtime and break the QtCore import.
+if _is_windows:
+    a.binaries = [entry for entry in a.binaries
+                  if os.path.basename(entry[0]).lower() != 'icuuc.dll']
+
 pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
@@ -138,6 +173,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=_icon,
+    version=_version_resource,
 )
 
 # macOS — wrap the executable in a proper .app bundle so users can

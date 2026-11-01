@@ -122,7 +122,7 @@ def _run(args: list[str], timeout: float = 10.0, env=None) -> tuple[int, str, st
     proc = subprocess.run(
         args, capture_output=True, text=True, timeout=timeout,
         encoding="utf-8", errors="replace",
-        creationflags=CREATE_NO_WINDOW, env=env,
+        creationflags=CREATE_NO_WINDOW, startupinfo=win_tools.hidden_startupinfo(), env=env,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -140,6 +140,7 @@ def _ps(script: str, timeout: float = 10.0) -> tuple[int, str, str]:
     script = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;\n" + script
     return _run(
         [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive",
+             "-WindowStyle", "Hidden",
          "-ExecutionPolicy", "Bypass", "-Command", script],
         timeout=timeout, env=win_tools.powershell_env(),
     )

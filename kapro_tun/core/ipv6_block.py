@@ -107,6 +107,7 @@ def install() -> bool:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=10,
             encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,
+            startupinfo=win_tools.hidden_startupinfo(),
         )
     except (OSError, subprocess.SubprocessError) as e:
         _last_install_output = f"netsh не запустился: {e}"
@@ -143,7 +144,8 @@ def diagnostics() -> str:
         try:
             p = subprocess.run(args, capture_output=True, text=True, timeout=10,
                                encoding="utf-8", errors="replace",
-                               creationflags=_NO_WINDOW)
+                               creationflags=_NO_WINDOW,
+                               startupinfo=win_tools.hidden_startupinfo())
             parts.append(f"=== {label} ===\n{(p.stdout or '').strip() or '(пусто)'}")
         except Exception as e:  # noqa: BLE001 — diagnostics must never raise
             parts.append(f"=== {label} ===\n(ошибка: {e})")
@@ -173,7 +175,7 @@ def remove() -> None:
             [win_tools.tool("netsh"), "advfirewall", "firewall", "delete", "rule",
              f"name={_RULE_BLOCK_GLOBAL}"],
             capture_output=True, timeout=10,
-            creationflags=_NO_WINDOW,
+            creationflags=_NO_WINDOW, startupinfo=win_tools.hidden_startupinfo(),
         )
     except (OSError, subprocess.SubprocessError):
         pass
@@ -194,7 +196,7 @@ def is_active() -> bool:
             [win_tools.tool("netsh"), "advfirewall", "firewall", "show", "rule",
              f"name={_RULE_BLOCK_GLOBAL}"],
             capture_output=True, timeout=10,
-            creationflags=_NO_WINDOW,
+            creationflags=_NO_WINDOW, startupinfo=win_tools.hidden_startupinfo(),
         )
     except (OSError, subprocess.SubprocessError):
         return False

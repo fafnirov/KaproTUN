@@ -70,3 +70,14 @@ def powershell_env():
         return None
     modules = "\\".join((_system_dir().rstrip("\\"), "WindowsPowerShell", "v1.0", "Modules"))
     return dict(os.environ, PSModulePath=modules)
+
+
+def hidden_startupinfo():
+    """Hide Windows helper windows; return None on other platforms."""
+    if sys.platform != "win32":
+        return None
+    import subprocess
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = subprocess.SW_HIDE
+    return info

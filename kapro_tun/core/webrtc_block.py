@@ -121,7 +121,7 @@ def install() -> bool:
         ]
         proc = subprocess.run(
             cmd, capture_output=True, timeout=10,
-            creationflags=_NO_WINDOW,
+            creationflags=_NO_WINDOW, startupinfo=win_tools.hidden_startupinfo(),
         )
     except (OSError, subprocess.SubprocessError):
         return False
@@ -143,7 +143,7 @@ def remove() -> None:
             [win_tools.tool("netsh"), "advfirewall", "firewall", "delete", "rule",
              f"name={_RULE_BLOCK_STUN}"],
             capture_output=True, timeout=10,
-            creationflags=_NO_WINDOW,
+            creationflags=_NO_WINDOW, startupinfo=win_tools.hidden_startupinfo(),
         )
     except (OSError, subprocess.SubprocessError):
         pass
@@ -164,7 +164,7 @@ def is_active() -> bool:
             [win_tools.tool("netsh"), "advfirewall", "firewall", "show", "rule",
              f"name={_RULE_BLOCK_STUN}"],
             capture_output=True, timeout=10,
-            creationflags=_NO_WINDOW,
+            creationflags=_NO_WINDOW, startupinfo=win_tools.hidden_startupinfo(),
         )
     except (OSError, subprocess.SubprocessError):
         return False

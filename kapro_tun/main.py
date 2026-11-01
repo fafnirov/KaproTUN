@@ -60,10 +60,12 @@ def _kill_orphan_helpers() -> None:
     # the process (the common case), so it's safe belt-and-suspenders.
     try:
         subprocess.run(
-            [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive", "-Command",
+            [win_tools.tool("powershell"), "-NoProfile", "-NonInteractive",
+             "-WindowStyle", "Hidden", "-Command",
              "Get-NetRoute -InterfaceAlias 'KaproTun' -ErrorAction SilentlyContinue"
              " | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue"],
             capture_output=True, timeout=10, creationflags=_NO_WINDOW,
+            startupinfo=win_tools.hidden_startupinfo(),
             env=win_tools.powershell_env(),
         )
     except (OSError, subprocess.SubprocessError):
@@ -456,8 +458,13 @@ def main() -> int:
         # run's business, not a check's.
         from . import selftest
         code = selftest.run(sys.argv[1:])
-        sys.stdout.flush()
+        if sys.stdout is not None:
+            sys.stdout.flush()
         os._exit(code)
+    from .core.admin import require_windows_admin
+    exit_code = require_windows_admin()
+    if exit_code is not None:
+        return exit_code
     try:
         return _run_app()
     except Exception as exc:

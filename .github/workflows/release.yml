@@ -45,7 +45,9 @@ jobs:
         # -u and faulthandler: when the suite dies in native code (a Qt
         # abort, a segfault) the log otherwise stops a screenful early and
         # names no test.
-        run: python -u -X faulthandler -m kapro_tun.scripts.smoke_test
+        run: |
+          python -u -X faulthandler -m kapro_tun.scripts.smoke_test
+          python -m unittest kapro_tun.scripts.test_windows_startup kapro_tun.scripts.test_window_lifecycle -q
 
   build:
     name: Build (${{ matrix.os }})

@@ -114,8 +114,8 @@ def _pump(app, seconds: float) -> None:
 
 def _check_window(folder: Path):
     """Create the real main window and draw it once."""
-    from PySide6.QtCore import QTimer
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QEvent, QObject, QTimer
+    from PySide6.QtWidgets import QApplication, QWidget
     from .core import i18n, storage
     from .gui.main_window import MainWindow
     from .gui.styles import get_qss
@@ -123,7 +123,24 @@ def _check_window(folder: Path):
     i18n.init_from_settings(storage.load_settings().get("language"))
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setStyleSheet(get_qss("dark"))
-    window = MainWindow()
+    class StartupWindows(QObject):
+        def __init__(self):
+            super().__init__()
+            self.unexpected = []
+
+        def eventFilter(self, obj, event):
+            if event.type() == QEvent.Show and isinstance(obj, QWidget) and obj.isWindow():
+                self.unexpected.append(f"{type(obj).__name__}:{obj.objectName()}")
+            return False
+
+    # A final screenshot misses windows that flashed and disappeared while
+    # constructing the UI. Watch Show events before the main window is ready.
+    watcher = StartupWindows()
+    app.installEventFilter(watcher)
+    try:
+        window = MainWindow()
+    finally:
+        app.removeEventFilter(watcher)
     window.show()
     _pump(app, 1.5)
     for attr in vars(window).values():
@@ -135,10 +152,11 @@ def _check_window(folder: Path):
     saved = shot.save(str(target))
     size = f"{window.width()}x{window.height()}"
     home_ok = window.home_page.isVisible()
-    return (OK if saved and home_ok and not shot.isNull() else FAIL,
+    return (OK if saved and home_ok and not shot.isNull() and not watcher.unexpected else FAIL,
             f"main window {size} on platform '{app.platformName()}', screenshot "
-            f"{'saved' if saved else 'NOT saved'}",
-            {"size": size, "qpa": app.platformName(), "screenshot": str(target) if saved else ""})
+            f"{'saved' if saved else 'NOT saved'}; startup popups: {len(watcher.unexpected)}",
+            {"size": size, "qpa": app.platformName(), "screenshot": str(target) if saved else "",
+             "unexpected_startup_windows": watcher.unexpected})
 
 
 def _check_splash(folder: Path):

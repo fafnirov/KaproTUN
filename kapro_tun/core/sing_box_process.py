@@ -18,7 +18,7 @@ import time
 from collections import deque
 from typing import Callable, Optional
 
-from . import paths
+from . import paths, win_tools
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -209,7 +209,7 @@ class SingBoxProcess:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                creationflags=CREATE_NO_WINDOW,
+                creationflags=CREATE_NO_WINDOW, startupinfo=win_tools.hidden_startupinfo(),
                 cwd=str(cwd),
             )
         except BaseException:

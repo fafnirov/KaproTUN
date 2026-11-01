@@ -25,7 +25,7 @@ import subprocess
 import sys
 from typing import Any, Optional
 
-from . import geoip_ru, paths
+from . import geoip_ru, paths, win_tools
 
 # Linux runs sing-box with auto_route OFF (the kernel-7.0 netlink incompat breaks
 # it) and replicates routing via iproute2 — see core/linux_tun_route.py.
@@ -1002,6 +1002,7 @@ def check_config(config_path: str) -> tuple[bool, str]:
                  str(held_config.real_path) if held_config is not None else config_path],
                 capture_output=True, text=True, timeout=10,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                startupinfo=win_tools.hidden_startupinfo(),
                 cwd=str(paths.tun_dir()),
             )
         if result.returncode == 0:
