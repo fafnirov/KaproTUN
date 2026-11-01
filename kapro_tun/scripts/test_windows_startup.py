@@ -100,6 +100,11 @@ class WindowsStartupTests(unittest.TestCase):
                 self.assertEqual(main.main(), code)
                 run.assert_not_called()
 
+    def test_emulated_windows_without_windows_subprocess_api(self):
+        with patch.object(sys, 'platform', 'win32'), \
+                patch.object(subprocess, 'STARTUPINFO', None, create=True):
+            self.assertIsNone(win_tools.hidden_startupinfo())
+
     def test_windows_helpers_keep_both_window_controls(self):
         root = Path(__file__).resolve().parents[1]
         checked = 0

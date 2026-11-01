@@ -77,7 +77,10 @@ def hidden_startupinfo():
     if sys.platform != "win32":
         return None
     import subprocess
-    info = subprocess.STARTUPINFO()
+    info_type = getattr(subprocess, "STARTUPINFO", None)
+    if info_type is None:  # Tests can emulate win32 on a non-Windows host.
+        return None
+    info = info_type()
     info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     info.wShowWindow = subprocess.SW_HIDE
     return info
