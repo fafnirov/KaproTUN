@@ -1,5 +1,9 @@
 # Контрибьютинг в KaproTUN (desktop)
 
+<p align="center">
+  <img src="docs/mascot/kapatun-contribute.png" alt="Капатун встречает контрибьюторов с блокнотом и карандашом" width="130">
+</p>
+
 Спасибо за интерес! Это десктопный клиент: **Python 3.10+ / PySide6** поверх
 **sing-box** (нативный TUN), со split-routing: РФ-адреса и игры идут напрямую,
 остальное — через туннель.

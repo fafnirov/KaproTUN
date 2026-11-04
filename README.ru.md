@@ -29,6 +29,10 @@
 
 ### ⬇️ Скачать
 
+<p align="center">
+  <img src="docs/mascot/kapatun-download.png" alt="Капатун рядом с коробкой со стрелкой скачивания" width="130">
+</p>
+
 Последний стабильный релиз — выбери файл под свою ОС:
 
 | ОС | Файл | Примечание |
@@ -323,6 +327,10 @@ installer/                    # отдельная сборка PyInstaller дл
 - Linux: `~/.local/share/KaproTUN/`
 
 ## Как помочь проекту
+
+<p align="center">
+  <img src="docs/mascot/kapatun-contribute.png" alt="Капатун машет лапой и держит блокнот с карандашом" width="130">
+</p>
 
 PR приветствуются. Что сейчас полезнее всего:
 

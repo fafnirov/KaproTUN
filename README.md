@@ -28,6 +28,10 @@ Free and open-source forever — GPL v3, no paid tier, no telemetry.
 
 ### ⬇️ Download
 
+<p align="center">
+  <img src="docs/mascot/kapatun-download.png" alt="Kapatun next to a box with a download arrow" width="130">
+</p>
+
 Latest stable release — pick the file for your OS:
 
 | OS | File | Notes |
@@ -312,6 +316,10 @@ User data (saved configs, edited site list, settings, logs) lives in:
 - Linux: `~/.local/share/KaproTUN/`
 
 ## Contributing
+
+<p align="center">
+  <img src="docs/mascot/kapatun-contribute.png" alt="Kapatun waves with a notebook and pencil" width="130">
+</p>
 
 PRs welcome. The most useful directions right now:
 
