@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -85,7 +85,7 @@ class PingLabel(QWidget):
         super().__init__(parent)
         self._kind, self._text = "pending", ""
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.setFixedHeight(16)
+        self.setFixedHeight(QFontMetrics(self._font()).height())
 
     def set_ping(self, ms: object, protocol: str = "", known: bool = True) -> None:
         """`ms`: latency in ms, or None for unreachable. `known=False` means
@@ -117,9 +117,8 @@ class PingLabel(QWidget):
 
     def sizeHint(self):  # noqa: N802
         from PySide6.QtCore import QSize
-        from PySide6.QtGui import QFontMetrics
         width = tokens.DOT_SM + tokens.SP_1H + QFontMetrics(self._font()).horizontalAdvance(self._text)
-        return QSize(width + 1, 16)
+        return QSize(width + 1, QFontMetrics(self._font()).height())
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         c = tokens.colors()
@@ -146,10 +145,8 @@ class PingLabel(QWidget):
         p.end()
 
 
-class ServerCard(QFrame):
+class ServerCard(QPushButton):
     """The server in use, at the top of the home screen. Tap to change it."""
-
-    clicked = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -208,14 +205,11 @@ class ServerCard(QFrame):
             self.name.setText(strip_flag(cfg.name))
             self.meta.setText(server_meta(cfg))
             self.chevron.set_icon("chevron-down")
+        self.setAccessibleName(self.name.text())
+        self.setAccessibleDescription(self.meta.text())
         for w in (self, self.chip):
             w.style().unpolish(w)
             w.style().polish(w)
-
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
-            self.clicked.emit()
-        super().mouseReleaseEvent(event)
 
 
 class RingButton(CircleConnectButton):
@@ -285,6 +279,10 @@ class RingButton(CircleConnectButton):
         p.setPen(QPen(QColor(border), b))
         p.setBrush(QColor(fill))
         p.drawEllipse(rect)
+        if self.hasFocus():
+            p.setPen(QPen(QColor(tokens.colors().focus), 2))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(rect.adjusted(5, 5, -5, -5))
 
         icon = tokens.ICON_XL
         gap = tokens.SP_2H
@@ -294,7 +292,8 @@ class RingButton(CircleConnectButton):
         font.setLetterSpacing(QFont.AbsoluteSpacing, tokens.LS_CAPS)
         p.setFont(font)
         text_h = p.fontMetrics().height()
-        if self._size < tokens.RING_CAPTION_MIN:
+        if (self._size < tokens.RING_CAPTION_MIN
+                or p.fontMetrics().horizontalAdvance(self.text()) > self.width() - 2 * tokens.SP_2):
             # Too small for the caption to stay inside the circle: the glyph
             # alone (the status line under the ring says the rest).
             p.drawPixmap(int((self.width() - icon) / 2), int((self.height() - icon) / 2),
@@ -335,7 +334,7 @@ class StatusLine(QWidget):
         self.meta.setTextFormat(Qt.PlainText)
         row.addWidget(self.meta)
         row.addStretch(1)
-        self.setFixedHeight(22)
+        self.setMinimumHeight(22)
         self.set_state(cs.DISCONNECTED)
 
     def set_state(self, state: str, detail: str = "", label: str = "") -> None:
@@ -419,7 +418,7 @@ class Banner(QFrame):
         self.action = QPushButton()
         self.action.setObjectName("ktBannerAction")
         self.action.setCursor(Qt.PointingHandCursor)
-        self.action.setFocusPolicy(Qt.NoFocus)
+        self.action.setFocusPolicy(Qt.TabFocus)
         self.action.clicked.connect(self.action_clicked)
         row.addWidget(self.action, 0, Qt.AlignVCenter)
         self.set_content(kind, "info", "", "", "")
@@ -471,13 +470,13 @@ class _Cell(QFrame):
         self.value.style().polish(self.value)
 
 
-class _LinkRow(QFrame):
-    clicked = Signal()
+class _LinkRow(QPushButton):
 
     def __init__(self, icon: str, text: str, last: bool = False,
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setObjectName("ktCardLink")
+        self.setAccessibleName(text)
         self.setProperty("last", "true" if last else "false")
         self.setAttribute(Qt.WA_Hover, True)
         self.setCursor(Qt.PointingHandCursor)
@@ -493,11 +492,6 @@ class _LinkRow(QFrame):
         self.value.setObjectName("ktCardLinkValue")
         row.addWidget(self.value)
         row.addWidget(IconLabel("chevron-right", tokens.ICON_SM, "text_tertiary"))
-
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
-            self.clicked.emit()
-        super().mouseReleaseEvent(event)
 
 
 class InfoCard(QFrame):

@@ -89,7 +89,7 @@ LIGHT = Colors(
     danger_line="#fca5a5", on_danger="#ffffff",
     success="#15803d", success_text="#15803d", success_soft="#dcfce7",
     success_line="#86efac", warning="#b45309",
-    switch_off="#d6d3d1", switch_off_hover="#a8a29e", switch_knob="#ffffff",
+    switch_off="#78716c", switch_off_hover="#6f6862", switch_knob="#ffffff",
     seg_selected="#ffffff", scrim=(28, 25, 23, 82), shadow=(28, 25, 23, 41),
     chart_up="#a8a29e",
 )
@@ -133,6 +133,23 @@ TOAST_BOTTOM = 80
 # --- motion ----------------------------------------------------------------
 DUR_FAST, DUR_BASE, DUR_PULSE = 120, 200, 1400
 GLOW_CONNECTED, GLOW_LOW = 36.0, 12.0
+
+# Scale text and the fixed-height controls together before building widgets.
+_TEXT_METRICS = (
+    "FS_XS", "FS_SM", "FS_MD", "FS_LG", "FS_XL", "FS_METRIC",
+    "CONTROL_H_SM", "CONTROL_H", "CONTROL_H_LG", "ROW_H_SM", "ROW_H",
+    "SERVER_H", "BADGE_H", "NAV_H",
+)
+_BASE_METRICS = {name: globals()[name] for name in _TEXT_METRICS}
+text_scale = 1.0
+
+
+def set_text_scale(scale: float) -> None:
+    global text_scale
+    text_scale = max(1.0, scale)
+    for name, size in _BASE_METRICS.items():
+        globals()[name] = round(size * text_scale)
+
 
 _theme = "dark"
 

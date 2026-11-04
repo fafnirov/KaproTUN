@@ -580,13 +580,13 @@ QPushButton#titleBarCloseBtn:hover {{ background-color: {c.danger}; }}
 QFrame#ktNav {{ background-color: {c.bg}; border: none; border-top: 1px solid {c.line}; }}
 
 /* ===== v2: server card ===== */
-QFrame#ktServer {{
+QPushButton#ktServer {{
     background-color: {c.surface};
     border: 1px solid {c.line};
     border-radius: {t.R_LG}px;
 }}
-QFrame#ktServer:hover {{ background-color: {c.surface_2}; border-color: {c.line_strong}; }}
-QFrame#ktServer[empty="true"] {{ background-color: transparent; border: 1px dashed {c.line_strong}; }}
+QPushButton#ktServer:hover {{ background-color: {c.surface_2}; border-color: {c.line_strong}; }}
+QPushButton#ktServer[empty="true"] {{ background-color: transparent; border: 1px dashed {c.line_strong}; }}
 QLabel#ktFlag {{
     background-color: {c.surface_2}; border-radius: {t.R_MD}px; color: {c.text};
     font-size: {t.FS_MD}px; font-weight: 600; letter-spacing: 0.5px;
@@ -670,13 +670,14 @@ QLabel#ktCellLabel {{ background: transparent; color: {c.text_tertiary}; font-si
 QLabel#ktCellValue {{ background: transparent; color: {c.text}; font-size: {t.FS_MD}px; font-weight: 600; }}
 QLabel#ktCellValue[muted="true"] {{ color: {c.text_tertiary}; font-weight: 400; }}
 QLabel#ktCellValue[mono="true"] {{ font-family: {t.FONT_MONO}; }}
-QFrame#ktCardLink {{
+QPushButton#ktCardLink {{
     background-color: {c.surface_2}; border: none; border-top: 1px solid {c.line};
 }}
-QFrame#ktCardLink[last="true"] {{
+QPushButton#ktCardLink[last="true"] {{
     border-bottom-left-radius: {t.R_LG - 1}px; border-bottom-right-radius: {t.R_LG - 1}px;
 }}
-QFrame#ktCardLink:hover {{ background-color: {c.surface_hover}; }}
+QPushButton#ktCardLink:hover {{ background-color: {c.surface_hover}; }}
+QPushButton#ktServer:focus, QPushButton#ktCardLink:focus {{ border: 1px solid {c.focus}; }}
 QLabel#ktCardLinkText {{ background: transparent; color: {c.text_secondary}; font-size: {t.FS_SM}px; }}
 QLabel#ktCardLinkValue {{ background: transparent; color: {c.text}; font-size: {t.FS_SM}px; font-weight: 600; }}
 
@@ -795,22 +796,22 @@ QLabel#ktBannerRaw {{
 QLineEdit#ktInput {{
     min-height: {t.CONTROL_H - 2}px; max-height: {t.CONTROL_H - 2}px;
     padding: 0 {t.SP_3}px; background-color: {c.input_bg}; color: {c.text};
-    border: 1px solid {c.line_strong}; border-radius: {t.R_MD}px;
+    border: 1px solid {c.text_tertiary}; border-radius: {t.R_MD}px;
     font-size: {t.FS_MD}px; selection-background-color: {c.accent}; selection-color: {c.on_accent};
     placeholder-text-color: {c.text_tertiary};
 }}
-QLineEdit#ktInput:hover {{ border-color: {c.line_hover}; }}
-QLineEdit#ktInput:focus {{ border-color: {c.accent}; }}
+QLineEdit#ktInput:hover {{ border-color: {c.text_secondary}; }}
+QLineEdit#ktInput:focus {{ border-color: {c.focus}; }}
 QLineEdit#ktInput[error="true"] {{ border-color: {c.danger}; }}
 QLineEdit#ktInput:disabled {{ background-color: {c.surface}; border-color: {c.line}; color: {c.text_disabled}; }}
 QPlainTextEdit#ktArea {{
     background-color: {c.input_bg}; color: {c.text};
-    border: 1px solid {c.line_strong}; border-radius: {t.R_MD}px;
+    border: 1px solid {c.text_tertiary}; border-radius: {t.R_MD}px;
     padding: {t.SP_2}px {t.SP_2H}px; font-family: {t.FONT_MONO}; font-size: {t.FS_SM}px;
     selection-background-color: {c.accent}; selection-color: {c.on_accent};
 }}
-QPlainTextEdit#ktArea:hover {{ border-color: {c.line_hover}; }}
-QPlainTextEdit#ktArea:focus {{ border-color: {c.accent}; }}
+QPlainTextEdit#ktArea:hover {{ border-color: {c.text_secondary}; }}
+QPlainTextEdit#ktArea:focus {{ border-color: {c.focus}; }}
 QPushButton#ktSelect {{
     min-height: {t.CONTROL_H - 2}px; max-height: {t.CONTROL_H - 2}px; padding: 0;
     background-color: {c.input_bg}; border: 1px solid {c.line_strong}; border-radius: {t.R_MD}px;
@@ -858,11 +859,10 @@ QLabel#ktBadge[kind="danger"] {{ background-color: {c.danger_soft}; color: {c.da
 QLabel#ktBadge[kind="success"] {{ background-color: {c.success_soft}; color: {c.success_text}; }}
 
 /* ===== v2: server list ===== */
-QScrollArea#ktListScroll {{ background-color: {c.surface}; border: none; }}
-QWidget#ktListBody {{ background-color: {c.surface}; }}
+QListWidget#ktListScroll {{ background-color: {c.surface}; border: none; }}
 QFrame#ktSrow {{ background-color: transparent; border: none; border-bottom: 1px solid {c.line}; }}
 QFrame#ktSrow[last="true"] {{ border-bottom: 1px solid transparent; }}
-QFrame#ktSrow:hover {{ background-color: {c.surface_2}; }}
+QFrame#ktSrow[hovered="true"] {{ background-color: {c.surface_2}; }}
 QFrame#ktSrow[selected="true"] {{ background-color: {c.accent_soft}; }}
 QLabel#ktFlag[sm="true"] {{ font-size: {t.FS_SM}px; }}
 QLabel#ktSrowName {{ background: transparent; color: {c.text}; font-size: {t.FS_MD}px; font-weight: 600; }}
@@ -1043,7 +1043,10 @@ def get_qss(theme: str = "auto") -> str:
     """
     # Whoever asks for the sheet is about to apply it: record the theme so the
     # custom-painted v2 widgets (ring, icons, dots) draw in the same one.
-    return LIGHT_QSS if _tokens.set_theme(theme) == "light" else DARK_QSS
+    light = _tokens.set_theme(theme) == "light"
+    if _tokens.text_scale != 1.0:
+        return _build_qss(LIGHT_PALETTE if light else DARK_PALETTE) + _build_qss_v2(_tokens.colors())
+    return LIGHT_QSS if light else DARK_QSS
 
 
 def get_active_palette(theme: str = "auto") -> Palette:

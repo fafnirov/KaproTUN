@@ -64,6 +64,8 @@ class Button(QPushButton):
         self.setFocusPolicy(Qt.TabFocus)
         if tooltip:
             self.setToolTip(tooltip)
+            if not text:
+                self.setAccessibleName(tooltip)
         self._render_icon()
 
     def set_icon(self, name: str) -> None:
@@ -868,7 +870,10 @@ class SettingRow(QFrame):
         return widget
 
     def add_switch(self, checked: bool) -> Switch:
-        return self.add_control(Switch(checked))
+        switch = Switch(checked)
+        switch.setAccessibleName(self.title.full_text())
+        switch.setAccessibleDescription(self.hint.full_text())
+        return self.add_control(switch)
 
     def add_button(self, text: str, variant: str = "secondary") -> Button:
         return self.add_control(Button(text, variant, size="sm"))
@@ -884,6 +889,7 @@ class SettingRow(QFrame):
         shows while folded (an "info" mark for rows that are only a note)."""
         self._more_icon = icon
         self.more = Button("", "ghost", icon=icon, size="sm")
+        self.more.setAccessibleName(self.title.full_text())
         self.more.clicked.connect(self._toggle_expanded)
         return self.add_control(self.more)
 

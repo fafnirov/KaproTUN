@@ -10,15 +10,18 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QMouseEvent, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QRectF, QSize, QSignalBlocker, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QScrollArea,
+    QListWidget,
+    QListWidgetItem,
+    QStyle,
+    QStyledItemDelegate,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -112,9 +115,6 @@ class _NameLabel(ElidedLabel):
 class ServerRow(QFrame):
     """One server: country chip, name, protocol and address, latency."""
 
-    clicked = Signal(object)      # the row
-    activated = Signal(object)    # double click
-
     def __init__(self, cfg: ProxyConfig, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.cfg = cfg
@@ -127,7 +127,7 @@ class ServerRow(QFrame):
         row.setContentsMargins(tokens.SP_3, 0, tokens.SP_3, 0)
         row.setSpacing(tokens.SP_3)
 
-        self.chip = QLabel(chip_code(cfg))
+        self.chip = QLabel()
         self.chip.setObjectName("ktFlag")
         self.chip.setProperty("sm", "true")
         self.chip.setAlignment(Qt.AlignCenter)
@@ -143,13 +143,12 @@ class ServerRow(QFrame):
         top.setSpacing(tokens.SP_2)
         self.name = _NameLabel()
         self.name.setObjectName("ktSrowName")
-        self.name.setText(one_line(strip_flag(cfg.name), 80))
         top.addWidget(self.name)
         self.badge = kit.badge(tr("srv.active"), "accent", dot=True)
         self.badge.setVisible(False)
         top.addWidget(self.badge)
         top.addStretch(1)
-        self.meta = ElidedLabel(server_meta(cfg))
+        self.meta = ElidedLabel()
         self.meta.setObjectName("ktSrowMeta")
         body.addStretch(1)
         body.addLayout(top)
@@ -162,7 +161,14 @@ class ServerRow(QFrame):
         self.check = IconLabel("check", tokens.ICON_MD, "accent_text")
         self.check.setVisible(False)
         row.addWidget(self.check)
+        self.set_config(cfg)
         self.set_ping(_PENDING)
+
+    def set_config(self, cfg: ProxyConfig) -> None:
+        self.cfg = cfg
+        self.chip.setText(chip_code(cfg))
+        self.name.setText(one_line(strip_flag(cfg.name), 80))
+        self.meta.setText(server_meta(cfg))
 
     def _restyle(self) -> None:
         self.style().unpolish(self)
@@ -194,15 +200,6 @@ class ServerRow(QFrame):
         else:
             self.ping.set_ping(value, self.cfg.protocol)
 
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()):
-            self.clicked.emit(self)
-        super().mouseReleaseEvent(event)
-
-    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if event.button() == Qt.LeftButton:
-            self.activated.emit(self)
-
 
 class _ListFrame(QWidget):
     """Drawn over the list: the rounded border, and the page colour outside
@@ -228,55 +225,79 @@ class _ListFrame(QWidget):
         p.end()
 
 
+class _ServerDelegate(QStyledItemDelegate):
+    """Reuse the existing row renderer for the items Qt actually paints."""
+
+    def __init__(self, view: QListWidget):
+        super().__init__(view)
+        self.row = ServerRow(ProxyConfig("", "", ""), view)
+        self.row.hide()
+
+    def paint(self, painter, option, index) -> None:
+        row = self.row
+        cfg = index.data(Qt.UserRole)
+        ping, active = index.data(Qt.UserRole + 1)
+        row.set_config(cfg)
+        row.set_ping(ping)
+        row.set_active(active)
+        row.set_selected(bool(option.state & QStyle.State_Selected))
+        row.set_last(index.row() == index.model().rowCount() - 1)
+        hovered = "true" if option.state & QStyle.State_MouseOver else "false"
+        if row.property("hovered") != hovered:
+            row.setProperty("hovered", hovered)
+            row._restyle()
+        row.resize(option.rect.size())
+        row.layout().activate()
+        painter.drawPixmap(option.rect.topLeft(), row.grab())
+        if option.state & QStyle.State_HasFocus:
+            painter.save()
+            painter.setPen(QColor(tokens.colors().focus))
+            painter.drawRect(option.rect.adjusted(2, 1, -3, -2))
+            painter.restore()
+
+
+class _ServerView(QListWidget):
+    connect_current = Signal()
+    delete_current = Signal()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.connect_current.emit()
+        elif event.key() == Qt.Key_Delete:
+            self.delete_current.emit()
+        else:
+            super().keyPressEvent(event)
+
+
 class ServerList(QFrame):
-    """The card with the rows. As tall as its rows while they fit, scrolling
-    once they do not."""
+    """A native list with a rounded frame and a lightweight item per server."""
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(1, 1, 1, 1)
-        self.scroll = QScrollArea()
-        self.scroll.setObjectName("ktListScroll")
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        body = QWidget()
-        body.setObjectName("ktListBody")
-        self._col = QVBoxLayout(body)
-        self._col.setContentsMargins(0, 0, 0, 0)
-        self._col.setSpacing(0)
+        self.view = _ServerView()
+        self.view.setObjectName("ktListScroll")
+        self.view.setAccessibleName(tr("srv.title"))
+        self.view.setMinimumHeight(tokens.ROW_H)
+        self.view.setUniformItemSizes(True)
+        self.view.setMouseTracking(True)
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.view.setItemDelegate(_ServerDelegate(self.view))
+        outer.addWidget(self.view)
         self.not_found = QLabel(tr("srv.not_found"))
         self.not_found.setObjectName("ktListEmpty")
         self.not_found.setAlignment(Qt.AlignCenter)
         self.not_found.setFixedHeight(tokens.ROW_H)
-        self.not_found.setVisible(False)
-        self._col.addWidget(self.not_found)
-        self._col.addStretch(1)
-        self.scroll.setWidget(body)
-        outer.addWidget(self.scroll)
+        self.not_found.hide()
+        outer.addWidget(self.not_found)
         self._frame = _ListFrame(self)
-        self.rows: list[ServerRow] = []
-
-    def set_rows(self, rows: list) -> None:
-        for old in self.rows:
-            self._col.removeWidget(old)
-            old.setParent(None)
-            old.deleteLater()
-        self.rows = list(rows)
-        for i, row in enumerate(self.rows):
-            self._col.insertWidget(i, row)
 
     def fit(self) -> None:
-        """Size the card to the rows shown and mark the last of them."""
-        shown = [r for r in self.rows if not r.isHidden()]
-        for row in shown:
-            row.set_last(row is shown[-1])
-        self.not_found.setVisible(bool(self.rows) and not shown)
-        self.setMaximumHeight(max(1, len(shown)) * tokens.ROW_H + 2)
-
-    def ensure_visible(self, row: ServerRow) -> None:
-        self.scroll.ensureWidgetVisible(row, 0, tokens.SP_2)
+        count = self.view.count()
+        self.view.setVisible(count > 0)
+        self.not_found.setVisible(count == 0)
+        self.setMaximumHeight(max(1, count) * tokens.ROW_H + 2)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -303,6 +324,9 @@ class ServersPage(QWidget):
         self._connected = False
         self._selected_name = ""
         self._sort_mode = SORT_SPEED
+        self._ordered: list[ProxyConfig] = []
+        self._by_name: dict[str, ProxyConfig] = {}
+        self._items: dict[str, QListWidgetItem] = {}
 
         col = QVBoxLayout(self)
         col.setContentsMargins(tokens.PAGE_PAD_X, tokens.PAGE_PAD_Y,
@@ -332,11 +356,13 @@ class ServersPage(QWidget):
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(tokens.SP_2)
         self.search = kit.Input(tr("srv.search"), icon="search")
+        self.search.setAccessibleName(tr("srv.search"))
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._apply_filter)
         bar.addWidget(self.search, stretch=1)
         self.sort = kit.Select(sort_labels(), self._sort_mode, icon="sort")
         self.sort.setToolTip(tr("srv.sort_tip"))
+        self.sort.setAccessibleName(tr("srv.sort_tip"))
         self.sort.changed.connect(self._on_sort_changed)
         bar.addWidget(self.sort)
         self.ping_btn = kit.Button("", "secondary", icon="activity", tooltip=tr("srv.ping_tip"))
@@ -345,6 +371,10 @@ class ServersPage(QWidget):
         col.addWidget(self.toolbar)
 
         self.list = ServerList()
+        self.list.view.currentItemChanged.connect(self._on_current_changed)
+        self.list.view.itemDoubleClicked.connect(lambda _item: self._on_connect())
+        self.list.view.connect_current.connect(self._on_connect)
+        self.list.view.delete_current.connect(self._on_delete)
         col.addWidget(self.list, stretch=1000)
         self._gap = QWidget()
         col.addWidget(self._gap, stretch=1)
@@ -386,36 +416,52 @@ class ServersPage(QWidget):
         every refresh tick."""
         signature = _signature(configs)
         changed = signature != self._signature
+        old_active = self._active_name
+        state_changed = (active_name, connected) != (old_active, self._connected)
+        self._active_name, self._connected = active_name, connected
         self._configs = list(configs)
         self._signature = signature
-        state_changed = (active_name, connected) != (self._active_name, self._connected)
-        self._active_name, self._connected = active_name, connected
+        self._by_name = {c.name: c for c in configs}
         if changed:
-            self._pings = {n: v for n, v in self._pings.items() if n in {c.name for c in configs}}
+            self._pings = {n: v for n, v in self._pings.items() if n in self._by_name}
             self._rebuild()
-            return
-        # Same servers, possibly as new objects (the list was re-read from disk).
-        by_name = {c.name: c for c in self._configs}
-        for row in self.list.rows:
-            row.cfg = by_name.get(row.cfg.name, row.cfg)
-        if state_changed:
+        elif state_changed:
+            self._update_item(old_active)
+            self._update_item(active_name)
             self._sync_state()
 
     def set_pings(self, pings: dict, pending: bool = False) -> None:
-        """Take a full set of results. `pending=True`: a new measurement has
-        just started, show every server as not measured yet."""
+        """Take a full set of results, or clear them for a new measurement."""
         self._pings = {} if pending else dict(pings)
-        if pending or self._sort_mode != SORT_SPEED:
-            for row in self.list.rows:
-                row.set_ping(self._pings.get(row.cfg.name, _PENDING))
-        else:
+        if not pending and self._sort_mode == SORT_SPEED:
             self._rebuild()
+        else:
+            for name in self._items:
+                self._update_item(name)
 
     def set_ping(self, name: str, value: object) -> None:
         self._pings[name] = value
-        for row in self.list.rows:
-            if row.cfg.name == name:
-                row.set_ping(value)
+        self._update_item(name)
+
+    def _update_item(self, name: str) -> None:
+        item = self._items.get(name)
+        if item is None:
+            return
+        cfg = self._by_name[name]
+        ping = self._pings.get(name, _PENDING)
+        active = name == self._active_name
+        item.setData(Qt.UserRole, cfg)
+        item.setData(Qt.UserRole + 1, (ping, active))
+        detail = [server_meta(cfg)]
+        if active:
+            detail.append(tr("srv.active"))
+        if ping == -1 or cfg.protocol.lower() in ("hysteria2", "tuic"):
+            detail.append(tr("picker.ping_udp"))
+        elif ping is None:
+            detail.append(tr("picker.ping_unreachable"))
+        elif ping != _PENDING:
+            detail.append(tr("picker.ping_ms", ms=ping))
+        item.setData(Qt.AccessibleDescriptionRole, ", ".join(detail))
 
     def set_pinging(self, busy: bool) -> None:
         self.ping_btn.setEnabled(not busy)
@@ -425,35 +471,29 @@ class ServersPage(QWidget):
         self.refresh_btn.setToolTip(tr("srv.refreshing_tip" if busy else "srv.refresh_tip"))
 
     def select(self, name: str) -> None:
-        if self.search.text() and name not in self.visible_names():
-            self.search.clear()     # a filter left over from before would hide it
+        if self.search.text() and name not in self._items:
+            self.search.clear()
         self._selected_name = name
+        item = self._items.get(name)
+        if item is not None:
+            self.list.view.setCurrentItem(item)
+            self.list.view.scrollToItem(item)
+        else:
+            self.list.view.setCurrentRow(-1)
         self._sync_state()
-        for row in self.list.rows:
-            if row.cfg.name == name and not row.isHidden():
-                self.list.ensure_visible(row)
 
     def selected(self) -> Optional[ProxyConfig]:
-        return next((c for c in self._configs if c.name == self._selected_name), None)
+        return self._by_name.get(self._selected_name)
 
     def visible_names(self) -> list[str]:
-        return [r.cfg.name for r in self.list.rows if not r.isHidden()]
+        return list(self._items)
 
     # --- internals ----------------------------------------------------------
 
     def _rebuild(self) -> None:
-        rows = []
-        for cfg in sort_configs(self._configs, self._sort_mode, self._pings):
-            row = ServerRow(cfg)
-            row.set_ping(self._pings.get(cfg.name, _PENDING))
-            row.clicked.connect(self._on_row_clicked)
-            row.activated.connect(self._on_row_activated)
-            rows.append(row)
-        self.list.set_rows(rows)
-        names = {c.name for c in self._configs}
-        if self._selected_name not in names:
-            self._selected_name = (self._active_name if self._active_name in names
-                                   else (rows[0].cfg.name if rows else ""))
+        self._ordered = sort_configs(self._configs, self._sort_mode, self._pings)
+        if self._selected_name not in self._by_name:
+            self._selected_name = self._active_name
         has = bool(self._configs)
         for w in (self.toolbar, self.list, self._gap, self.action_bar, self.refresh_btn):
             w.setVisible(has)
@@ -463,28 +503,36 @@ class ServersPage(QWidget):
 
     def _apply_filter(self) -> None:
         query = self.search.text().strip()
-        shown = 0
-        for row in self.list.rows:
-            hit = not query or matches(row.cfg, query)
-            row.setVisible(hit)
-            shown += hit
-        total = len(self.list.rows)
+        view = self.list.view
+        top = view.indexAt(view.viewport().rect().topLeft())
+        top_name = top.data(Qt.UserRole).name if top.isValid() else ""
+        with QSignalBlocker(view):
+            view.clear()
+            self._items.clear()
+            for cfg in self._ordered:
+                if query and not matches(cfg, query):
+                    continue
+                item = QListWidgetItem(one_line(strip_flag(cfg.name), 80))
+                item.setSizeHint(QSize(0, tokens.ROW_H))
+                view.addItem(item)
+                self._items[cfg.name] = item
+                self._update_item(cfg.name)
+            if self._items and self._selected_name not in self._items:
+                self._selected_name = next(iter(self._items))
+            item = self._items.get(self._selected_name)
+            if item is not None:
+                view.setCurrentItem(item)
+            if top_name in self._items:
+                view.scrollToItem(self._items[top_name], view.ScrollHint.PositionAtTop)
+        total = len(self._configs)
         self.count.setText("" if not total else
-                           tr("picker.count", visible=shown, total=total) if query else str(total))
+                           tr("picker.count", visible=len(self._items), total=total) if query else str(total))
         self.list.fit()
-        # A selection the filter has hidden would leave the action bar acting
-        # on a server that is not on screen.
-        visible = self.visible_names()
-        if visible and self._selected_name not in visible:
-            self._selected_name = visible[0]
         self._sync_state()
 
     def _sync_state(self) -> None:
-        for row in self.list.rows:
-            row.set_selected(row.cfg.name == self._selected_name)
-            row.set_active(row.cfg.name == self._active_name)
         cfg = self.selected()
-        on_screen = cfg is not None and cfg.name in self.visible_names()
+        on_screen = cfg is not None and cfg.name in self._items
         in_use = on_screen and self._connected and cfg.name == self._active_name
         self.picked_caption.setText(tr("srv.selected") if on_screen else tr("srv.none_selected"))
         self.picked_name.setText(one_line(strip_flag(cfg.name), 60) if on_screen else "")
@@ -497,14 +545,10 @@ class ServersPage(QWidget):
         self._sort_mode = mode
         self._rebuild()
 
-    def _on_row_clicked(self, row: ServerRow) -> None:
-        self._selected_name = row.cfg.name
+    def _on_current_changed(self, current, _previous) -> None:
+        if current is not None:
+            self._selected_name = current.data(Qt.UserRole).name
         self._sync_state()
-
-    def _on_row_activated(self, row: ServerRow) -> None:
-        self._selected_name = row.cfg.name
-        self._sync_state()
-        self._on_connect()
 
     def _on_connect(self) -> None:
         cfg = self.selected()
@@ -521,14 +565,9 @@ class ServersPage(QWidget):
             self.delete_requested.emit(cfg)
 
     def _move_selection(self, step: int) -> None:
-        shown = [r for r in self.list.rows if not r.isHidden()]
-        if not shown:
-            return
-        at = next((i for i, r in enumerate(shown) if r.cfg.name == self._selected_name), -1)
-        row = shown[max(0, min(len(shown) - 1, at + step))]
-        self._selected_name = row.cfg.name
-        self._sync_state()
-        self.list.ensure_visible(row)
+        view = self.list.view
+        if view.count():
+            view.setCurrentRow(max(0, min(view.count() - 1, view.currentRow() + step)))
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()

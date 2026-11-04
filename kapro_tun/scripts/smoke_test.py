@@ -8832,22 +8832,23 @@ def _v41_servers_page() -> None:
     page.set_configs([nl, de, tr_], active_name=nl.name, connected=True)
     if not page.empty_card.isHidden() or page.list.isHidden() or page.count.text() != "3":
         raise AssertionError("with servers the list must show, with their count")
-    rows = {r.cfg.name: r for r in page.list.rows}
-    if rows[nl.name].badge.isHidden() or not rows[de.name].badge.isHidden():
+    from PySide6.QtCore import Qt
+    if not page._items[nl.name].data(Qt.UserRole + 1)[1] or page._items[de.name].data(Qt.UserRole + 1)[1]:
         raise AssertionError("only the server in use carries the 'active' badge")
-    if page.selected() is not nl or not rows[nl.name].is_selected():
+    if page.selected() is not nl or page.list.view.currentItem() is not page._items[nl.name]:
         raise AssertionError("the page must open with the server in use selected")
     if page.connect_btn.isEnabled() or page.delete_btn.isEnabled() \
             or page.connect_btn.text() != "Подключён":
         raise AssertionError("a connected server can be neither connected again nor deleted")
     _v41_all_text_is_plain(page, "the Servers tab")
 
-    page._on_row_clicked(rows[de.name])
+    page.list.view.setCurrentItem(page._items[de.name])
     if page.selected() is not de or page.picked_name.full_text() != "Германия" \
             or not page.connect_btn.isEnabled() or not page.delete_btn.isEnabled():
         raise AssertionError("selecting a row must arm the action bar for it")
     page.connect_btn.click()
-    page._on_row_activated(rows[tr_.name])
+    page.list.view.setCurrentItem(page._items[tr_.name])
+    page.list.view.itemDoubleClicked.emit(page._items[tr_.name])
     if fired[-2:] != [("connect", de), ("connect", tr_)]:
         raise AssertionError("Connect and double click must ask for that server")
 
@@ -8893,16 +8894,16 @@ def _v41_servers_page() -> None:
 
     page.show()
     page.activateWindow()
-    page._on_row_clicked(next(r for r in page.list.rows if r.cfg is de))
+    page.list.view.setCurrentItem(page._items[de.name])
     page.setFocus()
     n = len(fired)
-    press(page, Qt.Key_Return)
+    press(page.list.view, Qt.Key_Return)
     if fired[n:] != [("connect", de)]:
         raise AssertionError(f"Enter on the list must connect the selected server: {fired[n:]}")
-    press(page, Qt.Key_Down)
+    press(page.list.view, Qt.Key_Down)
     if page.selected() is de:
         raise AssertionError("the arrow keys do not move the selection")
-    page._on_row_clicked(next(r for r in page.list.rows if r.cfg is de))
+    page.list.view.setCurrentItem(page._items[de.name])
     n = len(fired)
     page.add_btn.setFocus(Qt.TabFocusReason)
     press(page.add_btn, Qt.Key_Return)
@@ -8918,36 +8919,39 @@ def _v41_servers_page() -> None:
     # Sorting.
     page.sort.set_current(sp.SORT_NAME)
     want = [c.name for c in sorted([nl, de, tr_], key=sp.name_key)]
-    if [r.cfg.name for r in page.list.rows] != want:
+    if page.visible_names() != want:
         raise AssertionError("sort by name ignores the flag-less name")
     page.sort.set_current(sp.SORT_SPEED)
     page.set_pings({nl.name: 200, de.name: 40, tr_.name: None})
-    if [r.cfg.name for r in page.list.rows] != [de.name, nl.name, tr_.name]:
+    if page.visible_names() != [de.name, nl.name, tr_.name]:
         raise AssertionError("sort by speed: fastest first, unreachable last")
-    kinds = {r.cfg.name: r.ping.kind() for r in page.list.rows}
-    if kinds != {de.name: "good", nl.name: "mid", tr_.name: "na"}:
-        raise AssertionError(f"ping colours are wrong: {kinds}")
+    def measured():
+        return {name: item.data(Qt.UserRole + 1)[0] for name, item in page._items.items()}
+
+    if measured() != {de.name: 40, nl.name: 200, tr_.name: None}:
+        raise AssertionError("ping results did not reach the displayed items")
     page.set_pings({}, pending=True)
-    if {r.ping.kind() for r in page.list.rows} != {"pending"} \
-            or [r.cfg.name for r in page.list.rows] != [de.name, nl.name, tr_.name]:
+    if set(measured().values()) != {"pending"} or page.visible_names() != [de.name, nl.name, tr_.name]:
         raise AssertionError("a new measurement must reset the labels and keep the order")
     page.set_ping(nl.name, 30)
-    if next(r for r in page.list.rows if r.cfg is nl).ping.kind() != "good":
+    if measured()[nl.name] != 30:
         raise AssertionError("a single result does not reach its row")
 
-    # Called on every refresh tick: an unchanged list costs nothing, a list
-    # re-read from disk keeps the rows and rebinds them to the new objects.
-    before = list(page.list.rows)
+    # Refreshing the backing data preserves items and resolves actions against
+    # the latest config, even when its visible fields have not changed.
+    before = dict(page._items)
     page.set_configs([nl, de, tr_], nl.name, True)
     nl2 = _v401_cfg(nl.name, "10.0.0.1")
     page.set_configs([nl2, de, tr_], nl.name, False)
-    if page.list.rows != before or next(r for r in before if r.cfg.name == nl.name).cfg is not nl2:
-        raise AssertionError("an unchanged list was rebuilt, or rows kept stale objects")
+    if page._items != before:
+        raise AssertionError("an unchanged list was rebuilt")
     page.select(nl.name)
+    if page.selected() is not nl2:
+        raise AssertionError("the selected action kept an outdated config")
     if not page.connect_btn.isEnabled() or page.connect_btn.text() != "Подключиться":
         raise AssertionError("once disconnected, the active server can be connected")
     page.set_configs([de], "", False)
-    if len(page.list.rows) != 1 or page.selected() is not de:
+    if page.list.view.count() != 1 or page.selected() is not de:
         raise AssertionError("a removed server must leave the list and the selection")
 
     import inspect
@@ -11450,7 +11454,7 @@ def _v414_home_fits_short_screens() -> None:
 
     fit = mw.MainWindow._window_height_for
     for preset, screen, want in ((720, 1080, 720), (640, 760, 640), (640, 600, 584),
-                                 (640, 586, 570), (640, 400, mw.MIN_WINDOW_H), (640, 0, 640)):
+                                 (640, 586, 570), (640, 400, 384), (640, 0, 640)):
         if fit(preset, screen) != want:
             raise AssertionError(f"a {preset}px window on a {screen}px screen: "
                                  f"{fit(preset, screen)}, expected {want}")

@@ -64,7 +64,7 @@ class CircleConnectButton(QPushButton):
         super().__init__(tr("wid.connect"), parent)
         self.setObjectName("circleBtn")
         self.setCursor(Qt.PointingHandCursor)
-        self.setFocusPolicy(Qt.NoFocus)
+        self.setFocusPolicy(Qt.TabFocus)
 
         self._glow = QGraphicsDropShadowEffect(self)
         self._glow.setBlurRadius(0)
@@ -250,12 +250,19 @@ class NavItem(QPushButton):
         super().__init__(parent)
         self._icon, self._label, self._active = icon, label, False
         self.setCursor(Qt.PointingHandCursor)
-        self.setFocusPolicy(Qt.NoFocus)
+        self.setFocusPolicy(Qt.TabFocus)
+        self.setAccessibleName(label)
+        self.setCheckable(True)
         self.setAttribute(Qt.WA_Hover, True)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setToolTip(label)
 
+    def nextCheckState(self) -> None:  # noqa: N802
+        # The displayed page owns the checked state.
+        pass
+
     def set_active(self, active: bool) -> None:
+        self.setChecked(active)
         self._active = bool(active)
         self.setProperty("active", "true" if active else "false")
         self.update()
@@ -288,12 +295,17 @@ class NavItem(QPushButton):
         p.drawPixmap(int((self.width() - icon) / 2), int(top), icons_v2.pixmap(self._icon, icon, fg))
         p.setPen(QColor(fg))
         p.drawText(QRectF(0, top + icon + tokens.SP_1, self.width(), text_h),
-                   Qt.AlignHCenter | Qt.AlignVCenter, self._label)
+                   Qt.AlignHCenter | Qt.AlignVCenter,
+                   p.fontMetrics().elidedText(self._label, Qt.ElideRight, self.width() - 6))
         if self._active:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(c.accent))
             w = tokens.NAV_IND_W
             p.drawRoundedRect(QRectF((self.width() - w) / 2, 0, w, tokens.NAV_IND_H), 1, 1)
+        if self.hasFocus():
+            p.setPen(QColor(c.focus))
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(self.rect().adjusted(2, 3, -3, -3), tokens.R_SM, tokens.R_SM)
         p.end()
 
 

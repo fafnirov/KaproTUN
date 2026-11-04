@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QGraphicsOpacityEffect
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QMainWindow,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -35,7 +36,7 @@ _HEALTH_OK, _HEALTH_DEGRADED, _HEALTH_DEAD = (
 from ..core.controller import ConnectionError as VPNConnectionError
 from ..core.controller import ConnectionManager
 from ..core.parser import ProxyConfig
-from . import icons, kit
+from . import icons, kit, tokens
 from .add_server_v2 import MODE_LINK, MODE_SUB, AddServerPage
 from .servers_page import ServersPage
 from .subscription_autorefresh import SubscriptionAutoRefresh
@@ -399,31 +400,21 @@ class MainWindow(QMainWindow):
         if preset not in _PRESETS:
             preset = "compact" if self._screen_too_short_for(720) else "standard"
         self._compact_preset = (preset == "compact")
-        DEFAULT_W, DEFAULT_H = _PRESETS[preset]
-        # A display lower than even the compact window (a 1024x600 netbook, a
-        # small virtual screen): keep the window inside it. Left at its
-        # designed height, the system either cuts it or lets the bottom
-        # navigation fall off the screen. The pages cope with less height
-        # (lists scroll, the home screen shrinks its ring — HomePage._fit).
-        DEFAULT_H = self._window_height_for(DEFAULT_H, self._available_screen_height())
-        MIN_W, MIN_H = DEFAULT_W, DEFAULT_H - 90  # floor for advanced resizable mode
+        self._preset_w, self._preset_h = _PRESETS[preset]
+        self._preset_w = round(self._preset_w * tokens.text_scale)
         self._allow_resize = self._window_resize_allowed(saved_settings)
-        if self._allow_resize:
-            self.setMinimumSize(MIN_W, MIN_H)
-            saved_size = saved_settings.get("window_size", [DEFAULT_W, DEFAULT_H])
-            try:
-                w, h = int(saved_size[0]), int(saved_size[1])
-            except (TypeError, ValueError, IndexError):
-                w, h = DEFAULT_W, DEFAULT_H
-            # Clamp restored size to the minimum so a corrupted settings
-            # file can't shrink us below usable.
-            self.resize(max(w, MIN_W), max(h, MIN_H))
-        else:
-            # min == max == fixed: Qt blocks any user OR programmatic resize,
-            # and we never create the edge handles. Ignore any persisted
-            # (possibly drifted) window_size so startup is always identical.
-            self.setFixedSize(DEFAULT_W, DEFAULT_H)
+        self._resize_save_timer = QTimer(self)
+        self._resize_save_timer.setSingleShot(True)
+        self._resize_save_timer.setInterval(300)
+        self._resize_save_timer.timeout.connect(self._save_window_size)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowMinimizeButtonHint)
+        saved_size = saved_settings.get("window_size", [self._preset_w, self._preset_h])
+        try:
+            self._preferred_size = (int(saved_size[0]), int(saved_size[1]))
+        except (TypeError, ValueError, IndexError):
+            self._preferred_size = (self._preset_w, self._preset_h)
+        self._fitting_screen = False
+        self._fit_screen(self.screen())
 
         self.manager = ConnectionManager(on_log=self.log_received.emit)
         self.configs: list[ProxyConfig] = storage.load_configs()
@@ -556,6 +547,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self.titlebar)
 
         self.stack = QStackedWidget()
+        self.stack.setMinimumSize(1, 1)
         self.home_page = HomePage(compact=self._compact_preset)
         # Custom-painted widgets that still take a theme getter (stats charts)
         # read the live setting through this closure.
@@ -568,11 +560,12 @@ class MainWindow(QMainWindow):
         # the chart's colors track live theme switches.
         self.stats_page = StatsPage()
         self.stats_page.set_theme_getter(_theme)
-        self.stack.addWidget(self.home_page)        # index 0
+        home_min_height = round(420 * tokens.text_scale)
+        self.stack.addWidget(self._scroll_page(self.home_page, min_height=home_min_height))  # index 0
         self.stack.addWidget(self.settings_page)    # index 1
         self.stack.addWidget(self.logs_page)        # index 2
-        self.stack.addWidget(self.add_page)         # index 3
-        self.stack.addWidget(self.servers_page)     # index 4
+        self.stack.addWidget(self._scroll_page(self.add_page))         # index 3
+        self.stack.addWidget(self._scroll_page(self.servers_page))  # index 4
         self.stack.addWidget(self.stats_page)       # index 5
         root.addWidget(self.stack, stretch=1)
 
@@ -2298,6 +2291,10 @@ class MainWindow(QMainWindow):
         # Dismiss the popup before synchronous worker/network shutdown can
         # block the event loop and leave the last menu frame on screen.
         self.tray.hide()
+        timer = getattr(self, "_resize_save_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+            self._save_window_size()
         try:
             self._dns_watchdog.stop()
         except Exception:
@@ -2380,23 +2377,52 @@ class MainWindow(QMainWindow):
         return bool(settings.get("allow_window_resize", False))
 
     @staticmethod
-    def _available_screen_height() -> int:
-        """Height of the primary screen's usable area, 0 if unknown."""
-        try:
-            from PySide6.QtWidgets import QApplication
-            scr = QApplication.primaryScreen()
-            return int(scr.availableGeometry().height()) if scr is not None else 0
-        except Exception:
-            return 0
+    def _scroll_page(page: QWidget, min_height: int = 0) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName("ktPageScroll")
+        scroll.setWidgetResizable(True)
+        if min_height:
+            page.setMinimumHeight(min_height)
+        scroll.setWidget(page)
+        return scroll
 
     @staticmethod
     def _window_height_for(preset_h: int, screen_h: int) -> int:
-        """The window's height: as designed, unless the screen is lower —
-        then what the screen has (less a small margin), but never below
-        MIN_WINDOW_H, under which the pages stop being usable. Pure."""
         if screen_h <= 0:
             return preset_h
-        return max(MIN_WINDOW_H, min(preset_h, screen_h - WINDOW_SCREEN_MARGIN))
+        return min(preset_h, max(1, screen_h - WINDOW_SCREEN_MARGIN))
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        handle = self.windowHandle()
+        if handle is not None and not getattr(self, "_screen_tracking", False):
+            self._screen_tracking = True
+            handle.screenChanged.connect(self._fit_screen)
+            self._fit_screen(handle.screen())
+
+    def _fit_screen(self, screen) -> None:
+        if screen is None:
+            return
+        area = screen.availableGeometry()
+        self._fitting_screen = True
+        try:
+            width = min(self._preset_w, area.width())
+            height = self._window_height_for(self._preset_h, area.height())
+            if self._allow_resize:
+                max_h = self._window_height_for(area.height(), area.height())
+                min_h = max(1, height - 90)
+                self.setMinimumSize(0, 0)
+                self.setMaximumSize(area.width(), max_h)
+                self.setMinimumSize(width, min_h)
+                w, h = self._preferred_size
+                self.resize(min(area.width(), max(width, w)), min(max_h, max(min_h, h)))
+            else:
+                self.setFixedSize(width, height)
+            if self.isVisible():
+                self.move(max(area.left(), min(self.x(), area.right() + 1 - self.width())),
+                          max(area.top(), min(self.y(), area.bottom() + 1 - self.height())))
+        finally:
+            self._fitting_screen = False
 
     @staticmethod
     def _screen_too_short_for(needed_h: int) -> bool:
@@ -2453,28 +2479,21 @@ class MainWindow(QMainWindow):
                    kind="error", duration_ms=15000)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
-        """Persist size to settings + reposition the 8 edge resize-handles.
-
-        Guards: Qt may fire resizeEvent during __init__ before manager
-        or _resize_handles exist (e.g. the implicit resize fired by
-        setMinimumSize). hasattr/getattr keeps early-init firing
-        from crashing here.
-
-        Persistence is cheap — storage.save_settings does an atomic
-        temp-write + rename, so a crash mid-resize can't corrupt the
-        settings file even at fast drag rates.
-        """
         super().resizeEvent(event)
-        sz = event.size()
-        # Persist size ONLY in resizable mode. In fixed mode the size never
-        # changes, and persisting a forced value would be pointless (and is
-        # exactly the drift loop we removed). getattr keeps the early-init
-        # resize (from setFixedSize/resize, before _allow_resize is read) safe.
-        if getattr(self, "_allow_resize", False) and hasattr(self, "manager"):
-            self.manager.update_settings(window_size=[sz.width(), sz.height()])
+        if (getattr(self, "_allow_resize", False) and hasattr(self, "manager")
+                and getattr(self, "_screen_tracking", False)
+                and not self._fitting_screen and self.isVisible()):
+            self._preferred_size = (event.size().width(), event.size().height())
+            self._resize_save_timer.start()
         handles = getattr(self, "_resize_handles", None)
         if handles is not None:
             handles.reposition()
+
+    def _save_window_size(self) -> None:
+        try:
+            self.manager.update_settings(window_size=list(self._preferred_size))
+        except OSError as exc:
+            app_log.log(f"[ui] could not save window size: {type(exc).__name__}")
 
     # --- shutdown ---------------------------------------------------------
 

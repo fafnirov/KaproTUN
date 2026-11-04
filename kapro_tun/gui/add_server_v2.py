@@ -19,7 +19,7 @@ import time
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ..core import app_log, storage
 from ..core.i18n import tr
@@ -123,6 +123,9 @@ class AddServerPage(QWidget):
 
     @staticmethod
     def _field(*widgets) -> QVBoxLayout:
+        if len(widgets) > 1 and isinstance(widgets[0], QLabel) and isinstance(widgets[1], QWidget):
+            widgets[0].setBuddy(widgets[1])
+            widgets[1].setAccessibleName(widgets[0].text())
         box = QVBoxLayout()
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(tokens.SP_1H)
@@ -151,7 +154,7 @@ class AddServerPage(QWidget):
         self.to_sub = kit.LinkButton(tr("add2.open_sub"))
         self.to_sub.clicked.connect(self._on_to_subscription)
         col.addLayout(self._field(kit.label(tr("add2.url_label"), "label"), self.url_edit,
-                                  status, self.to_sub, kit.label(tr("add2.supported"), "hint")))
+                                  status, self.to_sub, kit.label(tr("add2.supported"), "hint", wrap=True)))
 
         self.name_edit = kit.Input(tr("add2.name_placeholder"))
         self.name_edit.textChanged.connect(self._on_name_edited)
@@ -173,6 +176,9 @@ class AddServerPage(QWidget):
         row = QHBoxLayout()
         row.setSpacing(tokens.SP_2)
         self.sub_edit = kit.Input("https://…", icon="link")
+        sub_label = kit.label(tr("add2.sub_label"), "label")
+        sub_label.setBuddy(self.sub_edit)
+        self.sub_edit.setAccessibleName(sub_label.text())
         self.sub_edit.textEdited.connect(self._on_sub_edited)
         self.sub_edit.returnPressed.connect(self._on_fetch)
         row.addWidget(self.sub_edit, stretch=1)
@@ -183,7 +189,7 @@ class AddServerPage(QWidget):
         self.qr_btn.clicked.connect(self._on_import_qr)
         row.addWidget(self.qr_btn)
         self.sub_hint = kit.label(tr("add2.https_hint"), "hint", wrap=True)
-        col.addLayout(self._field(kit.label(tr("add2.sub_label"), "label"), row, self.sub_hint))
+        col.addLayout(self._field(sub_label, row, self.sub_hint))
 
         self.loading = QWidget()
         loading = QVBoxLayout(self.loading)

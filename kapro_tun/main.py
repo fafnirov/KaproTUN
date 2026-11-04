@@ -155,6 +155,17 @@ def _run_app() -> int:
     autostart.migrate_legacy()
 
     app = QApplication(sys.argv)
+    from .gui import tokens
+    scale = app.font().pointSizeF() / 9.0
+    if sys.platform == "win32":
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Accessibility") as key:
+                percent, _ = winreg.QueryValueEx(key, "TextScaleFactor")
+                scale = max(scale, int(percent) / 100)
+        except (OSError, TypeError, ValueError):
+            pass
+    tokens.set_text_scale(scale)
     # i18n must be initialised BEFORE any window/widget is built, because
     # those build their UI text with tr() at construction time. After
     # QApplication so QLocale.system() works inside detect_system_locale().
