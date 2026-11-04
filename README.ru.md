@@ -14,6 +14,11 @@
 телеметрии.
 
 <p align="center">
+  <img src="docs/mascot/kapatun.png" alt="Капатун, маскот KaproTUN, держит сетевой узел с двумя маршрутами" width="200">
+  <br><em>Знакомьтесь, Капатун, наш инженер туннелей.</em>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/main-window-ru.png" alt="Главный экран KaproTUN: подключено, внешний IP и локация, текущая скорость" width="210">
   <img src="docs/screenshots/servers-ru.png" alt="Список серверов с пингом, поиском и сортировкой" width="210">
   <img src="docs/screenshots/statistics-ru.png" alt="Статистика: текущая скорость и трафик за 24 часа" width="210">
@@ -104,6 +109,10 @@ VMess, Shadowsocks, Hysteria2), который поднимает их как **
 перечисленное продолжает ходить по твоему реальному соединению.
 
 ## Как маршрутизируется трафик
+
+<p align="center">
+  <img src="docs/mascot/kapatun-routing.png" alt="Капатун показывает на указатель с двумя маршрутами" width="170">
+</p>
 
 Правила проверяются по порядку — срабатывает первое совпадение:
 

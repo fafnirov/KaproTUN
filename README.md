@@ -13,6 +13,11 @@ directly on your real connection, everything else goes through the tunnel.
 Free and open-source forever — GPL v3, no paid tier, no telemetry.
 
 <p align="center">
+  <img src="docs/mascot/kapatun.png" alt="Kapatun, the KaproTUN mascot, holding a branching network node" width="200">
+  <br><em>Meet Kapatun, our tunnel engineer.</em>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/main-window.png" alt="KaproTUN home screen: connected, exit IP and location, live speed" width="210">
   <img src="docs/screenshots/servers.png" alt="Server list with ping, search and sorting" width="210">
   <img src="docs/screenshots/statistics.png" alt="Statistics: live speed and traffic for the last 24 hours" width="210">
@@ -101,6 +106,10 @@ KaproTUN keeps the tunnel on for the open internet while those keep using your
 real connection.
 
 ## How traffic is routed
+
+<p align="center">
+  <img src="docs/mascot/kapatun-routing.png" alt="Kapatun pointing at a fork in the road" width="170">
+</p>
 
 Rules are evaluated in order — the first match wins:
 
