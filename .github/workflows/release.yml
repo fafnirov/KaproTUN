@@ -5,9 +5,6 @@ name: Build & release KaproTUN
 # The matrix runs in parallel; each job produces its own artifact and
 # uploads to the same GitHub Release for the tag.
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
@@ -22,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: v4.2.2
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -59,89 +58,19 @@ jobs:
       fail-fast: false  # one OS failing shouldn't block the others
       matrix:
         include:
-          - os: windows-latest
-            artifact_name: KaproTUN-Windows-x64.exe
-            build_cmd: |
-              python -m PyInstaller KaproTUN.spec --noconfirm --log-level WARN
-              # Bind the installer to the binary just built: it will install
-              # KaproTUN.exe only if it hashes to this.
-              python packaging/write_payload_digest.py
-              python -m PyInstaller KaproTUN-Setup.spec --noconfirm --log-level WARN
-            payload_path: |
-              dist/KaproTUN-Setup.exe
-              dist/KaproTUN.exe
-            shell: pwsh
-          - os: macos-latest
+          - os: macos-15
             artifact_name: KaproTUN-macOS-arm64.dmg
-            # macos-latest is Apple Silicon (M-series). The script builds the
+            # macos-15 is Apple Silicon (M-series). The script builds the
             # .app and wraps it in a .dmg users drag into /Applications, then
             # refuses to continue if the binary is not the expected arch.
             build_cmd: bash packaging/build-macos-dmg.sh KaproTUN-macOS-arm64.dmg arm64
             payload_path: dist/KaproTUN-macOS-arm64.dmg
             shell: bash
-          - os: macos-15-intel
-            artifact_name: KaproTUN-macOS-x64.dmg
-            # Intel Macs. An arm64-only app does not launch on them at all,
-            # and PyInstaller builds for whatever Python it runs under, so
-            # this needs its own x86_64 runner rather than a flag.
-            build_cmd: bash packaging/build-macos-dmg.sh KaproTUN-macOS-x64.dmg x86_64
-            payload_path: dist/KaproTUN-macOS-x64.dmg
-            shell: bash
-          - os: ubuntu-latest
-            artifact_name: KaproTUN-Linux-x64.AppImage
-            # AppImage is the most distro-agnostic format. We package
-            # the PyInstaller output into AppDir layout then run
-            # appimagetool. The resulting .AppImage is one chmod +x
-            # away from running on any glibc-2.31+ distro.
-            #
-            # "glibc 2.31+" holds only if the binary is BUILT on glibc 2.31:
-            # built straight on this runner it needed 2.38 and did not start
-            # on Ubuntu 22.04 / Debian 12. So PyInstaller runs inside
-            # Ubuntu 20.04 (packaging/build-linux-binary.sh); only the AppImage
-            # wrapping happens on the runner.
-            build_cmd: |
-              docker run --rm -v "$PWD":/src -w /src \
-                -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-                ubuntu:20.04 bash packaging/build-linux-binary.sh
-              # AppDir layout per AppImage spec
-              mkdir -p AppDir/usr/bin AppDir/usr/share/icons/hicolor/256x256/apps \
-                       AppDir/usr/share/applications
-              cp dist/KaproTUN AppDir/usr/bin/kaprotun
-              chmod +x AppDir/usr/bin/kaprotun
-              cp kapro_tun/data/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/kaprotun.png
-              cp kapro_tun/data/icon.png AppDir/kaprotun.png  # root icon, AppImage requires it
-              cat > AppDir/kaprotun.desktop <<'EOF'
-              [Desktop Entry]
-              Type=Application
-              Name=KaproTUN
-              Comment=VPN client with split routing
-              Exec=kaprotun
-              Icon=kaprotun
-              Categories=Network;
-              Terminal=false
-              EOF
-              cp AppDir/kaprotun.desktop AppDir/usr/share/applications/
-              cat > AppDir/AppRun <<'EOF'
-              #!/bin/bash
-              HERE="$(dirname "$(readlink -f "${0}")")"
-              exec "${HERE}/usr/bin/kaprotun" "$@"
-              EOF
-              chmod +x AppDir/AppRun
-              # Fetch appimagetool once per build
-              wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage \
-                -O appimagetool
-              chmod +x appimagetool
-              ./appimagetool --appimage-extract
-              ARCH=x86_64 ./squashfs-root/AppRun AppDir dist/KaproTUN-Linux-x64.AppImage
-            payload_path: dist/KaproTUN-Linux-x64.AppImage
-            shell: bash
-
-    defaults:
-      run:
-        shell: ${{ matrix.shell }}
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: v4.2.2
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v7
