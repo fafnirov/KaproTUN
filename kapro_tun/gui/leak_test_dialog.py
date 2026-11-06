@@ -191,7 +191,9 @@ class LeakTestDialog(kit.OverlayDialog):
             self._row_ipv4.set_fail(one_line(v4.error, 200) if v4.error else tr("leak.ipv4_no_ip"))
 
         v6 = report.ipv6
-        if v6.ipv6_blocked:
+        if v6.error or (not v6.ip and not v6.ipv6_blocked):
+            self._row_ipv6.set_warn(tr("leak.probe_unknown"))
+        elif v6.ipv6_blocked:
             self._row_ipv6.set_pass(tr("leak.ipv6_blocked"))
         else:
             self._row_ipv6.set_fail(tr("leak.ipv6_leak", ip=one_line(v6.ip, 60)))
@@ -208,7 +210,9 @@ class LeakTestDialog(kit.OverlayDialog):
         else:
             self._row_dns.set_pass(tr("leak.dns_clean", n=len(dns.resolvers)))
 
-        if report.webrtc.stun_blocked:
+        if report.webrtc.error:
+            self._row_webrtc.set_warn(tr("leak.probe_unknown"))
+        elif report.webrtc.stun_blocked:
             self._row_webrtc.set_pass(tr("leak.webrtc_blocked"))
         else:
             self._row_webrtc.set_fail(tr("leak.webrtc_leak"))
@@ -224,7 +228,7 @@ class LeakTestDialog(kit.OverlayDialog):
                 self._fix_caption.setText(tr("leak.fix_off_caption", names=names))
                 self._fix_btn.setText(tr("leak.fix_enable_named", names=names))
                 self._fix_btn.set_icon("shield-check")
-            elif not report.ipv6.ipv6_blocked:
+            elif v6.ip and not v6.error and not v6.ipv6_blocked:
                 self._action = "diag"
                 self._fix_caption.setText(tr("leak.diag_caption"))
                 self._fix_btn.setText(tr("leak.diag_copy_btn"))

@@ -17,7 +17,7 @@ What each probe actually checks:
     Same endpoint but on the v6-only hostname. If we DO get an IPv6
     answer it means traffic went out the real ISP via the v6 stack
     (the v1.11 ipv6_block didn't catch it, or the user disabled it).
-    "No answer" is the desired result for a clean tunnel.
+    An unsuccessful probe leaves the result undetermined.
 
   DNS
     The canonical bash.ws DNS-leak protocol:
@@ -36,8 +36,7 @@ What each probe actually checks:
   WebRTC / STUN
     Real UDP socket → stun.l.google.com:19302 with a minimal STUN
     Binding Request. If we get a reply, the v1.16 webrtc_block firewall
-    rule isn't doing its job (or wasn't installed). If timeout, the
-    block works.
+    rule did not stop that exchange. A timeout is inconclusive.
 
 Privacy: every probe goes through the active VPN tunnel except the
 STUN probe (which intentionally tries to leak — that's the test). No
@@ -46,6 +45,7 @@ tests inherently require (random tokens, an IP request).
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import secrets
 import socket
@@ -132,8 +132,6 @@ class IPv4Result:
 class IPv6Result:
     ip: Optional[str] = None
     error: Optional[str] = None
-    # "ok" here MEANS "no v6 leak" — we WANT this to fail.
-    # ipv6_blocked = True means our block is doing its job.
     ipv6_blocked: bool = False
 
 
@@ -185,7 +183,8 @@ def fixable_protections(report: "LeakTestReport", settings: dict) -> list:
     so "enable it" was advice that changed nothing).
     """
     out: list = []
-    if not report.webrtc.stun_blocked and not settings.get("webrtc_leak_protection", True):
+    if (not report.webrtc.stun_blocked and not report.webrtc.error
+            and not settings.get("webrtc_leak_protection", True)):
         out.append(("webrtc_leak_protection", "WebRTC"))
     return out
 
@@ -241,18 +240,7 @@ def probe_ipv4(socks_proxy: Optional[str], timeout: float = 6.0) -> IPv4Result:
 
 
 def probe_ipv6(socks_proxy: Optional[str], timeout: float = 4.0) -> IPv6Result:
-    """Test whether IPv6 leaks past the v4-only tunnel.
-
-    We DELIBERATELY probe an IPv6-only endpoint with a SHORT timeout.
-    Two possible outcomes:
-      - Connection works → got an IPv6 → that IPv6 went out the real
-        ISP, NOT the tunnel (xray + tun2socks are v4-only). This IS
-        the leak.
-      - Connection fails (timeout / refused / no route) → the v6 stack
-        couldn't reach the internet. Either the user has no v6 at all,
-        or our ipv6_block firewall rule (v1.11) is blocking it. Either
-        way: no leak.
-    """
+    """Look for a reachable IPv6 address, reporting failures as inconclusive."""
     if requests is None:
         return IPv6Result(error="requests library not installed")
     proxies = _socks_proxy_dict(socks_proxy) if socks_proxy else None
@@ -263,15 +251,14 @@ def probe_ipv6(socks_proxy: Optional[str], timeout: float = 4.0) -> IPv6Result:
             proxies=proxies,
             timeout=timeout,
         )
-        if r.status_code == 200:
-            return IPv6Result(ip=r.text.strip(), ipv6_blocked=False)
-        return IPv6Result(
-            error=f"HTTP {r.status_code}",
-            ipv6_blocked=True,  # we couldn't reach v6, that's a clean state
-        )
-    except requests.exceptions.RequestException:
-        # The expected case for a healthy tunnel: no IPv6 connectivity.
-        return IPv6Result(ipv6_blocked=True)
+        if r.status_code != 200:
+            return IPv6Result(error=f"HTTP {r.status_code}")
+        return IPv6Result(ip=str(ipaddress.IPv6Address(r.text.strip())))
+    except requests.exceptions.RequestException as exc:
+        return IPv6Result(error=type(exc).__name__)
+    except ValueError:
+        return IPv6Result(error="Invalid IPv6 response")
+
 
 
 def probe_dns(timeout: float = 8.0) -> DnsResult:
@@ -404,16 +391,8 @@ def probe_dns(timeout: float = 8.0) -> DnsResult:
 def probe_webrtc(timeout: float = 2.0) -> WebRtcResult:
     """Try a real STUN Binding Request to stun.l.google.com:19302.
 
-    Builds a minimal RFC 5389 Binding Request (20-byte header, no
-    attributes) and sends it over a UDP socket. If the server's
-    response comes back, our webrtc_block firewall rule (v1.16.0)
-    didn't catch it — STUN is leakable. If we time out, the block
-    works.
-
-    19302 is one of the ports on our block list, so a correctly-
-    armed firewall rejects this packet on the way out. We don't
-    need to PARSE the response (it'd contain our real external
-    IP) — just receiving anything tells us the block failed.
+    A matching reply confirms STUN is reachable. A local permission
+    denial confirms the send was blocked. Other failures are inconclusive.
     """
     # STUN Binding Request header (RFC 5389 §6):
     #   message type:   0x0001 (Binding Request)
@@ -423,33 +402,21 @@ def probe_webrtc(timeout: float = 2.0) -> WebRtcResult:
     txid = secrets.token_bytes(12)
     packet = struct.pack("!HHI", 0x0001, 0x0000, 0x2112A442) + txid
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(timeout)
     try:
-        try:
-            sock.sendto(packet, ("stun.l.google.com", 19302))
-        except OSError as e:
-            # Firewall rejected the SEND (some configs do this) — that
-            # also counts as "blocked".
-            return WebRtcResult(stun_blocked=True, error=str(e))
-        try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout)
+            try:
+                sock.sendto(packet, ("stun.l.google.com", 19302))
+            except PermissionError:
+                return WebRtcResult(stun_blocked=True)
             data, _ = sock.recvfrom(1024)
-        except socket.timeout:
-            # Timeout = firewall ate the packet (or STUN server is
-            # ghosted). Either way the user's IP didn't escape.
-            return WebRtcResult(stun_blocked=True)
-        except OSError as e:
-            return WebRtcResult(stun_blocked=True, error=str(e))
-        # We got a STUN response. Sanity-check it's actually STUN
-        # (magic cookie at offset 4) before declaring a leak.
-        if len(data) >= 20 and data[4:8] == b"\x21\x12\xA4\x42":
-            return WebRtcResult(stun_blocked=False)
-        return WebRtcResult(
-            stun_blocked=False,
-            error="non-STUN response",
-        )
-    finally:
-        sock.close()
+    except OSError as exc:
+        return WebRtcResult(error=type(exc).__name__)
+
+    if len(data) >= 20 and data[:2] == b"\x01\x01" and data[4:20] == packet[4:20]:
+        return WebRtcResult()
+    return WebRtcResult(error="Invalid STUN response")
+
 
 
 # ===== Orchestrator ========================================================

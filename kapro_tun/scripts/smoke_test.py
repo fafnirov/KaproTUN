@@ -2765,10 +2765,7 @@ check("ui: settings has no over-long non-wrapping labels (no clip)",
 # repeated CI builds), but we DO want to verify:
 #   - The STUN-packet builder produces a valid 20-byte RFC 5389
 #     Binding Request header (this is offline-safe).
-#   - probe_webrtc() returns stun_blocked=True on a timeout (the
-#     desired result when our firewall does its job — we simulate
-#     this by pointing the probe at a closed UDP port and a short
-#     timeout).
+#   - Mocked network errors do not count as confirmed protection.
 #   - The report dataclasses construct cleanly with default values
 #     (the worker creates an empty report on unexpected exception).
 
@@ -2816,47 +2813,53 @@ def _leak_test_stun_packet_shape() -> None:
         )
 
 
-def _leak_test_webrtc_returns_blocked_on_timeout() -> None:
-    """Point probe_webrtc at a guaranteed-unreachable address with a
-    very short timeout. The desired outcome of the probe — when our
-    firewall does its job — is exactly the same shape as "destination
-    silently drops": stun_blocked=True. So the probe must return that
-    for an unresponsive endpoint."""
-    from kapro_tun.core import leak_test as _lt
+def _leak_test_probe_failures_are_inconclusive() -> None:
+    import socket
+    from unittest.mock import MagicMock, patch
+    from kapro_tun.core import leak_test as lt
 
-    # Patch the STUN address to TEST-NET-3 (RFC 5737 reserved doc
-    # range, guaranteed not routable) so the packet times out fast
-    # without actually hitting a real STUN server.
-    import socket as _socket
-    real_sendto = _socket.socket.sendto
+    for error in (lt.requests.exceptions.SSLError, lt.requests.exceptions.ProxyError):
+        with patch.object(lt.requests, "get", side_effect=error("probe failed")):
+            result = lt.probe_ipv6("socks5h://127.0.0.1:1080")
+        assert not result.ipv6_blocked and not result.ip and result.error
 
-    # Easier: monkey-patch probe_webrtc's internal socket calls by
-    # replacing the address at send time. Cleanest is to override
-    # the STUN host constant via the module if it existed — but it's
-    # inlined in the function. So we use a brief monkeypatch on
-    # the socket sendto: redirect any sendto to 127.0.0.1:1 (port
-    # 1 is reserved, packets dropped).
-    def fake_sendto(self, data, address):
-        return real_sendto(self, data, ("127.0.0.1", 1))
-    _socket.socket.sendto = fake_sendto
-    try:
-        # Probe with very short timeout — would otherwise take 2 s.
-        result = _lt.probe_webrtc(timeout=0.3)
-    finally:
-        _socket.socket.sendto = real_sendto
-    if not result.stun_blocked:
-        raise AssertionError(
-            "probe_webrtc should report stun_blocked=True on timeout, "
-            f"got blocked={result.stun_blocked} error={result.error!r}"
+    with patch.object(lt.requests, "get", return_value=MagicMock(status_code=200, text="2001:db8::1")):
+        assert lt.probe_ipv6(None).ip == "2001:db8::1"
+
+    with patch.object(lt.socket, "socket") as open_socket:
+        sock = open_socket.return_value.__enter__.return_value
+        sock.sendto.side_effect = socket.gaierror("DNS lookup failed")
+        result = lt.probe_webrtc()
+        assert not result.ok and result.error
+        assert not lt.fixable_protections(
+            lt.LeakTestReport(webrtc=result), {"webrtc_leak_protection": False}
         )
+
+        sock.sendto.side_effect = None
+        sock.recvfrom.side_effect = socket.timeout()
+        result = lt.probe_webrtc()
+        assert not result.ok and result.error
+
+        sock.recvfrom.side_effect = None
+        sock.sendto.side_effect = PermissionError()
+        assert lt.probe_webrtc().ok
+
+        sock.sendto.side_effect = None
+        def matching_reply(_size):
+            request = sock.sendto.call_args.args[0]
+            return b"\x01\x01" + request[2:], ("127.0.0.1", 19302)
+
+        sock.recvfrom.side_effect = matching_reply
+        result = lt.probe_webrtc()
+        assert not result.ok and result.error is None
 
 
 check("leak_test: dataclasses construct with sane defaults",
       _leak_test_dataclasses_default)
 check("leak_test: STUN binding request packet is RFC-shaped",
       _leak_test_stun_packet_shape)
-check("leak_test: probe_webrtc returns blocked on timeout",
-      _leak_test_webrtc_returns_blocked_on_timeout)
+check("leak_test: probe failures are inconclusive",
+      _leak_test_probe_failures_are_inconclusive)
 
 
 # v1.19.3: the leak test offers a one-click fix when a leak is leaking only
@@ -9787,6 +9790,13 @@ def _v41_leak_and_download_dialogs() -> None:
         dlg._again_btn.click()
         if [r.verdict for r in dlg._rows] != ["wait"] * 4 or not dlg._fix_btn.isHidden():
             raise AssertionError("'check again' must start from a clean dialog")
+        dlg._on_report(leak_test.LeakTestReport(
+            ipv6=leak_test.IPv6Result(error="SSLError"),
+            webrtc=leak_test.WebRtcResult(error="gaierror"),
+        ))
+        assert dlg._row_ipv6.verdict == dlg._row_webrtc.verdict == "warn"
+        assert dlg._fix_btn.isHidden()
+        dlg._again_btn.click()
         dlg._on_watchdog_fire()
         if [r.verdict for r in dlg._rows] != ["fail"] * 4 or not dlg._again_btn.isEnabled():
             raise AssertionError("a hung test must end as a timeout the user can retry")
