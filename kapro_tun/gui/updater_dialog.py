@@ -279,6 +279,9 @@ class UpdaterDialog(kit.OverlayDialog):
             # installer and drops the tunnel — that takes a deliberate press.
             default="later", handlers={"later": self.reject, "update": self._start_download})
         self.later_btn, self.update_btn = self.buttons["later"], self.buttons["update"]
+        if sys.platform != "win32":
+            self.update_btn.setText(tr("upd.release_page"))
+            self.update_btn.setEnabled(bool(self.release_link.url()))
 
     def _cancel_download(self) -> None:
         """Abort any in-flight download and make the result slots inert.
@@ -310,6 +313,10 @@ class UpdaterDialog(kit.OverlayDialog):
         self.status_label.style().polish(self.status_label)
 
     def _start_download(self) -> None:
+        if sys.platform != "win32":
+            self._set_status(tr("upd.manual_hint"))
+            self.release_link.click()
+            return
         # An installer held for a launch that then did not happen would block
         # the download from replacing it.
         release_launch_guards()

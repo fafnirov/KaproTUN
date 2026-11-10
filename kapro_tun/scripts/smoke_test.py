@@ -8212,7 +8212,7 @@ def _v401_subscription_cannot_hijack_a_server() -> None:
 
     # And a fetched subscription stamps its entries.
     body = "\n".join(u for _p, u in SAMPLE_URLS)
-    with _v4_patched(_sub, _fetch=lambda *_a, **_k: (body, None)):
+    with _v4_patched(_sub, _fetch=lambda *_a, **_k: (body, None, {})):
         got = _sub.import_subscription("https://a.example/sub")
     if not got.configs or {c.source for c in got.configs} != {a}:
         raise AssertionError("imported servers do not carry their subscription's id")
@@ -12941,6 +12941,127 @@ check("build: the installer draws every screen on request and installs nothing (
 check("installer: the installed version comes from the registry, not from PowerShell (v4.2.0)",
       _v420_installed_version_from_registry)
 
+
+
+def _v424_platform_update() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtWidgets import QWidget
+    from kapro_tun.core.updater import UpdateInfo
+    from kapro_tun.gui import updater_dialog as ud
+    _v41_app()
+    host = QWidget()
+    info = UpdateInfo("9.9.9", "v9.9.9", "https://example.com/release", "", "a" * 64)
+    for platform in ("darwin", "linux", "win32"):
+        with (
+            patch.object(ud, "sys", SimpleNamespace(platform=platform)),
+            patch.object(QDesktopServices, "openUrl", return_value=True) as opened,
+            patch.object(ud._DownloadWorker, "start") as started,
+        ):
+            dlg = ud.UpdaterDialog(info, host)
+            dlg.update_btn.click()
+            if platform == "win32":
+                assert started.call_count == 1 and not opened.called
+                assert dlg._download_worker._dest.suffix == ".exe"
+            else:
+                assert not started.called and dlg._download_worker is None
+                assert opened.call_args.args[0].toString() == info.url
+            dlg.reject()
+
+
+def _v424_private_retry() -> None:
+    from unittest.mock import patch
+    from kapro_tun.core import subscription as sub, storage
+    from kapro_tun.core.parser import parse
+    cfg = parse("trojan://password@example.com:443#Server")
+    for first in (sub.SubscriptionResult([], [], 0), sub.requests.ConnectionError("failed")):
+        with (
+            patch.object(storage, "load_settings", return_value={"minimal_metadata": True}),
+            patch.object(sub, "_probe_local_proxy", return_value=True),
+            patch.object(sub, "import_subscription",
+                         side_effect=[first, sub.SubscriptionResult([cfg], [], 1)]) as fetch,
+        ):
+            sub.import_with_dpi_fallback("https://example.com/sub")
+            assert [c.kwargs["proxy_url"] for c in fetch.call_args_list] == [
+                "http://127.0.0.1:2082", "http://127.0.0.1:2082"]
+            assert fetch.call_args_list[1].kwargs["minimal_metadata"] is False
+
+
+def _v424_server_rename() -> None:
+    from dataclasses import replace
+    from kapro_tun.core import subscription as sub
+    from kapro_tun.core.parser import parse
+    cfg = parse("trojan://password@example.com:443#Old")
+    cfg.source = "provider-A"
+    incoming = replace(cfg, name="New")
+    res = sub.merge_configs([cfg], [incoming])
+    assert [c.name for c in res.configs] == ["New"]
+    assert res.added == 0 and res.updated == 1
+    assert cfg.name == "Old"
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from kapro_tun.gui.main_window import MainWindow
+    window = SimpleNamespace(_active_config=cfg, configs=res.configs, manager=Mock())
+    MainWindow._rebind_active_config(window)
+    assert window._active_config is res.configs[0]
+    window.manager.update_settings.assert_called_once_with(last_config_name="New")
+    again = sub.merge_configs(res.configs, [incoming])
+    assert len(again.configs) == 1
+    other = replace(cfg, source="provider-B")
+    res = sub.merge_configs([cfg], [replace(other, name="New")])
+    assert len(res.configs) == 2
+
+
+def _v424_parallel_headers() -> None:
+    import threading
+    from unittest.mock import Mock, patch
+    from kapro_tun.core import subscription as sub
+    ready, proceed = threading.Event(), threading.Event()
+    original = sub._fetch
+    results, errors = {}, []
+
+    def response(url, **_kwargs):
+        r = Mock()
+        r.headers = {"Support-Url": url + "/support", "Profile-Web-Page-Url": url + "/account"}
+        r.text = "trojan://password@example.com:443#Server"
+        return r
+
+    def interleave(url, *args, **kwargs):
+        result = original(url, *args, **kwargs)
+        if url.endswith("/A"):
+            ready.set()
+            assert proceed.wait(5), "parallel fetch timed out"
+        return result
+
+    def fetch_a():
+        try:
+            results["A"] = sub.import_subscription("https://example.com/A", minimal_metadata=True)
+        except Exception as exc:
+            errors.append(exc)
+
+    with (
+        patch.object(sub.requests, "get", side_effect=response),
+        patch.object(sub, "_fetch", side_effect=interleave),
+    ):
+        worker = threading.Thread(target=fetch_a, daemon=True)
+        worker.start()
+        try:
+            assert ready.wait(5)
+            results["B"] = sub.import_subscription("https://example.com/B", minimal_metadata=True)
+        finally:
+            proceed.set()
+            worker.join(5)
+        assert not worker.is_alive() and not errors
+    for name in ("A", "B"):
+        assert results[name].support_url == f"https://example.com/{name}/support"
+        assert results[name].account_url == f"https://example.com/{name}/account"
+
+
+check("v4.2.4: update action follows the platform", _v424_platform_update)
+check("v4.2.4: private retry preserves the proxy", _v424_private_retry)
+check("v4.2.4: subscription rename updates its server", _v424_server_rename)
+check("v4.2.4: parallel subscriptions keep their own headers", _v424_parallel_headers)
 
 # ---------------------------------------------------------------------------
 # Report

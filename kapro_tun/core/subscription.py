@@ -73,10 +73,6 @@ USER_AGENT = f"KaproVPN/{__version__} (Windows; +https://github.com/fafnirov/Kap
 # goal: the string is IDENTICAL for every user and every release, so it carries
 # nothing about this particular device (the "Windows" token is a constant, not
 # a report of the real OS).
-# Headers from the most recent fetch that carry the provider's own
-# guidance (support contact, account page, announcement).
-_last_headers: dict = {}
-
 USER_AGENT_MINIMAL = ("KaproVPN/1.0.0 (Windows; "
                       "+https://github.com/fafnirov/KaproTUN)")
 
@@ -455,10 +451,10 @@ def parse_subscription_body(body: str) -> list[str]:
 def _fetch(url: str, timeout: tuple[float, float],
            proxy_url: Optional[str] = None,
            minimal_metadata: Optional[bool] = None,
-           ) -> tuple[str, Optional[SubscriptionInfo]]:
+           ) -> tuple[str, Optional[SubscriptionInfo], dict[str, str]]:
     """One requests.get call; optionally routed through proxy_url.
 
-    Returns (body, userinfo) — userinfo parsed from the provider's
+    Returns (body, userinfo, headers) — userinfo parsed from the provider's
     `Subscription-Userinfo` header (remaining traffic + expiry), or None.
     """
     proxies = None
@@ -483,12 +479,12 @@ def _fetch(url: str, timeout: tuple[float, float],
     response = requests.get(url, timeout=timeout, proxies=proxies, headers=headers)
     response.raise_for_status()
     userinfo = parse_userinfo(response.headers.get("Subscription-Userinfo", ""))
-    _last_headers.clear()
+    headers = {}
     for key in ("Support-Url", "Profile-Web-Page-Url", "Profile-Title", "Announce"):
         value = response.headers.get(key)
         if value:
-            _last_headers[key] = value
-    return response.text, userinfo
+            headers[key] = value
+    return response.text, userinfo, headers
 
 
 def _looks_like_dpi_block(err: Exception) -> bool:
@@ -707,6 +703,14 @@ def merge_configs(existing: list[ProxyConfig],
             result.updated += 1
             continue
         named = by_name.get(nk)
+        ours = by_endpoint.get((src, endpoint_key(cfg))) if src else None
+        if ours is not None:
+            # Preserve a name chosen for a cross-source conflict. An ordinary
+            # rename from this source can take the new name when it is free.
+            name = cfg.name if named is None or named == ours else out[ours].name
+            put(ours, replace(cfg, name=name))
+            result.updated += 1
+            continue
         if named is None:
             out.append(cfg)
             index(len(out) - 1)
@@ -714,14 +718,6 @@ def merge_configs(existing: list[ProxyConfig],
             continue
         if _same_server(out[named], cfg):
             put(named, replace(cfg, source=src or out[named].source))
-            result.updated += 1
-            continue
-        # The name is taken by a different server from elsewhere. If an earlier
-        # "keep both" already stored ours under another name, that is the one
-        # to refresh — otherwise the same question would come back every time.
-        ours = by_endpoint.get((src, endpoint_key(cfg))) if src else None
-        if ours is not None:
-            put(ours, replace(cfg, name=out[ours].name))
             result.updated += 1
             continue
         result.conflicts.append((out[named], cfg))
@@ -741,9 +737,8 @@ def import_subscription(
     "http://127.0.0.1:2082" to go via the active sing-box VPN tunnel).
     Raises requests.RequestException on network failure.
     """
-    body, userinfo = _fetch(url, timeout, proxy_url=proxy_url,
-                            minimal_metadata=minimal_metadata)
-    headers = dict(_last_headers)
+    body, userinfo, headers = _fetch(url, timeout, proxy_url=proxy_url,
+                                     minimal_metadata=minimal_metadata)
     result = result_from_body(body, via_proxy=bool(proxy_url))
     for cfg in result.configs:
         cfg.source = source_id(url)
@@ -814,7 +809,7 @@ def import_with_dpi_fallback(
                         "повтор с обычным идентификатором клиента")
         except Exception:
             pass
-        return import_subscription(url, timeout=timeout,
+        return import_subscription(url, timeout=timeout, proxy_url=proxy_url,
                                    minimal_metadata=False)
     try:
         return import_subscription(url, timeout=timeout)

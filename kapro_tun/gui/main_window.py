@@ -1997,8 +1997,16 @@ class MainWindow(QMainWindow):
         one would keep dialling the dead address."""
         if self._active_config is not None:
             name = self._active_config.name
-            self._active_config = next((c for c in self.configs if c.name == name),
-                                       self._active_config)
+            from ..core.subscription import endpoint_key
+            previous = self._active_config
+            current = next((c for c in self.configs if c.name == name), None)
+            if current is None and previous.source:
+                current = next((c for c in self.configs
+                                if c.source == previous.source
+                                and endpoint_key(c) == endpoint_key(previous)), None)
+            self._active_config = current or previous
+            if self._active_config.name != name:
+                self.manager.update_settings(last_config_name=self._active_config.name)
 
     def _on_open_add_page(self) -> None:
         """"Add" on the Servers tab or on the empty home screen."""
