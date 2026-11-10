@@ -13,8 +13,7 @@
 #   KaproTUN-v<ver>.exe                      application   (our own release;
 #                                            what the installer downloads)
 #
-# Nothing else. The geoip zone file is NOT mirrored — geoip_ru.py fetches
-# ipdeny.com directly, and ipdeny is not blocked in RU.
+#   ru-aggregated.zone                      RU IPv4 CIDRs (ipdeny.com)
 #
 # Versions are read from the client source on GitHub rather than pinned
 # here, so bumping SINGBOX_PINNED_VERSION in a commit is all it takes for
@@ -120,6 +119,12 @@ note "=== wintun ${WINTUN_VERSION} ==="
 # the v4.0.1 installer back for the best part of an hour.
 fetch "https://www.wintun.net/builds/${WINTUN_FILE}" "$TMP_DIR/$WINTUN_FILE" 102400 90 0 \
     || note "  [skip] $WINTUN_FILE — clients fall back to wintun.net directly"
+
+# --- Russian IP list ------------------------------------------------------
+# Optional: the client tries ipdeny first, then this copy on a network error.
+fetch "https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone" \
+      "$TMP_DIR/ru-aggregated.zone" 5000 45 0 \
+    || note "  [skip] RU IP list — keeping the previous mirror copy"
 
 # --- our own installer ----------------------------------------------------
 

@@ -1159,7 +1159,10 @@ def run_silent() -> int:
                 )
             except OSError:
                 pass
-        QApplication.quit()
+        # The card vetoes close events while installing. QApplication.quit()
+        # asks it to close too, so finish the event loop explicitly.
+        window.hide()
+        app.exit(0)
 
     def on_done() -> None:
         window.set_done()

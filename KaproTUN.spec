@@ -35,7 +35,8 @@ if _is_windows:
         FixedFileInfo, StringFileInfo, StringStruct, StringTable,
         VarFileInfo, VarStruct, VSVersionInfo,
     )
-    _version_tuple = tuple(map(int, _version.split('.'))) + (0,)
+    _version_tuple = tuple(map(int, _version.split('.')))
+    _version_tuple += (0,) * (4 - len(_version_tuple))
     _version_resource = VSVersionInfo(
         ffi=FixedFileInfo(filevers=_version_tuple, prodvers=_version_tuple,
                           mask=0x3f, flags=0, OS=0x40004, fileType=1,

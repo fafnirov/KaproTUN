@@ -8424,6 +8424,18 @@ def _v401_geoip_list_is_validated() -> None:
                 for i in range(0, len(self.payload), chunk_size):
                     yield self.payload[i:i + chunk_size]
 
+        # A network timeout immediately switches to our mirror.
+        from unittest.mock import patch
+        payload = ("\n".join(good) + "\n").encode()
+        with patch.object(g.requests, "get", side_effect=[
+            g.requests.Timeout("upstream timed out"), _Resp(payload)
+        ]) as request:
+            g.download(attempts=1)
+            assert [c.args[0] for c in request.call_args_list] == [
+                g.GEOIP_RU_URL, g.GEOIP_RU_MIRROR_URL]
+            assert len(g.load_cidrs()) == len(good)
+        g.cache_file().unlink()
+
         def fetch_as(payload: bytes) -> bool:
             with _v4_patched(g.requests, get=lambda *_a, **_k: _Resp(payload)):
                 try:

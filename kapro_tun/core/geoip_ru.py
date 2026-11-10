@@ -30,6 +30,7 @@ import requests
 from . import paths
 
 GEOIP_RU_URL = "https://www.ipdeny.com/ipblocks/data/aggregated/ru-aggregated.zone"
+GEOIP_RU_MIRROR_URL = "https://kaprovpn.pro/files/ru-aggregated.zone"
 MIN_VALID_FILE_BYTES = 5_000  # sanity check — actual file is ~135 KB
 MAX_FILE_BYTES = 2_000_000    # ~15x the real file; nothing legitimate is bigger
 
@@ -103,13 +104,13 @@ def download(progress: ProgressCb = None, attempts: int = 3) -> None:
     The body is size-capped and must pass parse_cidrs() BEFORE it is written;
     the write is atomic, so the cache never holds a partial or refused list."""
     last_err: Optional[Exception] = None
-    for attempt in range(attempts):
+    for url in (GEOIP_RU_URL, GEOIP_RU_MIRROR_URL) * attempts:
         try:
             data = b""
-            with requests.get(GEOIP_RU_URL, stream=True, timeout=(10, 20),
+            with requests.get(url, stream=True, timeout=(10, 20),
                               proxies=_NO_PROXY) as r:
                 r.raise_for_status()
-                if not str(getattr(r, "url", GEOIP_RU_URL)).lower().startswith("https://"):
+                if not str(getattr(r, "url", url)).lower().startswith("https://"):
                     raise InvalidList("redirected away from HTTPS")
                 total = int(r.headers.get("Content-Length", 0))
                 chunks: list[bytes] = []
