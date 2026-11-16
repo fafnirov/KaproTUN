@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QAbstractButton,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QBoxLayout,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -532,6 +534,24 @@ class OverlayDialog(QDialog):
 
     # --- building ---------------------------------------------------------
 
+    def enable_scrolling(self) -> None:
+        """Opt in for longer forms: fit the host and keep every action reachable."""
+        inner = QWidget()
+        inner.setLayout(self.body)
+        if tokens.text_scale >= 1.5:
+            actions = self.body.itemAt(self.body.count() - 1).layout()
+            if isinstance(actions, QBoxLayout):
+                actions.setDirection(QBoxLayout.TopToBottom)
+        self._scroll_body = QScrollArea()
+        self._scroll_body.setObjectName("ktTextScroll")
+        self._scroll_body.setFrameShape(QFrame.NoFrame)
+        self._scroll_body.setWidgetResizable(True)
+        self._scroll_body.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll_body.setWidget(inner)
+        layout = QVBoxLayout(self.card)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._scroll_body)
+
     def head(self, icon: str, title: str, text: str = "", tone: str = "") -> None:
         """`tone`: "" (neutral) / accent / danger."""
         row = QHBoxLayout()
@@ -665,6 +685,15 @@ class OverlayDialog(QDialog):
             edge = tokens.SP_6 if area.height() >= 620 else tokens.SP_2
             self.layout().setContentsMargins(tokens.SP_6, edge, tokens.SP_6, edge)
             self.setGeometry(area)
+        if hasattr(self, "_scroll_body"):
+            available = self._host.size() if self._covering else self.screen().availableGeometry().size()
+            width = min(round(412 * tokens.text_scale), available.width() - 2 * tokens.SP_6)
+            self.card.setFixedWidth(max(240, width))
+            self.body.invalidate()
+            needed = self.body.totalHeightForWidth(width - tokens.SP_4)
+            needed = max(needed, self.body.minimumSize().height())
+            height = min(needed + tokens.SP_2, available.height() - tokens.TITLEBAR_H - 2 * tokens.SP_6)
+            self.card.setFixedHeight(max(120, height))
 
     def showEvent(self, event) -> None:  # noqa: N802
         self._cover_host()

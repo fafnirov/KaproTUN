@@ -208,6 +208,7 @@ class ConnectionManager:
 
     def __init__(self, on_log: Optional[Callable[[str], None]] = None):
         self._on_log = on_log
+        self.connection_stage = "prepare"
         # What actually happened to each firewall protection the user switched
         # on, for this session: "active", "failed", "needs_admin" or
         # "unsupported". A protection that is switched off has no entry. The
@@ -274,6 +275,7 @@ class ConnectionManager:
     # --- public API -------------------------------------------------------
 
     def connect(self, config: ProxyConfig, direct_domains: list[str]) -> None:
+        self.connection_stage = "prepare"
         if self.is_connected():
             raise ConnectionError(tr("err.already_connected"))
         # An engine that died on its own still holds its files and its config
@@ -724,6 +726,7 @@ class ConnectionManager:
         if not sing_box_installer.is_installed():
             raise ConnectionError(tr("err.singbox_not_installed"))
 
+        self.connection_stage = "resolve"
         server_host = str(config.outbound.get("server", "")).strip()
         if not server_host:
             raise ConnectionError(tr("err.no_server_address"))
@@ -766,6 +769,7 @@ class ConnectionManager:
         # Generate + write the runtime config (may raise UnsupportedBySingBox,
         # which the dispatcher turns into a 'use legacy' message — no process
         # has started yet, so nothing to roll back).
+        self.connection_stage = "configure"
         cfg_path = sing_box_config.write_config(
             config, direct_domains, server_ip=server_ip,
             block_ads=block_ads, on_log=self._log, **plan,
@@ -792,6 +796,7 @@ class ConnectionManager:
 
         # Kill-switch BEFORE the tunnel comes up, written for this server.
         self.protection_status = {}
+        self.connection_stage = "protect"
         self._maybe_arm_killswitch(server_ip)
         if (self.protection_status.get("kill_switch") == "failed"
                 and not self._killswitch_armed):
@@ -881,6 +886,7 @@ class ConnectionManager:
     def _bring_up_tun_engine(self, cfg_path: str) -> None:
         """Start the engine on `cfg_path` and wait until the tunnel carries
         real traffic. Raises ConnectionError; the caller cleans up."""
+        self.connection_stage = "start"
         try:
             self.sing_box_process.start(cfg_path)
         except Exception as e:
@@ -925,6 +931,7 @@ class ConnectionManager:
         # device exists, lay the routing + DNS ourselves via iproute2/
         # resolvectl. No-op on Windows/macOS, where auto_route already did it.
         linux_tun_route.setup()
+        self.connection_stage = "verify"
         # The process being alive and DNS resolving are not enough: encrypted
         # DNS is intentionally independent of the VPN transport. Require a
         # real HTTP request whose route falls through final=proxy.
@@ -952,6 +959,7 @@ class ConnectionManager:
         deliberately not asking for."""
         if not sing_box_installer.is_installed():
             raise ConnectionError(tr("err.singbox_not_installed"))
+        self.connection_stage = "resolve"
         server_host = str(config.outbound.get("server", "")).strip()
         if not server_host:
             raise ConnectionError(tr("err.no_server_address"))
@@ -978,14 +986,17 @@ class ConnectionManager:
                   "это правила firewall, им нужны права администратора")
 
         try:
+            self.connection_stage = "configure"
             cfg_path = sing_box_config.write_proxy_config(
                 config, direct_domains, server_ip=server_ip,
                 route_ru_direct=bool(self.settings.get("route_ru_direct", True)),
                 api_secret=self._api_secret,
+                proxy_domains=list(self.settings.get("proxy_sites", []) or []),
             )
             ok, msg = self._check_engine_config(cfg_path)
             if not ok:
                 raise ConnectionError(tr("err.singbox_rejected_config", msg=msg))
+            self.connection_stage = "start"
             try:
                 self.sing_box_process.start(cfg_path)
             except Exception as e:
@@ -995,6 +1006,7 @@ class ConnectionManager:
                 tail = "\n".join(self.sing_box_process.recent_logs()[-8:])
                 raise ConnectionError(
                     tr("err.singbox_died_on_start") + (f":\n{tail}" if tail else "."))
+            self.connection_stage = "verify"
             self._log("[*] Проверяю, что прокси sing-box пропускает трафик…")
             if not self._wait_for_singbox_ready(15.0):
                 diag = [l for l in self.sing_box_process.recent_logs()
@@ -1014,6 +1026,7 @@ class ConnectionManager:
         # system: pointing the proxy at a dead port would cut the user off.
         host, port = (sing_box_config.PROXY_LISTEN_HOST,
                       sing_box_config.PROXY_LISTEN_PORT)
+        self.connection_stage = "system_proxy"
         self.system_proxy_applied = proxy_session.begin(host, port)
         if self.system_proxy_applied:
             self._log(f"[*] Системный прокси включён ({host}:{port}) — браузеры "
@@ -1126,6 +1139,7 @@ class ConnectionManager:
             "high_speed": bool(self.settings.get("high_speed", False)),
             "games_direct": bool(self.settings.get("games_direct", True)),
             "bypass_apps": list(self.settings.get("bypass_apps", []) or []),
+            "proxy_domains": list(self.settings.get("proxy_sites", []) or []),
             "lockdown": self._killswitch_wanted(),
         }
 

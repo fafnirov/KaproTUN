@@ -1,22 +1,8 @@
-"""Background subscription auto-refresher.
+"""Refresh the last saved subscription in the background.
 
-Periodically re-fetches the user's saved subscription URL and silently
-merges new servers into the configs list. Lets users forget that
-KaproTUN exists between paying their provider — when they next launch
-the app (or just leave it running), the list is current.
-
-Safety: this is ADDITIVE-ONLY. We never delete configs. Why:
-
-  - Subscription fetches can transiently fail (DPI hit, provider
-    maintenance, expired API key). An "authoritative replace" would
-    nuke the user's known-good servers on a temporary glitch.
-  - Users sometimes add a non-subscription server manually alongside
-    their provider's list. We don't tag origin, so we can't tell
-    "this came from the sub" from "user pasted this themselves".
-
-Worst case: the user accumulates dead servers. They can clean those
-up by hand in the configs picker — much better than losing their
-working server to a flaky network minute.
+Merge by source so providers can rotate their own servers without replacing
+another provider's entries. Missing servers are retained; conflicts wait for
+a manual refresh. Metadata is recorded per provider for My subscriptions.
 """
 from __future__ import annotations
 
@@ -31,7 +17,6 @@ from ..core.subscription import (
     SubscriptionResult,
     import_with_dpi_fallback,
 )
-
 
 # Re-check the subscription every 12 hours. Same cadence as most
 # providers' typical rotation window (some rotate weekly, some daily —
@@ -163,42 +148,31 @@ class SubscriptionAutoRefresh(QObject):
         # (slow network), skip this tick instead of doubling up.
         if self._worker is not None and self._worker.isRunning():
             return
+        self._fetched_url = url
         self._worker = _RefreshWorker(url, parent=self)
         self._worker.succeeded.connect(self._on_fetched)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
     def _on_fetched(self, result: SubscriptionResult) -> None:
-        # Stamp the successful refresh + cache the remaining-traffic / expiry
-        # even when no new servers arrived — the balance still moves between
-        # refreshes, and the "обновлено N назад" line needs the timestamp.
+        from ..core.desktop_experience import remember_subscription
+        from ..core.subscription import merge_configs
+        existing = storage.load_configs()
+        merged = merge_configs(existing, result.configs)
+        # Cross-provider conflicts wait for an explicit manual refresh.
+        changed = merged.configs != existing
+        if changed and not storage.save_configs(merged.configs):
+            return
         settings = storage.load_settings()
         settings["subscription_last_refresh"] = int(time.time())
-        if result.userinfo is not None:
-            settings["subscription_userinfo"] = result.userinfo.to_dict()
+        settings["subscription_userinfo"] = result.userinfo.to_dict() if result.userinfo else {}
         storage.save_settings(settings)
+        url = getattr(self, "_fetched_url", "") or settings.get("subscription_url", "")
+        if url:
+            remember_subscription(url, result, existing, merged.configs)
         self.userinfo_updated.emit()
-        if not result.configs:
-            return  # empty body — treat as transient, don't touch state
-        existing = storage.load_configs()
-        existing_names = {c.name for c in existing}
-        new_configs = [
-            cfg for cfg in result.configs if cfg.name not in existing_names
-        ]
-        if not new_configs:
-            # Routine no-op — nothing new from provider since last check.
-            # Don't spam the log with these; only mention when there's
-            # actual news.
-            return
-        # Append + persist. ConfigsPicker / MainWindow will reload from
-        # storage on their next refresh cycle (1-second QTimer).
-        existing.extend(new_configs)
-        storage.save_configs(existing)
-        self.log_message.emit(
-            f"[*] Auto-refresh подписки: добавлено {len(new_configs)} "
-            f"новых серверов"
-        )
-        self.configs_added.emit(len(new_configs))
+        if changed:
+            self.configs_added.emit(merged.added)
 
     def _on_failed(self, msg: str) -> None:
         # DPI block / network down / provider site flaky — these are

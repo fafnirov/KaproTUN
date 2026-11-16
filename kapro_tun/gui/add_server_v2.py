@@ -475,9 +475,17 @@ class AddServerPage(QWidget):
                 # settings file must not turn "Add to list" into a dead button.
                 app_log.log(f"[subscription] link not remembered: {type(e).__name__}")
         configs = list(result.configs)
+        self._import_context = (url, result)
         self._result, self._result_url = None, ""
         self._set_sub_state(ST_INPUT)
         self.subscription_imported.emit(configs)
+
+    def record_import_summary(self, before, after) -> None:
+        context = getattr(self, "_import_context", None)
+        self._import_context = None
+        if context and context[0]:
+            from ..core.desktop_experience import remember_subscription
+            remember_subscription(context[0], context[1], before, after)
 
     @staticmethod
     def _remember_subscription(url: str, result: SubscriptionResult) -> None:
@@ -491,8 +499,7 @@ class AddServerPage(QWidget):
             urls.append(url)
         changes = {"subscription_url": url, "subscription_urls": urls,
                    "subscription_last_refresh": int(time.time())}
-        if result.userinfo is not None:
-            changes["subscription_userinfo"] = result.userinfo.to_dict()
+        changes["subscription_userinfo"] = result.userinfo.to_dict() if result.userinfo else {}
         storage.update_settings(changes)
 
     # --- clipboard, QR, manual paste ---------------------------------------

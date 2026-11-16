@@ -576,6 +576,7 @@ def build_config(
     proxy,
     direct_domains: list[str],
     *,
+    proxy_domains: list[str] | None = None,
     server_ip: str = "",
     dns_option: str = "system",
     dns_leak_protection: bool = True,
@@ -685,6 +686,9 @@ def build_config(
     # rule, so a CDN IP in geoip:ru can't pull them out the real interface.
     rules.append({"domain_suffix": list(_ALWAYS_PROXY_SUFFIXES),
                   "action": "route", "outbound": "proxy"})
+    forced_domains = sorted({d.strip().lower() for d in (proxy_domains or []) if d.strip()})
+    if forced_domains:
+        rules.append({"domain_suffix": forced_domains, "action": "route", "outbound": "proxy"})
     cleaned_domains = sorted({d.strip().lower() for d in direct_domains if d.strip()})
     if cleaned_domains:
         rules.append({"domain_suffix": cleaned_domains, "action": "route",
@@ -781,6 +785,7 @@ def write_config(
     proxy,
     direct_domains: list[str],
     *,
+    proxy_domains: list[str] | None = None,
     server_ip: str = "",
     dns_option: str = "system",
     dns_leak_protection: bool = True,
@@ -800,7 +805,7 @@ def write_config(
         on_log(f"[*] DNS: {upstream} напрямую (резолвер сети)" if upstream
                else "[*] DNS: системный резолвер (резолвер сети не определён)")
     config = build_config(
-        proxy, direct_domains,
+        proxy, direct_domains, proxy_domains=proxy_domains,
         server_ip=server_ip, dns_option=dns_option,
         dns_leak_protection=dns_leak_protection, block_ads=block_ads,
         route_ru_direct=route_ru_direct, high_speed=high_speed,
@@ -829,6 +834,7 @@ def build_proxy_config(
     proxy,
     direct_domains: list[str],
     *,
+    proxy_domains: list[str] | None = None,
     server_ip: str = "",
     route_ru_direct: bool = False,
     api_secret: str = "",
@@ -858,6 +864,9 @@ def build_proxy_config(
         {"domain_suffix": list(_ALWAYS_PROXY_SUFFIXES),
          "action": "route", "outbound": "proxy"},
     ]
+    forced_domains = sorted({d.strip().lower() for d in (proxy_domains or []) if d.strip()})
+    if forced_domains:
+        rules.append({"domain_suffix": forced_domains, "action": "route", "outbound": "proxy"})
     cleaned_domains = sorted({d.strip().lower() for d in direct_domains if d.strip()})
     if cleaned_domains:
         rules.append({"domain_suffix": cleaned_domains, "action": "route",
@@ -907,6 +916,7 @@ def write_proxy_config(
     proxy,
     direct_domains: list[str],
     *,
+    proxy_domains: list[str] | None = None,
     server_ip: str = "",
     route_ru_direct: bool = False,
     api_secret: str = "",
@@ -915,7 +925,7 @@ def write_proxy_config(
     user-only permissions and same delete-on-disconnect lifecycle as the TUN
     config — it carries the same credentials."""
     config = build_proxy_config(
-        proxy, direct_domains, server_ip=server_ip,
+        proxy, direct_domains, proxy_domains=proxy_domains, server_ip=server_ip,
         route_ru_direct=route_ru_direct, api_secret=api_secret,
     )
     return _write_runtime(config)

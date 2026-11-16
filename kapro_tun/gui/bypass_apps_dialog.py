@@ -10,6 +10,8 @@ most common thing people paste, so one is accepted — and cut down to its name.
 """
 from __future__ import annotations
 
+import sys
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
@@ -53,6 +55,13 @@ class BypassAppsDialog(kit.OverlayDialog):
         self._manager = manager
         self._apps: list[str] = normalize("\n".join(manager.settings.get("bypass_apps", []) or []))
         self.head("apps", tr("bypass.window_title"), tr("bypass.intro_short"))
+        if sys.platform == "win32":
+            self.installed_btn = kit.Button(tr("apps.choose"), "secondary", icon="apps")
+            self.installed_btn.clicked.connect(self._on_installed)
+            self.add_widget(self.installed_btn)
+        self.add_widget(kit.label(tr("route.apps_direct"), "hint", wrap=True))
+        if manager.settings.get("kill_switch", False):
+            self.add_widget(kit.label(tr("route.lockdown"), "hint", wrap=True))
 
         entry = QHBoxLayout()
         entry.setSpacing(tokens.SP_2)
@@ -90,6 +99,7 @@ class BypassAppsDialog(kit.OverlayDialog):
         self.add_actions(
             [("cancel", tr("sites.cancel"), "secondary"), ("save", tr("sites.save"), "primary")],
             handlers={"cancel": self.reject, "save": self._on_save})
+        self.enable_scrolling()
         self._rebuild()
         self.edit.setFocus()
 
@@ -143,6 +153,12 @@ class BypassAppsDialog(kit.OverlayDialog):
                                                  tr("bypass.browse_filter"))
         if path:
             self._add(path)
+
+    def _on_installed(self) -> None:
+        from .installed_apps_dialog import InstalledAppsDialog
+        dlg = InstalledAppsDialog(self._apps, self)
+        if dlg.exec():
+            self._add("\n".join(dlg.selected_apps()))
 
     def _on_save(self) -> None:
         # What is still in the field counts: typing a name and pressing Save

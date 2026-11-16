@@ -8703,9 +8703,10 @@ def _v41_home_states_ru() -> None:
     _v41_app()
     with _v4_fresh_data_dir():
         home = home_v2.HomePage()
+        home._welcome_seen = True
         cfg = _v401_cfg("🇳🇱 Нидерланды", "127.0.0.1")
         clicks = []
-        for sig in ("add_clicked", "card_clicked", "settings_clicked", "logs_clicked"):
+        for sig in ("add_clicked", "card_clicked", "settings_clicked", "logs_clicked", "connect_clicked"):
             getattr(home, sig).connect(lambda s=sig: clicks.append(s))
 
         # No server at all: the ring cannot be pressed, the card adds one.
@@ -8745,7 +8746,7 @@ def _v41_home_states_ru() -> None:
         home._on_notice_action()
         home.set_state(cs.ERROR)
         home._on_notice_action()
-        if clicks[-2:] != ["settings_clicked", "logs_clicked"]:
+        if clicks[-2:] != ["settings_clicked", "connect_clicked"]:
             raise AssertionError(f"notice actions lead to the wrong place: {clicks[-2:]}")
 
         # Live values appear only while connected and are cleared after.
@@ -9301,10 +9302,12 @@ def _v41_window_uses_the_new_pages() -> None:
 
     class _Win:
         _connecting = False
+        _reconcile_favorites = mw.MainWindow._reconcile_favorites
 
         def __init__(self):
             self.manager, self.configs, self._active_config = _Mgr(), [a, b], a
             self._tray_pings, self.calls = {a.name: 10, b.name: 20}, []
+            self._favorite_keys = []
 
         def _goto(self, name):
             self.calls.append(("goto", name))

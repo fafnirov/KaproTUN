@@ -771,7 +771,14 @@ QPushButton#ktBtnPrimary:disabled {{ background-color: {c.surface_hover}; color:
 QPushButton#ktBtnSecondary {{ background-color: {c.surface_2}; color: {c.text}; border: 1px solid {c.line_strong}; }}
 QPushButton#ktBtnSecondary:hover {{ background-color: {c.surface_hover}; border-color: {c.line_hover}; }}
 QPushButton#ktBtnSecondary:pressed {{ background-color: {c.surface_pressed}; }}
+QPushButton#ktBtnSecondary:checked {{ background-color: {c.accent_soft}; color: {c.accent_text}; border-color: {c.accent_line}; }}
+QPushButton#ktBtnSecondary[favorite="true"] {{ min-height: {t.ROW_H_SM - 2}px; max-height: {t.ROW_H_SM - 2}px; padding: 0 {t.SP_2}px; }}
 QPushButton#ktBtnSecondary:disabled {{ background-color: {c.surface}; color: {c.text_disabled}; border-color: {c.line}; }}
+QListWidget#ktPrograms {{ background: {c.surface}; color: {c.text}; border: 1px solid {c.line}; border-radius: {t.R_MD}px; font-size: {t.FS_MD}px; }}
+QListWidget#ktPrograms::item {{ padding: {t.SP_2}px; }}
+QListWidget#ktPrograms::item:selected {{ background: {c.accent_soft}; color: {c.text}; }}
+QListWidget#ktPrograms::indicator {{ width: {t.ICON_SM}px; height: {t.ICON_SM}px; border: 1px solid {c.text_secondary}; border-radius: 3px; background: {c.surface_2}; }}
+QListWidget#ktPrograms::indicator:checked {{ background: {c.accent}; border-color: {c.accent}; }}
 
 /* ===== v2: text roles ===== */
 QLabel#ktH1 {{ background: transparent; color: {c.text}; font-size: {t.FS_XL}px; font-weight: 600; }}

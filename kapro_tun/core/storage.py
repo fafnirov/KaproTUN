@@ -435,7 +435,7 @@ def reset_sites_to_default() -> list[str]:
 # overlays them back into the settings dict, and save_settings strips them
 # out of settings.json and writes them to the blob.
 _SUBSCRIPTION_SECRET_KEYS = (
-    "subscription_url", "subscription_urls", "subscription_userinfo",
+    "subscription_url", "subscription_urls", "subscription_userinfo", "subscription_status",
 )
 
 

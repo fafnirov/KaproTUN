@@ -144,6 +144,9 @@ class ServerRow(QFrame):
         self.name = _NameLabel()
         self.name.setObjectName("ktSrowName")
         top.addWidget(self.name)
+        self.star = IconLabel("star", tokens.ICON_SM, "accent_text")
+        self.star.hide()
+        top.addWidget(self.star)
         self.badge = kit.badge(tr("srv.active"), "accent", dot=True)
         self.badge.setVisible(False)
         top.addWidget(self.badge)
@@ -240,6 +243,7 @@ class _ServerDelegate(QStyledItemDelegate):
         row.set_config(cfg)
         row.set_ping(ping)
         row.set_active(active)
+        row.star.setVisible(bool(index.data(Qt.UserRole + 2)))
         row.set_selected(bool(option.state & QStyle.State_Selected))
         row.set_last(index.row() == index.model().rowCount() - 1)
         hovered = "true" if option.state & QStyle.State_MouseOver else "false"
@@ -312,6 +316,8 @@ class ServersPage(QWidget):
     subscription_clicked = Signal()
     ping_requested = Signal()
     refresh_requested = Signal()         # re-fetch saved subscriptions
+    favorite_requested = Signal(object)
+    subscriptions_requested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -327,6 +333,7 @@ class ServersPage(QWidget):
         self._ordered: list[ProxyConfig] = []
         self._by_name: dict[str, ProxyConfig] = {}
         self._items: dict[str, QListWidgetItem] = {}
+        self._favorites = set()
 
         col = QVBoxLayout(self)
         col.setContentsMargins(tokens.PAGE_PAD_X, tokens.PAGE_PAD_Y,
@@ -350,6 +357,9 @@ class ServersPage(QWidget):
         self.add_btn.clicked.connect(self.add_clicked)
         head.addWidget(self.add_btn)
         col.addLayout(head)
+        self.subscriptions_btn = kit.Button(tr("subs.manage"), "ghost", icon="clock", size="sm")
+        self.subscriptions_btn.clicked.connect(self.subscriptions_requested)
+        col.addWidget(self.subscriptions_btn, 0, Qt.AlignLeft)
 
         self.toolbar = QWidget()
         bar = QHBoxLayout(self.toolbar)
@@ -389,6 +399,10 @@ class ServersPage(QWidget):
         self.picked_name = ElidedLabel()
         self.picked_name.setObjectName("ktActionName")
         actions.addWidget(self.picked_name, stretch=1)
+        self.favorite_btn = kit.Button("", "secondary", icon="star", size="sm", tooltip=tr("fav.add"))
+        self.favorite_btn.setCheckable(True)
+        self.favorite_btn.clicked.connect(self._on_favorite)
+        actions.addWidget(self.favorite_btn)
         self.delete_btn = kit.Button(tr("srv.delete"), "danger", icon="trash", size="sm")
         self.delete_btn.clicked.connect(self._on_delete)
         actions.addWidget(self.delete_btn)
@@ -452,7 +466,12 @@ class ServersPage(QWidget):
         active = name == self._active_name
         item.setData(Qt.UserRole, cfg)
         item.setData(Qt.UserRole + 1, (ping, active))
+        from ..core.desktop_experience import favorite_key
+        pinned = favorite_key(cfg) in self._favorites
+        item.setData(Qt.UserRole + 2, pinned)
         detail = [server_meta(cfg)]
+        if pinned:
+            detail.append(tr("fav.title"))
         if active:
             detail.append(tr("srv.active"))
         if ping == -1 or cfg.protocol.lower() in ("hysteria2", "tuic"):
@@ -469,6 +488,19 @@ class ServersPage(QWidget):
     def set_refreshing(self, busy: bool) -> None:
         self.refresh_btn.setEnabled(not busy)
         self.refresh_btn.setToolTip(tr("srv.refreshing_tip" if busy else "srv.refresh_tip"))
+
+    def set_favorites(self, keys) -> None:
+        changed = self._favorites != set(keys)
+        self._favorites = set(keys)
+        if changed:
+            for name in self._items:
+                self._update_item(name)
+        self._sync_state()
+
+    def _on_favorite(self) -> None:
+        cfg = self.selected()
+        if cfg is not None:
+            self.favorite_requested.emit(cfg)
 
     def select(self, name: str) -> None:
         if self.search.text() and name not in self._items:
@@ -540,6 +572,13 @@ class ServersPage(QWidget):
         self.connect_btn.setText(tr("srv.connected") if in_use else tr("srv.connect"))
         self.delete_btn.setEnabled(on_screen and not in_use)
         self.delete_btn.setToolTip(tr("srv.del_connected_tip") if in_use else "")
+        from ..core.desktop_experience import favorite_key
+        pinned = on_screen and favorite_key(cfg) in self._favorites
+        self.favorite_btn.setChecked(bool(pinned))
+        self.favorite_btn.setEnabled(bool(on_screen))
+        title = tr("fav.remove" if pinned else "fav.add")
+        self.favorite_btn.setToolTip(title)
+        self.favorite_btn.setAccessibleName(title)
 
     def _on_sort_changed(self, mode: int) -> None:
         self._sort_mode = mode

@@ -44,6 +44,7 @@ class SettingsPage(QWidget):
     diagnostics_clicked = Signal()
     bypass_apps_clicked = Signal()
     subscription_clicked = Signal()
+    whats_new_clicked = Signal()
     check_updates_requested = Signal()
     settings_changed = Signal()
 
@@ -158,11 +159,11 @@ class SettingsPage(QWidget):
         # --- subscription and lists ---
         g = kit.Group(tr("set.sec_sub"))
         self._sub_row = self._link_row(
-            g, "download", tr("mw.sub_import_title"), self._sub_info_text(), self.subscription_clicked)
+            g, "download", tr("subs.manage"), self._sub_info_text(), self.subscription_clicked)
         self.minmeta_check = self._switch_row(
             g, "eye-off", tr("set.minmeta"), tr("set.minmeta_hint"), tr("mw.minmeta_hint"),
             bool(s.get("minimal_metadata", False)), self._on_minimal_metadata_changed)
-        self._sites_row = g.add(kit.SettingRow("list", tr("set.sites"), tr("set.sites_hint")))
+        self._sites_row = g.add(kit.SettingRow("list", tr("route.sites"), tr("route.intro")))
         self._sites_value = self._sites_row.add_value("")
         self._sites_row.make_link()
         self._sites_row.clicked.connect(self.sites_clicked)
@@ -172,6 +173,7 @@ class SettingsPage(QWidget):
 
         # --- about ---
         g = kit.Group(tr("set.sec_about"))
+        self._link_row(g, "info", tr("mascot.whats_new"), tr("mascot.intro"), self.whats_new_clicked)
         sb = sing_box_installer.get_installed_version() or tr("mw.not_installed")
         self._about_hint = tr("set.version_hint", sb=sb)
         self._version_row = g.add(kit.SettingRow(
@@ -206,7 +208,7 @@ class SettingsPage(QWidget):
     # --- what the main window drives ---------------------------------------
 
     def refresh_sites_count(self) -> None:
-        self._sites_value.setText(plural_domains(len(storage.load_sites())))
+        self._sites_value.setText(plural_domains(len(storage.load_sites()) + len(storage.load_settings().get("proxy_sites", []) or [])))
 
     def _sub_info_text(self) -> str:
         """The subscription row's hint: remaining traffic / expiry (if the

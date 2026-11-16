@@ -427,6 +427,9 @@ class MainWindow(QMainWindow):
         # once at startup + after any config-list mutation.
         # name → latency in ms, or None (unreachable), or -1 (UDP-only).
         self._tray_pings: dict[str, Optional[int]] = {}
+        self._pings_measured_at = 0
+        self._favorite_keys = list(storage.load_settings().get("favorite_servers", []) or [])[:3]
+        self._last_connect_error = ""
         self._tray_pinger: Optional[object] = None  # PingerThread instance
         self._connect_worker: Optional[_ConnectWorker] = None
         self._prev_traffic: Optional[xray_stats.TrafficStats] = None
@@ -637,11 +640,16 @@ class MainWindow(QMainWindow):
     def _wire_signals(self) -> None:
         self.home_page.connect_clicked.connect(self._on_connect_click)
         self.home_page.card_clicked.connect(self._on_open_servers)
+        self.home_page.favorite_chosen.connect(self._on_server_chosen)
+        self.home_page.whats_new_clicked.connect(self._on_whats_new)
+        self.servers_page.favorite_requested.connect(self._on_favorite)
+        self.servers_page.subscriptions_requested.connect(self._on_subscriptions)
+        self.settings_page.whats_new_clicked.connect(self._on_whats_new)
         self.settings_page.sites_clicked.connect(self._on_edit_sites)
         self.settings_page.logs_clicked.connect(lambda: self._goto("logs"))
         self.settings_page.diagnostics_clicked.connect(self._on_open_diagnostics)
         self.settings_page.bypass_apps_clicked.connect(self._on_edit_bypass_apps)
-        self.settings_page.subscription_clicked.connect(self._on_import_subscription)
+        self.settings_page.subscription_clicked.connect(self._on_subscriptions)
         self.home_page.banner_clicked.connect(self._on_import_subscription)
         self.home_page.sites_clicked.connect(self._on_edit_sites)
         self.home_page.settings_clicked.connect(lambda: self._goto("settings"))
@@ -776,6 +784,7 @@ class MainWindow(QMainWindow):
 
         def on_finished() -> None:
             self._tray_pings = new_pings
+            self._pings_measured_at = int(time.time())
             # Push the new pings into the tray menu — this rebuilds the
             # quick-connect top-3.
             active_name = self._active_config.name if self._active_config else ""
@@ -861,6 +870,8 @@ class MainWindow(QMainWindow):
         # "connecting" pulse keeps animating until the worker finishes
         # and we get the success/failure signal.
         if self._connecting:
+            self.home_page.set_stage(getattr(self.manager, "connection_stage", "prepare"))
+            self._sync_favorites()
             self.tray.set_state("connecting", self._active_config.name if self._active_config else "")
             self._sync_servers_page()
             return
@@ -1004,6 +1015,8 @@ class MainWindow(QMainWindow):
                     and self._reconnect_attempts >= self._reconnect_max):
                 self.home_page.set_state(connection_state.ERROR, tr("mw.state_vpn_failed"))
                 self.tray.set_state("idle", active_name)
+            elif self._last_connect_error:
+                self.home_page.set_state(connection_state.ERROR, self._last_connect_error)
             else:
                 self.home_page.set_state(connection_state.DISCONNECTED)
                 self.tray.set_state("idle", active_name)
@@ -1016,6 +1029,7 @@ class MainWindow(QMainWindow):
                                 known=active_name in self._tray_pings)
         self.tray.set_configs(self.configs, active_name, self._tray_pings)
         self._sync_servers_page()
+        self._sync_favorites()
 
     def _sync_servers_page(self) -> None:
         """Hand the Servers tab the current list, the active server and
@@ -1159,7 +1173,11 @@ class MainWindow(QMainWindow):
         # set_state call starts its burst + pulse animation on a Qt event
         # loop that's about to be free, not one we're about to block.
         self._connecting = True
+        self._last_connect_error = ""
+        self.manager.connection_stage = "prepare"
         self.home_page.set_state("connecting")
+        self.home_page.set_stage("prepare")
+        self._sync_favorites()
         self.tray.set_state(
             "connecting",
             self._active_config.name if self._active_config else "",
@@ -1349,6 +1367,7 @@ class MainWindow(QMainWindow):
         self.home_page.set_public_ip(ip, country_name, city, country_code)
 
     def _on_connect_failed(self, msg: str) -> None:
+        self._last_connect_error = one_line(app_log.redact(msg), 180)
         self._connecting = False
         self.home_page.set_state("idle")
         self._refresh_home()
@@ -1418,10 +1437,15 @@ class MainWindow(QMainWindow):
         dlg = kit.OverlayDialog(self, wide=True)
         dlg.head("x-circle", tr("mw.connect_failed_title"), "", tone="danger")
         dlg.add_long_text(str(msg), max_height=260)
-        dlg.add_actions([("close", tr("leak.close_btn"), "primary")], default="close",
-                        left=(("logs", tr("dlg.logs"), "ghost"),), icons={"logs": "file"})
-        if dlg.ask() == "logs":
-            self._goto("logs")
+        dlg.add_actions([("close", tr("leak.close_btn"), "secondary"),
+                         ("retry", tr("btn.retry"), "primary")], default="close",
+                        left=(("servers", tr("fav.manage"), "ghost"),))
+        dlg.enable_scrolling()
+        action = dlg.ask()
+        if action == "retry":
+            QTimer.singleShot(0, self._on_connect_click)
+        elif action == "servers":
+            self._on_open_servers()
 
     def _arm_reconnect(self, reason: str, attempt: int, total: int) -> bool:
         """Gate + log EVERY auto-reconnect initiation. Returns True if the
@@ -1950,6 +1974,56 @@ class MainWindow(QMainWindow):
             self.servers_page.select(self._active_config.name)
         self._goto("servers")
 
+    def _sync_favorites(self) -> None:
+        from ..core.desktop_experience import favorite_key
+        by_key = {favorite_key(c): c for c in self.configs}
+        selected = [by_key[k] for k in self._favorite_keys if k in by_key]
+        self.home_page.set_favorites(selected, self._tray_pings, self._pings_measured_at,
+                                     self._connecting,
+                                     self._active_config.name if self._active_config else "",
+                                     self.manager.is_connected())
+        self.servers_page.set_favorites(self._favorite_keys)
+
+    def _on_favorite(self, config) -> None:
+        from ..core.desktop_experience import favorite_key
+        key = favorite_key(config)
+        if key in self._favorite_keys:
+            self._favorite_keys.remove(key)
+        elif len(self._favorite_keys) < 3:
+            self._favorite_keys.append(key)
+        else:
+            show_toast(self, tr("fav.limit"), kind="info")
+        storage.update_settings({"favorite_servers": self._favorite_keys})
+        self._sync_favorites()
+
+    def _reconcile_favorites(self, before) -> None:
+        from ..core.desktop_experience import reconcile_favorites
+        keys = reconcile_favorites(self._favorite_keys, before, self.configs)
+        if keys != self._favorite_keys:
+            self._favorite_keys = keys
+            storage.update_settings({"favorite_servers": keys})
+
+    def _on_subscriptions(self) -> None:
+        from .subscriptions_dialog import SubscriptionsDialog
+        dialog = SubscriptionsDialog(self.configs, self)
+        self._subscriptions_dialog = dialog
+        dialog.refresh_requested.connect(self._on_refresh_subscriptions)
+        dialog.import_requested.connect(self._on_import_subscription)
+        running = getattr(self, "_subs_refresher", None)
+        if running is not None:
+            dialog.set_busy(True)
+        try:
+            dialog.exec()
+        finally:
+            self._subscriptions_dialog = None
+
+    def _on_whats_new(self) -> None:
+        from .mascot import WhatsNewDialog
+        if WhatsNewDialog(self).exec():
+            storage.update_settings({"desktop_experience_seen": True})
+            self.home_page._welcome_seen = True
+            self._refresh_home()
+
     def _on_server_chosen(self, cfg: ProxyConfig) -> None:
         """"Connect" on the Servers tab (and "Save and connect" on the add
         page): make this server the one in use and bring the tunnel up on it.
@@ -1980,7 +2054,9 @@ class MainWindow(QMainWindow):
         if in_use:
             show_toast(self, tr("srv.del_connected_tip"), kind="info")
             return
+        before = list(self.configs)
         self.configs[:] = [c for c in self.configs if c.name != cfg.name]
+        self._reconcile_favorites(before)
         storage.save_configs(self.configs)
         self._tray_pings.pop(cfg.name, None)
         if self._active_config is not None and self._active_config.name == cfg.name:
@@ -2015,8 +2091,10 @@ class MainWindow(QMainWindow):
 
     def _on_add_page_saved(self, new_cfg: ProxyConfig) -> None:
         """A single server, parsed and named on the add page."""
+        before = list(self.configs)
         merged, _added, _updated = merge_with_prompt(self, self.configs, [new_cfg])
         self.configs[:] = merged
+        self._reconcile_favorites(before)
         storage.save_configs(self.configs)
         self._rebind_active_config()
         # As stored: under "keep both" the new server lives under its own name.
@@ -2063,12 +2141,18 @@ class MainWindow(QMainWindow):
             return
         from .sub_workers import SubscriptionsRefresh
         self.servers_page.set_refreshing(True)
+        dialog = getattr(self, "_subscriptions_dialog", None)
+        if dialog is not None:
+            dialog.set_busy(True)
         self._subs_refresher = SubscriptionsRefresh(urls, parent=self)
         self._subs_refresher.done.connect(self._on_subs_refreshed)
         self._subs_refresher.crashed.connect(self._on_subs_refresh_crashed)
         self._subs_refresher.start()
 
     def _on_subs_refresh_crashed(self, text: str) -> None:
+        dialog = getattr(self, "_subscriptions_dialog", None)
+        if dialog is not None:
+            dialog.set_busy(False)
         self._subs_refresher = None
         self.servers_page.set_refreshing(False)
         show_toast(self, tr("srv.refresh_failed", n=1, reason=one_line(text, 80)),
@@ -2080,21 +2164,32 @@ class MainWindow(QMainWindow):
         # New servers are added, a subscription's own servers are updated
         # (providers rotate addresses and keys), nothing is ever deleted — a
         # failed or partial fetch must not wipe a working list.
+        before = list(self.configs)
         merged, added, updated = merge_with_prompt(self, self.configs, agg["configs"])
         if added or updated:
             self.configs[:] = merged
             storage.save_configs(self.configs)
             self._rebind_active_config()
             self._refresh_tray_pings()
+        self._reconcile_favorites(before)
+        from ..core.desktop_experience import remember_subscription
+        for url, result in agg.get("results", []):
+            remember_subscription(url, result, before, self.configs)
         if agg["ok"] > 0:
             import time as _t
             changes = {"subscription_last_refresh": int(_t.time())}
-            if agg["userinfo"] is not None:
-                changes["subscription_userinfo"] = agg["userinfo"].to_dict()
+            current_url = storage.load_settings().get("subscription_url")
+            for url, result in agg.get("results", []):
+                if url == current_url:
+                    changes["subscription_userinfo"] = result.userinfo.to_dict() if result.userinfo else {}
             storage.update_settings(changes, fallback=self.manager.settings)
             self.settings_page.refresh_sub_info()
             self.home_page.refresh_sub_banner()
         self._refresh_home()
+        dialog = getattr(self, "_subscriptions_dialog", None)
+        if dialog is not None:
+            dialog.refresh()
+            dialog.set_busy(False)
         text = tr("srv.refresh_done", ok=agg["ok"], total=agg["total"], added=added, updated=updated)
         errors = agg["errors"]
         if errors:
@@ -2110,8 +2205,11 @@ class MainWindow(QMainWindow):
         self._goto("servers")
         # The source-aware merge: a subscription may update its own servers,
         # never silently another source's.
+        before = list(self.configs)
         merged, added, replaced = merge_with_prompt(self, self.configs, imported)
         self.configs[:] = merged
+        self._reconcile_favorites(before)
+        self.add_page.record_import_summary(before, self.configs)
         storage.save_configs(self.configs)
         self._rebind_active_config()
         # Same as a single add: freshly imported servers have no ping, so they
@@ -2227,6 +2325,7 @@ class MainWindow(QMainWindow):
         dlg = SitesDialog(self)
         if dlg.exec() != SitesDialog.Accepted:
             return
+        self.manager.update_settings(proxy_sites=storage.load_settings().get("proxy_sites", []))
         self.home_page.refresh_sites_count()
         self.settings_page.refresh_sites_count()
         if self.manager.is_connected():
@@ -2326,11 +2425,13 @@ class MainWindow(QMainWindow):
         storage so the picker, tray quick-connect, and home stay current.
         Toast the count so the user knows their list grew.
         """
-        self.configs = storage.load_configs()
+        before = list(self.configs)
+        self.configs[:] = storage.load_configs()
+        self._reconcile_favorites(before)
         self._rebind_active_config()
         self._refresh_home()
         self._refresh_tray_pings()
-        msg = (tr("mw.toast_sub_refreshed_one") if count == 1
+        msg = (tr("subs.auto_updated") if count == 0 else tr("mw.toast_sub_refreshed_one") if count == 1
                else tr("mw.toast_sub_refreshed_many", n=count))
         show_toast(
             self,

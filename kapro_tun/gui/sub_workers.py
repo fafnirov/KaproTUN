@@ -44,6 +44,7 @@ class SubscriptionsRefresh(Background):
         configs: list = []
         userinfo = None
         ok = 0
+        results = []
         errors: list[tuple] = []   # (url, FetchError)
         for url in self._urls:
             try:
@@ -51,11 +52,12 @@ class SubscriptionsRefresh(Background):
             except Exception as e:
                 errors.append((url, classify_fetch_error(e)))
                 continue
+            results.append((url, res))
             configs.extend(res.configs)
             # Keep the most recent traffic / expiry summary that says anything.
             if res.userinfo is not None and res.userinfo.summary():
                 userinfo = res.userinfo
             ok += 1
         payload = {"configs": configs, "userinfo": userinfo, "ok": ok,
-                   "errors": errors, "total": len(self._urls)}
+                   "errors": errors, "total": len(self._urls), "results": results}
         return lambda: self.done.emit(payload)

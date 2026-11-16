@@ -526,7 +526,7 @@ class InfoCard(QFrame):
         self.ip_hidden_row = _LinkRow("eye-off", tr("home.ip_hidden"))
         self.ip_hidden_row.clicked.connect(self.ip_setting_clicked)
         col.addWidget(self.ip_hidden_row)
-        self.sites_row = _LinkRow("route", tr("home.direct_sites"), last=True)
+        self.sites_row = _LinkRow("route", tr("route.sites"), last=True)
         self.sites_row.clicked.connect(self.sites_clicked)
         col.addWidget(self.sites_row)
         self.set_ip_enabled(True)
@@ -557,13 +557,10 @@ class EmptyCard(QFrame):
         super().__init__(parent)
         self.setObjectName("ktCard")
         col = QVBoxLayout(self)
-        col.setContentsMargins(tokens.SP_5, tokens.SP_6, tokens.SP_5, tokens.SP_6)
+        col.setContentsMargins(tokens.SP_5, tokens.SP_3, tokens.SP_5, tokens.SP_3)
         col.setSpacing(tokens.SP_2)
-        badge = QLabel()
-        badge.setObjectName("ktEmptyIcon")
-        badge.setFixedSize(56, 56)
-        glyph = IconLabel("globe", tokens.ICON_LG, "text_secondary", badge)
-        glyph.move(16, 16)
+        from .mascot import Mascot
+        badge = Mascot(tokens.SP_5 * 4)
         col.addWidget(badge, 0, Qt.AlignHCenter)
         col.addSpacing(tokens.SP_1)
         title = QLabel(title or tr("home.empty_title"))
@@ -599,6 +596,8 @@ class HomePage(QWidget):
     settings_clicked = Signal()      # "IP hidden" row, kill-switch notice
     logs_clicked = Signal()          # error notice
     add_clicked = Signal()           # empty state
+    favorite_chosen = Signal(object)
+    whats_new_clicked = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None, compact: bool = False):
         super().__init__(parent)
@@ -608,6 +607,7 @@ class HomePage(QWidget):
         self._has_config = False
         self._notice_target = ""
         self._fitting = False
+        self._welcome_seen = bool(storage.load_settings().get("desktop_experience_seen", False))
 
         col = QVBoxLayout(self)
         col.setContentsMargins(tokens.PAGE_PAD_X, tokens.SP_3, tokens.PAGE_PAD_X,
@@ -624,6 +624,35 @@ class HomePage(QWidget):
         self.server_card.clicked.connect(self._on_server_card)
         col.addWidget(self.server_card)
 
+        self.favorites = QWidget()
+        quick = QVBoxLayout(self.favorites)
+        quick.setContentsMargins(0, tokens.SP_2, 0, 0)
+        quick.setSpacing(tokens.SP_1)
+        header = QHBoxLayout()
+        self.favorites_label = ElidedLabel(tr("fav.title"))
+        self.favorites_label.setObjectName("ktHint")
+        header.addWidget(self.favorites_label, 1)
+        manage = kit.Button("", "ghost", icon="star", size="sm", tooltip=tr("fav.manage"))
+        manage.clicked.connect(self.card_clicked)
+        header.addWidget(manage)
+        quick.addLayout(header)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(tokens.SP_2)
+        self.favorite_buttons = []
+        for index in range(3):
+            button = kit.Button("", "secondary")
+            button.setCheckable(True)
+            button.setProperty("favorite", "true")
+            button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            button.setMinimumHeight(tokens.ROW_H_SM)
+            button.clicked.connect(lambda _checked=False, i=index: self._choose_favorite(i))
+            buttons.addWidget(button, 1)
+            self.favorite_buttons.append(button)
+        quick.addLayout(buttons)
+        self._favorites = []
+        self.favorites.hide()
+        col.addWidget(self.favorites)
+
         col.addStretch(1)
 
         self.circle = RingButton()
@@ -633,6 +662,10 @@ class HomePage(QWidget):
         col.addSpacing(tokens.SP_3H)
         self.status_label = StatusLine()
         col.addWidget(self.status_label)
+        self.stage_label = kit.label("", "hint", wrap=True)
+        self.stage_label.setAlignment(Qt.AlignCenter)
+        self.stage_label.hide()
+        col.addWidget(self.stage_label)
 
         col.addStretch(1)
 
@@ -707,6 +740,7 @@ class HomePage(QWidget):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        self._elide_favorites()
         self._fit()
 
     # --- what the main window drives ---------------------------------------
@@ -714,11 +748,13 @@ class HomePage(QWidget):
     def set_state(self, state: str, detail: str = "") -> None:
         state = cs.normalize(state)
         self._state = state
+        self._detail = detail
+        self.stage_label.setVisible(state in (cs.CONNECTING, cs.RECONNECTING))
         self.circle.set_state(state)
         self.circle.setEnabled(self._has_config and cs.spec(state).button_enabled)
         label = "" if self._has_config else tr("home.status_no_servers")
         self.status_label.set_state(state if self._has_config else cs.DISCONNECTED,
-                                    detail if self._has_config else "", label)
+                                    detail if self._has_config and state != cs.ERROR else "", label)
         if state != cs.CONNECTED:
             self.info_card.ip.set_value("")
             self.info_card.location.set_value("")
@@ -745,19 +781,72 @@ class HomePage(QWidget):
 
     def set_config(self, cfg: Optional[ProxyConfig]) -> None:
         self._has_config = cfg is not None
+        source = cfg.source if cfg is not None else ""
+        source_changed = source != getattr(self, "_source", "")
+        self._source = source
         self.server_card.set_config(cfg)
         self.info_card.setVisible(self._has_config)
         self.empty_card.setVisible(not self._has_config)
         self._protocol = cfg.protocol if cfg is not None else ""
-        self.set_state(self._state)
+        if source_changed:
+            self.refresh_sub_banner()
+        # A periodic config refresh must not erase the timer / last error.
+        self.set_state(self._state, getattr(self, "_detail", ""))
 
     def set_ping(self, ms: object, known: bool = True) -> None:
         """Latency of the server in use, for the chip in the server card."""
         if self._has_config:
             self.server_card.ping.set_ping(ms, self._protocol, known)
 
+    def set_stage(self, stage: str) -> None:
+        self.stage_label.setText(tr("stage." + stage))
+        self.stage_label.setVisible(self._state in (cs.CONNECTING, cs.RECONNECTING))
+
     def refresh_sites_count(self) -> None:
-        self.info_card.set_sites_count(len(storage.load_sites()))
+        self.info_card.set_sites_count(len(storage.load_sites()) + len(storage.load_settings().get("proxy_sites", []) or []))
+
+    def set_favorites(self, configs, pings, measured_at=0, busy=False, active_name="", connected=False):
+        from ..core.subscription import humanize_ago
+        self._favorites = list(configs)[:3]
+        self.favorites.setVisible(bool(self._favorites))
+        age = humanize_ago(measured_at) if measured_at else tr("fav.not_measured")
+        self.favorites_label.setText(tr("fav.checked", age=age))
+        self.favorites_label.setToolTip(tr("fav.checked", age=age))
+        for i, button in enumerate(self.favorite_buttons):
+            button.setVisible(i < len(self._favorites))
+            if i >= len(self._favorites):
+                continue
+            cfg = self._favorites[i]
+            name = strip_flag(cfg.name)
+            ping = pings.get(cfg.name)
+            latency = (tr("picker.ping_udp") if cfg.protocol in UDP_ONLY else
+                       tr("picker.ping_ms", ms=ping) if ping is not None and ping >= 0 else
+                       tr("picker.ping_unreachable") if cfg.name in pings else "—")
+            button.setProperty("server_name", name)
+            button.setProperty("latency", latency)
+            button.setProperty("active", connected and cfg.name == active_name)
+            button.setChecked(connected and cfg.name == active_name)
+            button.setToolTip(f"{name}\n{latency} · {age}")
+            button.setAccessibleName(tr("fav.connect", name=name, ping=latency))
+            button.setEnabled(not busy)
+        self._elide_favorites()
+        self._fit()
+
+    def _elide_favorites(self):
+        count = len(self._favorites)
+        if not count:
+            return
+        width = (self.width() - 2 * tokens.PAGE_PAD_X - (count - 1) * tokens.SP_2) // count - tokens.SP_4 - 4
+        for button in self.favorite_buttons[:count]:
+            short = button.fontMetrics().elidedText(button.property("server_name") or "", Qt.ElideRight, max(1, width))
+            button.setText(f"{short}\n{button.property('latency') or ''}")
+
+    def _choose_favorite(self, index):
+        button = self.favorite_buttons[index]
+        active = bool(button.property("active"))
+        button.setChecked(active)
+        if not active:
+            self.favorite_chosen.emit(self._favorites[index])
 
     def refresh_ip_setting(self) -> None:
         self.info_card.set_ip_enabled(bool(storage.load_settings().get("public_ip_probe", True)))
@@ -766,7 +855,11 @@ class HomePage(QWidget):
         """Shown only when the subscription is running out or has expired,
         per the provider's last Subscription-Userinfo."""
         info = None
-        data = storage.load_settings().get("subscription_userinfo")
+        settings = storage.load_settings()
+        data = settings.get("subscription_userinfo")
+        status = (settings.get("subscription_status") or {}).get(getattr(self, "_source", ""))
+        if status is not None:
+            data = status.get("userinfo")
         if data:
             try:
                 from ..core.subscription import SubscriptionInfo
@@ -796,17 +889,23 @@ class HomePage(QWidget):
             self.notice.set_content("danger", "shield-alert", tr("home.notice_ks_title"),
                                     tr("home.notice_ks_text"), tr("wid.nav_settings"))
         elif self._has_config and self._state == cs.ERROR:
-            self._notice_target = "logs"
+            self._notice_target = "retry"
             self.notice.set_content("danger", "alert-circle",
-                                    detail or tr("home.notice_err_title"),
-                                    tr("home.notice_err_text"), tr("home.notice_err_action"))
+                                    tr("home.notice_err_title"),
+                                    detail or tr("home.notice_err_text"), tr("btn.retry"))
+        elif self._has_config and not self._welcome_seen and self._state == cs.DISCONNECTED:
+            self._notice_target = "whats_new"
+            self.notice.set_content("neutral", "info", tr("mascot.whats_new"),
+                                    tr("mascot.intro"), tr("mascot.show"))
         else:
             self._notice_target = ""
         self.notice.setVisible(bool(self._notice_target))
         self._notice_gap.setVisible(bool(self._notice_target))
 
     def _on_notice_action(self) -> None:
-        (self.settings_clicked if self._notice_target == "settings" else self.logs_clicked).emit()
+        (self.settings_clicked if self._notice_target == "settings" else
+         self.whats_new_clicked if self._notice_target == "whats_new" else
+         self.connect_clicked if self._notice_target == "retry" else self.logs_clicked).emit()
 
     def _on_server_card(self) -> None:
         (self.card_clicked if self._has_config else self.add_clicked).emit()
